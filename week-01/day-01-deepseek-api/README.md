@@ -1,26 +1,44 @@
 # День 1. Первый запрос к LLM через API
 
-Минимальный Web-интерфейс отправляет введённый текст в DeepSeek API и показывает ответ модели.
+Небольшое Web-приложение на Python и Streamlit отправляет запрос в DeepSeek API и показывает ответ модели.
 
-## Запуск в Windows PowerShell
+## Что реализовано
 
-Откройте PowerShell в папке этого задания и выполните:
+- ввод запроса через Web-интерфейс;
+- подключение к DeepSeek API;
+- индикатор «DeepSeek думает...» во время ожидания;
+- потоковый вывод ответа по мере его получения;
+- безопасное хранение API-ключа в `.env`;
+- запуск приложения двойным щелчком через `run_app.bat`.
+
+## Первый запуск
+
+Откройте PowerShell в папке проекта и выполните:
 
 ```powershell
 py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 notepad .env
 ```
 
-В открывшемся файле замените `your_api_key_here` своим ключом DeepSeek, сохраните файл и запустите приложение:
+В открывшемся файле замените `your_api_key_here` своим ключом DeepSeek и сохраните файл.
 
-```powershell
-streamlit run app.py
+## Запуск приложения
+
+После первоначальной настройки запустите двойным щелчком:
+
+```text
+run_app.bat
 ```
 
-Откроется страница `http://localhost:8501`.
+Либо выполните в PowerShell:
 
-> Файл `.env` содержит секретный API-ключ и не попадёт в GitHub благодаря `.gitignore`.
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+Приложение откроется по адресу `http://localhost:8501`.
+
+> Файл `.env` содержит секретный API-ключ и не загружается в GitHub благодаря `.gitignore`.
 
