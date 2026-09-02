@@ -4,5 +4,5 @@
 
 ## Структура
 
-- `week-01/day-01-deepseek-api` — первый запрос к LLM через DeepSeek API.
+- `week-01/llm-api-project` — развивающийся проект первой недели: запросы к LLM через DeepSeek API (День 1 и День 2).
 
