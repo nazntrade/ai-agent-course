@@ -20,7 +20,14 @@
       "**/.env.example": "allow"
     },
     "bash": {
-      "*": "ask",
+      "*": "allow",
+      "git reset --hard*": "deny",
+      "git clean*": "deny",
+      "Remove-Item*": "ask",
+      "rm *": "ask",
+      "rmdir *": "ask",
+      "del *": "ask",
+      "*pip install*": "ask",
       "git commit*": "deny",
       "git push*": "deny",
       "git status*": "allow",
