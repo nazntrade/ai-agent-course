@@ -19,6 +19,15 @@
       ".env.example": "allow",
       "**/.env.example": "allow"
     },
+    "edit": {
+      "*": "allow",
+      ".env": "deny",
+      "**/.env": "deny",
+      ".env.*": "deny",
+      "**/.env.*": "deny",
+      ".env.example": "allow",
+      "**/.env.example": "allow"
+    },
     "bash": {
       "*": "allow",
       "git reset --hard*": "deny",
