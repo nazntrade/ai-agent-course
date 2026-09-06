@@ -10,6 +10,7 @@ day = st.radio(
     [label for label, _ in DAYS],
     horizontal=True,
     key="day_selector",
+    index=len(DAYS) - 1,
 )
 
 for label, render in DAYS:
