@@ -62,6 +62,12 @@
 - Использовать существующие зависимости; новые добавлять только с обоснованием.
 - Не превращать эти принципы в формальные требования к количеству классов, слоёв, файлов или строк; не усложнять маленькие учебные задания ради демонстрации архитектурных паттернов.
 
+## Code language
+- All comments, docstrings, TODO/FIXME notes, developer-facing error messages, and technical documentation inside source code must be written in English.
+- Use clear English names for classes, functions, variables, modules, tests, and configuration keys.
+- Do not add comments for obvious code. A comment must explain why a decision exists, a non-obvious constraint, or a potential risk — not repeat what the code already says.
+- User-facing interface text and end-user README instructions may be written in Russian.
+
 ## Тестирование
 - Автоматические проверки внешних API выполнять с фиктивным ключом и моками, без реальных сетевых вызовов.
 - Не удалять переменную API-ключа перед тестом, если load_dotenv может повторно загрузить настоящий ключ из .env.
