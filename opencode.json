@@ -7,9 +7,6 @@
     "prune": true
   },
   "permission": {
-    "external_directory": {
-      "*": "deny"
-    },
     "read": {
       "*": "allow",
       ".env": "deny",
@@ -28,17 +25,36 @@
       ".env.example": "allow",
       "**/.env.example": "allow"
     },
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "lsp": "allow",
+    "skill": "allow",
+    "todowrite": "allow",
+    "task": "allow",
+    "external_directory": {
+      "*": "deny"
+    },
     "bash": {
       "*": "allow",
       "git reset --hard*": "deny",
       "git clean*": "deny",
-      "Remove-Item*": "ask",
-      "rm *": "ask",
-      "rmdir *": "ask",
-      "del *": "ask",
-      "*pip install*": "ask",
+      "git restore*": "deny",
+      "git checkout*": "deny",
+      "git revert*": "deny",
+      "git rebase*": "deny",
+      "git cherry-pick*": "deny",
+      "git merge*": "deny",
+      "git pull*": "deny",
       "git commit*": "deny",
       "git push*": "deny",
+      "Remove-Item *": "ask",
+      "rm *": "ask",
+      "del *": "ask",
+      "rmdir *": "ask",
+      "rd *": "ask",
+      "Move-Item *": "ask",
+      "Rename-Item *": "ask",
       "git status*": "allow",
       "git diff*": "allow",
       "git log*": "allow",

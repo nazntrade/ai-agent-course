@@ -5,3 +5,8 @@ __pycache__/
 .idea/
 .vscode/
 
+# Local SQLite databases (chat/agent state)
+*.db
+*.db-wal
+*.db-shm
+
