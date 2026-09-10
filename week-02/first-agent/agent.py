@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from pricing import estimate_cost
+from stats import AskResult, TurnStats
+from tokens import estimate_tokens
 
 BASE_URL = "https://api.deepseek.com"
 API_KEY_ENV = "DEEPSEEK_API_KEY"
@@ -35,21 +40,108 @@ class AgentConfig:
     temperature: float = 0.2
     max_tokens: int = 1500
     stream: bool = True
+    demo_context_limit: int | None = None
 
 
-def _usage_parts(usage_obj) -> tuple[int | None, int | None]:
-    """Extract (prompt_tokens, completion_tokens) from a usage-like object.
+class ContextLimitError(Exception):
+    """Raised before the API call when the demo context limit is exceeded.
 
-    Returns ``(None, None)`` when the object is absent or carries no token
-    counts, so a provider that does not report usage is never invented.
+    The demo pre-check is a local estimate: it never reaches the provider and
+    leaves both the in-memory history and the database untouched.
+    """
+
+    def __init__(self, estimated_input_tokens, limit_tokens, requested_output_tokens):
+        self.estimated_input_tokens = estimated_input_tokens
+        self.limit_tokens = limit_tokens
+        self.requested_output_tokens = requested_output_tokens
+        super().__init__(
+            "Превышен демо-лимит контекста: оценка входа "
+            f"{estimated_input_tokens} ток. + запрошенный ответ "
+            f"{requested_output_tokens} ток. = "
+            f"{estimated_input_tokens + requested_output_tokens} ток., "
+            f"что больше лимита {limit_tokens} ток. "
+            "Сократите историю или запрос, либо увеличьте лимит в настройках."
+        )
+
+
+class ApiContextOverflowError(Exception):
+    """Raised when the provider rejects the request because the context is too long."""
+
+    def __init__(self, original_message):
+        self.original_message = original_message
+        super().__init__(
+            "Контекст превысил лимит модели на стороне провайдера. "
+            f"Сообщение провайдера: {original_message}"
+        )
+
+
+def _extract_usage(usage_obj) -> dict:
+    """Normalize a usage object (or dict) into a flat dict of token counts.
+
+    Supports both attribute and dict access, plus the
+    ``prompt_tokens_details.cached_tokens`` fallback some providers use.
+    Missing fields are omitted rather than invented.
     """
     if usage_obj is None:
-        return None, None
-    prompt = getattr(usage_obj, "prompt_tokens", None)
-    completion = getattr(usage_obj, "completion_tokens", None)
-    if prompt is None and completion is None:
-        return None, None
-    return prompt, completion
+        return {}
+
+    def field(name):
+        if isinstance(usage_obj, dict):
+            return usage_obj.get(name)
+        return getattr(usage_obj, name, None)
+
+    def to_int(value):
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    prompt = to_int(field("prompt_tokens"))
+    completion = to_int(field("completion_tokens"))
+    total = to_int(field("total_tokens"))
+    hit = to_int(field("prompt_cache_hit_tokens"))
+    miss = to_int(field("prompt_cache_miss_tokens"))
+
+    details = field("prompt_tokens_details")
+    cached = None
+    if details is not None:
+        if isinstance(details, dict):
+            cached = to_int(details.get("cached_tokens"))
+        else:
+            cached = to_int(getattr(details, "cached_tokens", None))
+
+    if hit is None and cached is not None:
+        hit = cached
+        if miss is None and prompt is not None:
+            miss = prompt - cached
+
+    result = {}
+    if prompt is not None:
+        result["prompt_tokens"] = prompt
+    if completion is not None:
+        result["completion_tokens"] = completion
+    if total is not None:
+        result["total_tokens"] = total
+    if hit is not None:
+        result["prompt_cache_hit_tokens"] = hit
+    if miss is not None:
+        result["prompt_cache_miss_tokens"] = miss
+
+    return result
+
+
+def _is_context_overflow(exc) -> bool:
+    """Detect a provider context-length error by duck typing only.
+
+    Avoids importing ``openai.BadRequestError`` so tests can pass a plain fake
+    exception carrying ``status_code``.
+    """
+    return (
+        getattr(exc, "status_code", None) == 400
+        and "context" in str(exc).lower()
+    )
 
 
 class ChatAgent:
@@ -62,8 +154,7 @@ class ChatAgent:
         load_config(chat_id) -> dict
         save_config(chat_id, config) -> None
         load_messages(chat_id) -> list[{"role", "content"}]
-        save_turn(chat_id, user_text, assistant_text,
-                  input_tokens=None, output_tokens=None) -> None
+        save_turn(chat_id, user_text, assistant_text, stats=None) -> None
 
     When ``store`` is None the agent keeps a pure in-memory history.
     """
@@ -98,19 +189,34 @@ class ChatAgent:
         if self._store is not None:
             self._store.save_config(self._chat_id, config)
 
-    def ask(self, user_message: str, on_chunk=None) -> str:
-        """Send a message to the LLM and return the full answer.
+    def ask(self, user_message: str, on_chunk=None) -> AskResult:
+        """Send a message to the LLM and return the answer plus its statistics.
 
         Supports both streaming and non-streaming modes:
         - ``stream=True``: iterate chunks, invoke ``on_chunk`` with the
-          accumulated text, and capture usage from the final chunk.
+          accumulated text, and capture usage/finish reason from the chunks.
         - ``stream=False``: single response; ``on_chunk`` is not called.
 
-        On any error the added user message is rolled back, nothing is written
-        to the store, and the exception is re-raised.
+        The demo context limit is checked before the API call and before any
+        history/database mutation. On any API error the added user message is
+        rolled back; a provider context-overflow error is mapped to
+        :class:`ApiContextOverflowError`.
         """
         if not user_message.strip():
             raise ValueError("Message must not be empty")
+
+        # Demo pre-check runs before the API call and before mutating history.
+        messages = self._history + [{"role": "user", "content": user_message}]
+        est_input = sum(estimate_tokens(message["content"]) for message in messages)
+        if (
+            self._config.demo_context_limit is not None
+            and est_input + self._config.max_tokens > self._config.demo_context_limit
+        ):
+            raise ContextLimitError(
+                estimated_input_tokens=est_input,
+                limit_tokens=self._config.demo_context_limit,
+                requested_output_tokens=self._config.max_tokens,
+            )
 
         self._history.append({"role": "user", "content": user_message})
 
@@ -122,8 +228,8 @@ class ChatAgent:
             "stream": self._config.stream,
         }
 
-        input_tokens = None
-        output_tokens = None
+        usage_map: dict = {}
+        finish_reason = None
 
         try:
             if self._config.stream:
@@ -131,9 +237,9 @@ class ChatAgent:
                 response = self._client.chat.completions.create(**payload)
                 collected = []
                 for chunk in response:
-                    usage = getattr(chunk, "usage", None)
-                    if usage is not None:
-                        input_tokens, output_tokens = _usage_parts(usage)
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage is not None:
+                        usage_map = _extract_usage(chunk_usage)
                     if not chunk.choices:
                         continue
                     choice = chunk.choices[0]
@@ -141,27 +247,42 @@ class ChatAgent:
                         collected.append(choice.delta.content)
                         if on_chunk is not None:
                             on_chunk("".join(collected))
+                    if getattr(choice, "finish_reason", None) is not None:
+                        finish_reason = choice.finish_reason
                 answer = "".join(collected)
             else:
                 response = self._client.chat.completions.create(**payload)
                 answer = response.choices[0].message.content or ""
-                input_tokens, output_tokens = _usage_parts(getattr(response, "usage", None))
-        except Exception:
+                usage_map = _extract_usage(getattr(response, "usage", None))
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+        except Exception as exc:
             self._history.pop()
+            if _is_context_overflow(exc):
+                raise ApiContextOverflowError(str(exc)) from exc
             raise
+
+        stats = TurnStats(
+            user_message_tokens_est=estimate_tokens(user_message),
+            request_tokens=usage_map.get("prompt_tokens"),
+            response_tokens=usage_map.get("completion_tokens"),
+            total_tokens=usage_map.get("total_tokens"),
+            prompt_cache_hit_tokens=usage_map.get("prompt_cache_hit_tokens"),
+            prompt_cache_miss_tokens=usage_map.get("prompt_cache_miss_tokens"),
+            finish_reason=finish_reason,
+            assistant_tokens_est=estimate_tokens(answer),
+        )
+
+        cost = estimate_cost(self._config.model, stats, datetime.now(timezone.utc))
+        stats.cost_usd = cost.cost_usd
+        stats.cost_assumption = cost.assumption
 
         self._history.append({"role": "assistant", "content": answer})
         if self._store is not None:
             try:
-                self._store.save_turn(
-                    self._chat_id,
-                    user_message,
-                    answer,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                )
+                self._store.save_turn(self._chat_id, user_message, answer, stats=stats)
             except Exception:
                 self._history.pop()
                 self._history.pop()
                 raise
-        return answer
+
+        return AskResult(text=answer, stats=stats)

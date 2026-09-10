@@ -1,4 +1,4 @@
-"""SQLite persistence for chats, messages and app state.
+"""SQLite persistence for chats, messages, turns and app state.
 
 The module is independent from ``agent.py``: it accepts duck-typed config
 objects and exposes plain data through a small public API. Each public method
@@ -12,22 +12,28 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from stats import TurnStats
+from tokens import estimate_tokens
+
 DEFAULT_CHAT_TITLE = "Новый чат"
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "chat_history.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    title          TEXT    NOT NULL,
-    system_prompt  TEXT    NOT NULL,
-    model          TEXT    NOT NULL,
-    temperature    REAL    NOT NULL,
-    max_tokens     INTEGER NOT NULL,
-    stream         INTEGER NOT NULL,
-    input_tokens   INTEGER,
-    output_tokens  INTEGER,
-    created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    title               TEXT    NOT NULL,
+    system_prompt       TEXT    NOT NULL,
+    model               TEXT    NOT NULL,
+    temperature         REAL    NOT NULL,
+    max_tokens          INTEGER NOT NULL,
+    stream              INTEGER NOT NULL,
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    demo_context_limit  INTEGER,
+    history_tokens_est  INTEGER,
+    cost_usd            REAL,
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -39,11 +45,36 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id);
 
+CREATE TABLE IF NOT EXISTS turns (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id                 INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_message_id         INTEGER NOT NULL,
+    assistant_message_id    INTEGER NOT NULL,
+    user_message_tokens_est INTEGER,
+    request_tokens          INTEGER,
+    response_tokens         INTEGER,
+    total_tokens            INTEGER,
+    prompt_cache_hit_tokens INTEGER,
+    prompt_cache_miss_tokens INTEGER,
+    finish_reason           TEXT,
+    cost_usd                REAL,
+    cost_assumption         TEXT,
+    created_at              TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_turns_chat ON turns(chat_id, id);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 """
+
+# Columns added after the Day 7 schema; the migration adds whichever are missing.
+_NEW_CHAT_COLUMNS = {
+    "demo_context_limit": "INTEGER",
+    "history_tokens_est": "INTEGER",
+    "cost_usd": "REAL",
+}
 
 
 @dataclass
@@ -53,10 +84,44 @@ class ChatSummary:
     id: int
     title: str
     updated_at: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    history_tokens_est: int | None = None
+    cost_usd: float | None = None
+    turns_count: int = 0
+
+
+@dataclass
+class StoredMessage:
+    """A persisted message joined with the statistics of its turn (if any)."""
+
+    role: str
+    content: str
+    turn: TurnStats | None = None
+
+
+@dataclass
+class ChatStats:
+    """Aggregated usage/cost counters for a single chat."""
+
+    input_tokens: int | None
+    output_tokens: int | None
+    history_tokens_est: int | None
+    cost_usd: float | None
+    turns_count: int
+
+
+@dataclass
+class TurnRecord:
+    """A persisted turn with its creation time and statistics."""
+
+    id: int
+    created_at: str
+    stats: TurnStats
 
 
 class ChatStore:
-    """SQLite-backed store for chats, messages and last-selected state."""
+    """SQLite-backed store for chats, messages, turns and last-selected state."""
 
     def __init__(self, db_path=DEFAULT_DB_PATH):
         self._db_path = Path(db_path)
@@ -73,20 +138,65 @@ class ChatStore:
     def _init_db(self) -> None:
         with closing(self._connect()) as conn:
             conn.executescript(_SCHEMA)
+            # Migration: add columns introduced after the Day 7 schema without
+            # touching existing chats/messages. Idempotent across repeated opens.
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(chats)").fetchall()
+            }
+            for name, decl in _NEW_CHAT_COLUMNS.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE chats ADD COLUMN {name} {decl}")
+            self._backfill_history_tokens_est(conn)
             conn.commit()
+
+    def _backfill_history_tokens_est(self, conn) -> None:
+        """Fill history_tokens_est for NULL chats that already have messages."""
+        rows = conn.execute(
+            "SELECT id FROM chats WHERE history_tokens_est IS NULL"
+        ).fetchall()
+        for (chat_id,) in rows:
+            messages = conn.execute(
+                "SELECT content FROM messages WHERE chat_id = ?", (chat_id,)
+            ).fetchall()
+            if not messages:
+                continue
+            total = sum(estimate_tokens(content) for (content,) in messages)
+            conn.execute(
+                "UPDATE chats SET history_tokens_est = ? WHERE id = ?",
+                (total, chat_id),
+            )
 
     def list_chats(self) -> list[ChatSummary]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT id, title, updated_at FROM chats ORDER BY updated_at DESC, id DESC"
+                """
+                SELECT c.id, c.title, c.updated_at,
+                       c.input_tokens, c.output_tokens, c.history_tokens_est, c.cost_usd,
+                       (SELECT COUNT(*) FROM turns t WHERE t.chat_id = c.id) AS turns_count
+                FROM chats c
+                ORDER BY c.updated_at DESC, c.id DESC
+                """
             ).fetchall()
-        return [ChatSummary(id=row[0], title=row[1], updated_at=row[2]) for row in rows]
+        return [
+            ChatSummary(
+                id=row[0],
+                title=row[1],
+                updated_at=row[2],
+                input_tokens=row[3],
+                output_tokens=row[4],
+                history_tokens_est=row[5],
+                cost_usd=row[6],
+                turns_count=row[7],
+            )
+            for row in rows
+        ]
 
     def create_chat(self, config) -> int:
         with closing(self._connect()) as conn:
             cursor = conn.execute(
-                "INSERT INTO chats (title, system_prompt, model, temperature, max_tokens, stream) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chats (title, system_prompt, model, temperature, "
+                "max_tokens, stream, demo_context_limit) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     DEFAULT_CHAT_TITLE,
                     config.system_prompt,
@@ -94,6 +204,7 @@ class ChatStore:
                     config.temperature,
                     config.max_tokens,
                     int(config.stream),
+                    getattr(config, "demo_context_limit", None),
                 ),
             )
             conn.commit()
@@ -102,8 +213,8 @@ class ChatStore:
     def load_config(self, chat_id: int) -> dict:
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT system_prompt, model, temperature, max_tokens, stream "
-                "FROM chats WHERE id = ?",
+                "SELECT system_prompt, model, temperature, max_tokens, stream, "
+                "demo_context_limit FROM chats WHERE id = ?",
                 (chat_id,),
             ).fetchone()
         if row is None:
@@ -114,19 +225,22 @@ class ChatStore:
             "temperature": row[2],
             "max_tokens": row[3],
             "stream": bool(row[4]),
+            "demo_context_limit": row[5],
         }
 
     def save_config(self, chat_id: int, config) -> None:
         with closing(self._connect()) as conn:
             conn.execute(
                 "UPDATE chats SET system_prompt = ?, model = ?, temperature = ?, "
-                "max_tokens = ?, stream = ?, updated_at = datetime('now') WHERE id = ?",
+                "max_tokens = ?, stream = ?, demo_context_limit = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
                 (
                     config.system_prompt,
                     config.model,
                     config.temperature,
                     config.max_tokens,
                     int(config.stream),
+                    getattr(config, "demo_context_limit", None),
                     chat_id,
                 ),
             )
@@ -140,35 +254,151 @@ class ChatStore:
             ).fetchall()
         return [{"role": row[0], "content": row[1]} for row in rows]
 
+    def load_history(self, chat_id: int) -> list[StoredMessage]:
+        """Return messages joined with their turn stats, ordered by message id."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT m.role, m.content, t.id,
+                       t.user_message_tokens_est, t.request_tokens, t.response_tokens,
+                       t.total_tokens, t.prompt_cache_hit_tokens,
+                       t.prompt_cache_miss_tokens, t.finish_reason,
+                       t.cost_usd, t.cost_assumption
+                FROM messages m
+                LEFT JOIN turns t
+                    ON t.user_message_id = m.id OR t.assistant_message_id = m.id
+                WHERE m.chat_id = ?
+                ORDER BY m.id
+                """,
+                (chat_id,),
+            ).fetchall()
+
+        messages = []
+        for row in rows:
+            role, content, turn_id = row[0], row[1], row[2]
+            if turn_id is None:
+                turn = None
+            else:
+                turn = TurnStats(
+                    user_message_tokens_est=row[3],
+                    request_tokens=row[4],
+                    response_tokens=row[5],
+                    total_tokens=row[6],
+                    prompt_cache_hit_tokens=row[7],
+                    prompt_cache_miss_tokens=row[8],
+                    finish_reason=row[9],
+                    cost_usd=row[10],
+                    cost_assumption=row[11],
+                )
+            messages.append(StoredMessage(role=role, content=content, turn=turn))
+        return messages
+
+    def list_turns(self, chat_id: int) -> list[TurnRecord]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, user_message_tokens_est, request_tokens,
+                       response_tokens, total_tokens, prompt_cache_hit_tokens,
+                       prompt_cache_miss_tokens, finish_reason, cost_usd,
+                       cost_assumption
+                FROM turns WHERE chat_id = ? ORDER BY id
+                """,
+                (chat_id,),
+            ).fetchall()
+        return [
+            TurnRecord(
+                id=row[0],
+                created_at=row[1],
+                stats=TurnStats(
+                    user_message_tokens_est=row[2],
+                    request_tokens=row[3],
+                    response_tokens=row[4],
+                    total_tokens=row[5],
+                    prompt_cache_hit_tokens=row[6],
+                    prompt_cache_miss_tokens=row[7],
+                    finish_reason=row[8],
+                    cost_usd=row[9],
+                    cost_assumption=row[10],
+                ),
+            )
+            for row in rows
+        ]
+
     def save_turn(
         self,
         chat_id: int,
         user_text: str,
         assistant_text: str,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
+        stats: TurnStats | None = None,
     ) -> None:
-        """Persist one user/assistant exchange atomically and bump usage/title."""
+        """Persist one user/assistant exchange atomically and bump chat counters."""
+        stats = stats if stats is not None else TurnStats()
         with closing(self._connect()) as conn:
             try:
-                conn.execute(
+                user_cursor = conn.execute(
                     "INSERT INTO messages (chat_id, role, content) VALUES (?, 'user', ?)",
                     (chat_id, user_text),
                 )
-                conn.execute(
+                user_id = user_cursor.lastrowid
+                assistant_cursor = conn.execute(
                     "INSERT INTO messages (chat_id, role, content) VALUES (?, 'assistant', ?)",
                     (chat_id, assistant_text),
                 )
+                assistant_id = assistant_cursor.lastrowid
 
-                if input_tokens is not None:
+                conn.execute(
+                    "INSERT INTO turns (chat_id, user_message_id, assistant_message_id, "
+                    "user_message_tokens_est, request_tokens, response_tokens, total_tokens, "
+                    "prompt_cache_hit_tokens, prompt_cache_miss_tokens, finish_reason, "
+                    "cost_usd, cost_assumption) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        chat_id,
+                        user_id,
+                        assistant_id,
+                        stats.user_message_tokens_est,
+                        stats.request_tokens,
+                        stats.response_tokens,
+                        stats.total_tokens,
+                        stats.prompt_cache_hit_tokens,
+                        stats.prompt_cache_miss_tokens,
+                        stats.finish_reason,
+                        stats.cost_usd,
+                        stats.cost_assumption,
+                    ),
+                )
+
+                if stats.request_tokens is not None:
                     conn.execute(
-                        "UPDATE chats SET input_tokens = COALESCE(input_tokens, 0) + ? WHERE id = ?",
-                        (input_tokens, chat_id),
+                        "UPDATE chats SET input_tokens = COALESCE(input_tokens, 0) + ? "
+                        "WHERE id = ?",
+                        (stats.request_tokens, chat_id),
                     )
-                if output_tokens is not None:
+                if stats.response_tokens is not None:
                     conn.execute(
-                        "UPDATE chats SET output_tokens = COALESCE(output_tokens, 0) + ? WHERE id = ?",
-                        (output_tokens, chat_id),
+                        "UPDATE chats SET output_tokens = COALESCE(output_tokens, 0) + ? "
+                        "WHERE id = ?",
+                        (stats.response_tokens, chat_id),
+                    )
+
+                # Estimated unique history: exact response size when available,
+                # otherwise the local assistant estimate.
+                history_est = stats.user_message_tokens_est or 0
+                if stats.response_tokens is not None:
+                    history_est += stats.response_tokens
+                else:
+                    history_est += stats.assistant_tokens_est or 0
+                conn.execute(
+                    "UPDATE chats SET history_tokens_est = "
+                    "COALESCE(history_tokens_est, 0) + ? WHERE id = ?",
+                    (history_est, chat_id),
+                )
+
+                if stats.cost_usd is not None:
+                    conn.execute(
+                        "UPDATE chats SET cost_usd = COALESCE(cost_usd, 0) + ? "
+                        "WHERE id = ?",
+                        (stats.cost_usd, chat_id),
                     )
 
                 conn.execute(
@@ -212,6 +442,26 @@ class ChatStore:
         if row is None:
             raise KeyError(f"chat {chat_id} not found")
         return {"input_tokens": row[0], "output_tokens": row[1]}
+
+    def get_chat_stats(self, chat_id: int) -> ChatStats:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT input_tokens, output_tokens, history_tokens_est, cost_usd "
+                "FROM chats WHERE id = ?",
+                (chat_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"chat {chat_id} not found")
+            turns_count = conn.execute(
+                "SELECT COUNT(*) FROM turns WHERE chat_id = ?", (chat_id,)
+            ).fetchone()[0]
+        return ChatStats(
+            input_tokens=row[0],
+            output_tokens=row[1],
+            history_tokens_est=row[2],
+            cost_usd=row[3],
+            turns_count=turns_count,
+        )
 
     def get_last_selected_id(self) -> int | None:
         with closing(self._connect()) as conn:

@@ -4,7 +4,12 @@ import unittest
 from dataclasses import asdict
 from types import SimpleNamespace
 
-from agent import AgentConfig, ChatAgent
+from agent import (
+    AgentConfig,
+    ApiContextOverflowError,
+    ChatAgent,
+    ContextLimitError,
+)
 from storage import ChatStore
 
 
@@ -25,14 +30,32 @@ def make_usage(prompt_tokens, completion_tokens):
     return SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
 
 
-def make_response(content, usage=None):
+def make_full_usage(prompt, completion, total=None, hit=None, miss=None):
+    """Build a usage object with optional cache/total fields."""
+    usage = make_usage(prompt, completion)
+    if total is not None:
+        usage.total_tokens = total
+    if hit is not None:
+        usage.prompt_cache_hit_tokens = hit
+    if miss is not None:
+        usage.prompt_cache_miss_tokens = miss
+    return usage
+
+
+def make_response(content, usage=None, finish_reason=None):
     """Build a non-stream response: choices[0].message.content (+ optional usage)."""
     message = SimpleNamespace(content=content)
-    choice = SimpleNamespace(message=message)
+    choice = SimpleNamespace(message=message, finish_reason=finish_reason)
     response = SimpleNamespace(choices=[choice])
     if usage is not None:
         response.usage = usage
     return response
+
+
+class FakeContextOverflowError(Exception):
+    def __init__(self):
+        self.status_code = 400
+        super().__init__("This model's maximum context length is 8192 tokens")
 
 
 class FakeChat:
@@ -89,8 +112,8 @@ class ChatAgentTest(unittest.TestCase):
     def test_full_assistant_answer_joined_from_chunks(self):
         client = FakeClient(chunks=chunks_of(["При", "вет", ", ", "мир", "!"]))
         agent = ChatAgent(client)
-        answer = agent.ask("Привет")
-        self.assertEqual(answer, "Привет, мир!")
+        result = agent.ask("Привет")
+        self.assertEqual(result.text, "Привет, мир!")
         self.assertEqual(agent.history[-1]["role"], "assistant")
         self.assertEqual(agent.history[-1]["content"], "Привет, мир!")
 
@@ -162,8 +185,8 @@ class ChatAgentTest(unittest.TestCase):
     def test_non_stream_returns_full_answer(self):
         client = FakeClient(response=make_response("Полный ответ", usage=make_usage(10, 20)))
         agent = ChatAgent(client, config=AgentConfig(stream=False))
-        answer = agent.ask("Привет")
-        self.assertEqual(answer, "Полный ответ")
+        result = agent.ask("Привет")
+        self.assertEqual(result.text, "Полный ответ")
         self.assertEqual(agent.history[-1]["role"], "assistant")
         self.assertEqual(agent.history[-1]["content"], "Полный ответ")
 
@@ -172,6 +195,16 @@ class ChatAgentTest(unittest.TestCase):
         agent = ChatAgent(client)
         agent.ask("Привет")
         self.assertEqual(client.last_kwargs["stream_options"], {"include_usage": True})
+
+    def test_stream_handles_final_usage_chunk_without_choices(self):
+        chunks = [make_chunk("При"), make_chunk("вет")]
+        usage = make_usage(7, 3)
+        client = FakeClient(chunks=chunks, usage=usage)
+        agent = ChatAgent(client)
+        result = agent.ask("Вопрос")
+        self.assertEqual(result.text, "Привет")
+        self.assertEqual(result.stats.request_tokens, 7)
+        self.assertEqual(result.stats.response_tokens, 3)
 
     def test_stream_usage_saved_to_store(self):
         client = FakeClient(chunks=chunks_of(["Привет"]), usage=make_usage(7, 3))
@@ -199,6 +232,242 @@ class ChatAgentTest(unittest.TestCase):
             agent = ChatAgent(client, store=store, chat_id=chat_id)
             agent.ask("Привет")
             self.assertEqual(store.get_usage(chat_id), {"input_tokens": None, "output_tokens": None})
+
+    def test_usage_as_dict(self):
+        usage = {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+            "prompt_cache_hit_tokens": 4,
+            "prompt_cache_miss_tokens": 6,
+        }
+        client = FakeClient(chunks=chunks_of(["Ответ"]), usage=usage)
+        agent = ChatAgent(client)
+        result = agent.ask("Вопрос")
+        self.assertEqual(result.stats.request_tokens, 10)
+        self.assertEqual(result.stats.response_tokens, 20)
+        self.assertEqual(result.stats.total_tokens, 30)
+        self.assertEqual(result.stats.prompt_cache_hit_tokens, 4)
+        self.assertEqual(result.stats.prompt_cache_miss_tokens, 6)
+
+    def test_usage_prompt_tokens_details_fallback(self):
+        details = SimpleNamespace(cached_tokens=4)
+        usage = SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=20,
+            prompt_tokens_details=details,
+        )
+        client = FakeClient(chunks=chunks_of(["Ответ"]), usage=usage)
+        agent = ChatAgent(client)
+        result = agent.ask("Вопрос")
+        self.assertEqual(result.stats.prompt_cache_hit_tokens, 4)
+        self.assertEqual(result.stats.prompt_cache_miss_tokens, 6)
+
+    def test_ask_result_has_local_estimates(self):
+        client = FakeClient(chunks=chunks_of(["Привет, мир!"]))
+        agent = ChatAgent(client)
+        result = agent.ask("Вопрос")
+        self.assertIsNotNone(result.stats.user_message_tokens_est)
+        self.assertIsNotNone(result.stats.assistant_tokens_est)
+        self.assertGreaterEqual(result.stats.assistant_tokens_est, 1)
+
+    def test_cache_hit_miss_passed_and_priced(self):
+        usage = make_full_usage(1000, 500, total=1500, hit=400, miss=600)
+        client = FakeClient(chunks=chunks_of(["Ответ"]), usage=usage)
+        agent = ChatAgent(client)
+        result = agent.ask("Вопрос")
+        self.assertEqual(result.stats.prompt_cache_hit_tokens, 400)
+        self.assertEqual(result.stats.prompt_cache_miss_tokens, 600)
+        self.assertIsNotNone(result.stats.cost_usd)
+        self.assertIn("cache hit/miss", result.stats.cost_assumption)
+
+    def test_no_cache_split_uses_miss_assumption(self):
+        usage = make_full_usage(1000, 500)
+        client = FakeClient(chunks=chunks_of(["Ответ"]), usage=usage)
+        agent = ChatAgent(client)
+        result = agent.ask("Вопрос")
+        self.assertIsNone(result.stats.prompt_cache_hit_tokens)
+        self.assertIsNone(result.stats.prompt_cache_miss_tokens)
+        self.assertIn("cache-miss", result.stats.cost_assumption)
+
+    def test_turn_stats_persisted_and_reloaded(self):
+        usage = make_full_usage(10, 20, total=30, hit=4, miss=6)
+        client = FakeClient(chunks=chunks_of(["Ответ"]), usage=usage)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "test.db")
+            store = ChatStore(path)
+            chat_id = store.create_chat(AgentConfig())
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("Привет")
+            self.assertEqual(result.stats.request_tokens, 10)
+            self.assertEqual(result.stats.response_tokens, 20)
+
+            reloaded = ChatStore(path)
+            history = reloaded.load_history(chat_id)
+            self.assertEqual([m.role for m in history], ["user", "assistant"])
+            user_msg, assistant_msg = history
+            self.assertIsNotNone(user_msg.turn)
+            self.assertIsNotNone(assistant_msg.turn)
+            self.assertEqual(user_msg.turn.request_tokens, 10)
+            self.assertEqual(user_msg.turn.response_tokens, 20)
+            self.assertEqual(user_msg.turn.total_tokens, 30)
+            self.assertEqual(user_msg.turn.prompt_cache_hit_tokens, 4)
+            self.assertEqual(user_msg.turn.prompt_cache_miss_tokens, 6)
+            self.assertEqual(assistant_msg.turn.request_tokens, 10)
+
+    def test_cumulative_tokens_and_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig())
+            client1 = FakeClient(chunks=chunks_of(["Ответ1"]), usage=make_full_usage(10, 5, total=15))
+            ChatAgent(client1, store=store, chat_id=chat_id).ask("Вопрос 1")
+            client2 = FakeClient(chunks=chunks_of(["Ответ2"]), usage=make_full_usage(20, 8, total=28))
+            ChatAgent(client2, store=store, chat_id=chat_id).ask("Вопрос 2")
+
+            stats = store.get_chat_stats(chat_id)
+            self.assertEqual(stats.input_tokens, 30)
+            self.assertEqual(stats.output_tokens, 13)
+            self.assertEqual(stats.turns_count, 2)
+            self.assertIsNotNone(stats.cost_usd)
+            self.assertIsNotNone(stats.history_tokens_est)
+
+    def test_finish_reason_stream_roundtrip(self):
+        chunks = [make_chunk("От"), make_chunk("вет", finish_reason="length")]
+        usage = make_usage(5, 6)
+        client = FakeClient(chunks=chunks, usage=usage)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "test.db")
+            store = ChatStore(path)
+            chat_id = store.create_chat(AgentConfig())
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("Вопрос")
+            self.assertEqual(result.stats.finish_reason, "length")
+
+            reloaded = ChatStore(path).load_history(chat_id)
+            self.assertEqual(reloaded[-1].turn.finish_reason, "length")
+
+    def test_finish_reason_non_stream_roundtrip(self):
+        response = make_response("Ответ", usage=make_usage(5, 6), finish_reason="stop")
+        client = FakeClient(response=response)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "test.db")
+            store = ChatStore(path)
+            chat_id = store.create_chat(AgentConfig(stream=False))
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("Вопрос")
+            self.assertEqual(result.stats.finish_reason, "stop")
+
+            reloaded = ChatStore(path).load_history(chat_id)
+            self.assertEqual(reloaded[-1].turn.finish_reason, "stop")
+
+    def test_finish_reason_length_not_an_error(self):
+        chunks = [make_chunk("Обрезанный ответ", finish_reason="length")]
+        usage = make_usage(5, 6)
+        client = FakeClient(chunks=chunks, usage=usage)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig())
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("Вопрос")
+            self.assertEqual(result.stats.finish_reason, "length")
+            self.assertEqual(store.list_turns(chat_id)[0].stats.finish_reason, "length")
+            self.assertEqual(len(store.load_messages(chat_id)), 2)
+
+    def test_demo_context_limit_exceeded(self):
+        config = AgentConfig(demo_context_limit=10, max_tokens=5)
+        client = FakeClient(chunks=chunks_of(["Ок"]))
+        agent = ChatAgent(client, config=config)
+        with self.assertRaises(ContextLimitError) as ctx:
+            agent.ask("Очень длинный вопрос, который точно превысит лимит")
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(len(agent.history), 1)
+        exc = ctx.exception
+        self.assertEqual(exc.limit_tokens, 10)
+        self.assertEqual(exc.requested_output_tokens, 5)
+        self.assertGreaterEqual(exc.estimated_input_tokens, 1)
+
+    def test_demo_context_limit_exceeded_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(demo_context_limit=10, max_tokens=5))
+            client = FakeClient(chunks=chunks_of(["Ок"]))
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            with self.assertRaises(ContextLimitError):
+                agent.ask("Длинный текст который превысит лимит")
+            self.assertEqual(client.calls, 0)
+            self.assertEqual(store.load_messages(chat_id), [])
+            self.assertEqual(store.get_chat_stats(chat_id).turns_count, 0)
+            self.assertEqual(store.get_usage(chat_id), {"input_tokens": None, "output_tokens": None})
+
+    def test_demo_context_limit_within(self):
+        config = AgentConfig(demo_context_limit=1000, max_tokens=50)
+        client = FakeClient(chunks=chunks_of(["Ок"]))
+        agent = ChatAgent(client, config=config)
+        result = agent.ask("Привет")
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(result.text, "Ок")
+
+    def test_context_overflow_error_mapped(self):
+        client = FakeClient(error=FakeContextOverflowError())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig())
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            with self.assertRaises(ApiContextOverflowError) as ctx:
+                agent.ask("Длинный запрос")
+            self.assertEqual(client.calls, 1)
+            self.assertEqual(len(agent.history), 1)
+            self.assertEqual(store.load_messages(chat_id), [])
+            self.assertEqual(store.get_usage(chat_id), {"input_tokens": None, "output_tokens": None})
+            self.assertIn("провайдера", str(ctx.exception))
+            self.assertIn("maximum context length", ctx.exception.original_message)
+
+    def test_other_api_error_re_raised(self):
+        client = FakeClient(error=RuntimeError("boom"))
+        agent = ChatAgent(client)
+        with self.assertRaises(RuntimeError):
+            agent.ask("Привет")
+        self.assertEqual(len(agent.history), 1)
+
+    def test_api_error_writes_nothing_to_store(self):
+        def failing_stream():
+            yield make_chunk("При")
+            yield make_chunk("вет")
+            raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig())
+            client = FakeClient(chunks=failing_stream())
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+
+            with self.assertRaises(RuntimeError):
+                agent.ask("Привет")
+
+            self.assertEqual(store.load_messages(chat_id), [])
+            self.assertEqual(store.get_chat_stats(chat_id).turns_count, 0)
+            self.assertEqual(store.get_usage(chat_id), {"input_tokens": None, "output_tokens": None})
+
+    def test_stats_independent_across_chats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            a = store.create_chat(AgentConfig())
+            b = store.create_chat(AgentConfig())
+            ChatAgent(
+                FakeClient(chunks=chunks_of(["A"]), usage=make_full_usage(10, 5)),
+                store=store, chat_id=a,
+            ).ask("Вопрос A")
+            ChatAgent(
+                FakeClient(chunks=chunks_of(["B"]), usage=make_full_usage(100, 50)),
+                store=store, chat_id=b,
+            ).ask("Вопрос B")
+
+            stats_a = store.get_chat_stats(a)
+            stats_b = store.get_chat_stats(b)
+            self.assertEqual(stats_a.input_tokens, 10)
+            self.assertEqual(stats_b.input_tokens, 100)
+            self.assertEqual(stats_a.turns_count, 1)
+            self.assertEqual(stats_b.turns_count, 1)
 
     def test_restored_history_sent_in_next_request(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +510,7 @@ class ChatAgentTest(unittest.TestCase):
                 temperature=0.9,
                 max_tokens=200,
                 stream=False,
+                demo_context_limit=123,
             )
             agent.set_config(new_config)
 
@@ -251,24 +521,7 @@ class ChatAgentTest(unittest.TestCase):
             self.assertAlmostEqual(loaded["temperature"], 0.9)
             self.assertEqual(loaded["max_tokens"], 200)
             self.assertFalse(loaded["stream"])
-
-    def test_api_error_writes_nothing_to_store(self):
-        def failing_stream():
-            yield make_chunk("При")
-            yield make_chunk("вет")
-            raise RuntimeError("boom")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            store = ChatStore(os.path.join(tmp, "test.db"))
-            chat_id = store.create_chat(AgentConfig())
-            client = FakeClient(chunks=failing_stream())
-            agent = ChatAgent(client, store=store, chat_id=chat_id)
-
-            with self.assertRaises(RuntimeError):
-                agent.ask("Привет")
-
-            self.assertEqual(store.load_messages(chat_id), [])
-            self.assertEqual(store.get_usage(chat_id), {"input_tokens": None, "output_tokens": None})
+            self.assertEqual(loaded["demo_context_limit"], 123)
 
     def test_save_turn_failure_rolls_back_history(self):
         class FailingStore:
@@ -281,8 +534,7 @@ class ChatAgentTest(unittest.TestCase):
             def load_messages(self, chat_id):
                 return []
 
-            def save_turn(self, chat_id, user_text, assistant_text,
-                          input_tokens=None, output_tokens=None):
+            def save_turn(self, chat_id, user_text, assistant_text, stats=None):
                 raise RuntimeError("save failed")
 
         client = FakeClient(chunks=chunks_of(["Ок"]))

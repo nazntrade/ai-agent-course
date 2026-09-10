@@ -1,6 +1,12 @@
 import streamlit as st
 
-from agent import AgentConfig, ChatAgent, get_client
+from agent import (
+    AgentConfig,
+    ApiContextOverflowError,
+    ChatAgent,
+    ContextLimitError,
+    get_client,
+)
 from storage import DEFAULT_CHAT_TITLE, ChatStore
 
 st.set_page_config(page_title="Первый агент", page_icon="🤖", layout="wide")
@@ -23,6 +29,40 @@ store = st.session_state.store
 
 def chat_exists(chat_id):
     return any(chat.id == chat_id for chat in store.list_chats())
+
+
+def _fmt_num(value):
+    return "нет данных" if value is None else str(value)
+
+
+def _fmt_cost(value):
+    return "нет данных" if value is None else f"≈${value:.6f}"
+
+
+def _chat_compact(chat):
+    """Compact per-chat usage line for the sidebar."""
+    if (
+        chat.input_tokens is None
+        and chat.output_tokens is None
+        and chat.cost_usd is None
+    ):
+        return "нет данных"
+    return (
+        f"вх {_fmt_num(chat.input_tokens)} · вых {_fmt_num(chat.output_tokens)} · "
+        f"{_fmt_cost(chat.cost_usd)}"
+    )
+
+
+def _turn_summary(turn):
+    """Compact single-line summary of a completed turn."""
+    return (
+        f"контекст {_fmt_num(turn.request_tokens)} · "
+        f"всего {_fmt_num(turn.total_tokens)} · "
+        f"cache hit {_fmt_num(turn.prompt_cache_hit_tokens)} / "
+        f"miss {_fmt_num(turn.prompt_cache_miss_tokens)} · "
+        f"{_fmt_cost(turn.cost_usd)} · "
+        f"finish: {turn.finish_reason or 'нет данных'}"
+    )
 
 
 # Resolve the active chat on startup: keep the current chat if it still
@@ -72,6 +112,7 @@ with st.sidebar:
                 st.session_state.chat_id = chat.id
                 st.session_state.pending_delete_id = None
                 st.rerun()
+        st.caption(_chat_compact(chat))
 
     st.divider()
 
@@ -125,6 +166,19 @@ with st.sidebar:
             stream = st.checkbox(
                 "Потоковый вывод", value=bool(cfg.stream), key=f"stream_{chat_id}"
             )
+            demo_limit_raw = st.number_input(
+                "Демо-лимит контекста, токены",
+                min_value=0,
+                value=int(cfg.demo_context_limit or 0),
+                step=1,
+                key=f"demo_context_limit_{chat_id}",
+            )
+            st.caption(
+                "0 = выключен. Локальная предпроверка «оценка входа + max_tokens» "
+                "до запроса; реальный лимит API не заменяет."
+            )
+
+            demo_context_limit = demo_limit_raw if demo_limit_raw > 0 else None
 
             changed = (
                 system_prompt != cfg.system_prompt
@@ -132,6 +186,7 @@ with st.sidebar:
                 or abs(temperature - cfg.temperature) > 1e-9
                 or max_tokens != cfg.max_tokens
                 or stream != cfg.stream
+                or demo_context_limit != (cfg.demo_context_limit or 0)
             )
             if changed:
                 agent.set_config(
@@ -141,33 +196,92 @@ with st.sidebar:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         stream=stream,
+                        demo_context_limit=demo_context_limit,
                     )
                 )
 
-        usage = store.get_usage(chat_id)
-        input_tokens = usage["input_tokens"]
-        output_tokens = usage["output_tokens"]
-        total = (
-            input_tokens + output_tokens
-            if input_tokens is not None and output_tokens is not None
-            else None
-        )
-
-        def fmt(value):
-            return "нет данных" if value is None else str(value)
-
+        chat_stats = store.get_chat_stats(chat_id)
         st.caption(
-            f"Токены: ввод {fmt(input_tokens)} · вывод {fmt(output_tokens)} · всего {fmt(total)}"
+            f"вх {_fmt_num(chat_stats.input_tokens)} · "
+            f"вых {_fmt_num(chat_stats.output_tokens)} · "
+            f"≈ история {_fmt_num(chat_stats.history_tokens_est)} · "
+            f"{_fmt_cost(chat_stats.cost_usd)}"
         )
 
 if agent is None:
     st.info("Чатов пока нет. Нажмите «Создать чат» в сайдбаре, чтобы начать.")
 else:
-    for message in agent.history:
-        if message["role"] == "system":
-            continue
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    history = store.load_history(chat_id)
+    for message in history:
+        with st.chat_message(message.role):
+            st.markdown(message.content)
+            turn = message.turn
+            if turn is None:
+                st.caption("статистика хода: нет данных")
+            elif message.role == "user":
+                est = turn.user_message_tokens_est
+                if est is not None:
+                    st.caption(f"≈ {est} ток. сообщения (оценка)")
+                else:
+                    st.caption("статистика хода: нет данных")
+            else:
+                st.caption(f"токенов ответа: {_fmt_num(turn.response_tokens)}")
+                if turn.finish_reason == "length":
+                    st.caption(
+                        "Ответ достиг лимита max_tokens (лимит длины ответа, а не контекста)"
+                    )
+                st.caption(_turn_summary(turn))
+
+    with st.expander("Статистика текущего чата", expanded=False):
+        chat_stats = store.get_chat_stats(chat_id)
+        st.markdown(f"Ходов: {chat_stats.turns_count}")
+        st.markdown(f"Накопленный вход: {_fmt_num(chat_stats.input_tokens)} ток.")
+        st.markdown(f"Накопленный выход: {_fmt_num(chat_stats.output_tokens)} ток.")
+        st.markdown(
+            f"≈ Уникальная история: {_fmt_num(chat_stats.history_tokens_est)} ток."
+        )
+        st.markdown(f"≈ Стоимость: {_fmt_cost(chat_stats.cost_usd)}")
+
+        turn_rows = []
+        for index, turn in enumerate(store.list_turns(chat_id), start=1):
+            s = turn.stats
+            turn_rows.append(
+                {
+                    "№": index,
+                    "время": turn.created_at,
+                    "токены сообщения ≈": _fmt_num(s.user_message_tokens_est),
+                    "контекст": _fmt_num(s.request_tokens),
+                    "ответ": _fmt_num(s.response_tokens),
+                    "всего": _fmt_num(s.total_tokens),
+                    "hit": _fmt_num(s.prompt_cache_hit_tokens),
+                    "miss": _fmt_num(s.prompt_cache_miss_tokens),
+                    "finish_reason": s.finish_reason or "нет данных",
+                    "стоимость ≈": _fmt_cost(s.cost_usd),
+                    "допущение": s.cost_assumption or "нет данных",
+                }
+            )
+        if turn_rows:
+            st.dataframe(turn_rows)
+        else:
+            st.caption("Ходов пока нет.")
+
+    with st.expander("Сравнение диалогов", expanded=False):
+        comparison_rows = []
+        for chat in store.list_chats():
+            comparison_rows.append(
+                {
+                    "Название": chat.title,
+                    "Ходы": chat.turns_count,
+                    "Накопленный вход": _fmt_num(chat.input_tokens),
+                    "Накопленный выход": _fmt_num(chat.output_tokens),
+                    "≈ Уникальная история": _fmt_num(chat.history_tokens_est),
+                    "≈ Стоимость": _fmt_cost(chat.cost_usd),
+                }
+            )
+        if comparison_rows:
+            st.dataframe(comparison_rows)
+        else:
+            st.caption("Диалогов пока нет.")
 
     prompt = st.chat_input("Введите сообщение")
     if prompt is not None:
@@ -185,18 +299,36 @@ else:
                         placeholder.markdown(text)
 
                     try:
-                        answer = agent.ask(prompt, on_chunk=on_chunk)
+                        result = agent.ask(prompt, on_chunk=on_chunk)
+                    except ContextLimitError as exc:
+                        placeholder.empty()
+                        st.warning(str(exc))
+                    except ApiContextOverflowError as exc:
+                        placeholder.empty()
+                        st.error(str(exc))
+                        st.caption(
+                            "Совет: включите демо-лимит контекста в настройках, "
+                            "чтобы отлавливать переполнение до запроса."
+                        )
                     except Exception as exc:
                         placeholder.empty()
                         st.error(f"Ошибка: {exc}")
                     else:
-                        placeholder.markdown(answer)
+                        placeholder.markdown(result.text)
                         st.rerun()
                 else:
                     try:
                         with st.spinner("Ожидание ответа..."):
-                            answer = agent.ask(prompt)
-                        st.markdown(answer)
+                            result = agent.ask(prompt)
+                        st.markdown(result.text)
                         st.rerun()
+                    except ContextLimitError as exc:
+                        st.warning(str(exc))
+                    except ApiContextOverflowError as exc:
+                        st.error(str(exc))
+                        st.caption(
+                            "Совет: включите демо-лимит контекста в настройках, "
+                            "чтобы отлавливать переполнение до запроса."
+                        )
                     except Exception as exc:
                         st.error(f"Ошибка: {exc}")
