@@ -7,6 +7,7 @@ from agent import (
     ContextLimitError,
     get_client,
 )
+from app_logic import WaitingIndicator, configs_equal
 from storage import DEFAULT_CHAT_TITLE, ChatStore
 
 st.set_page_config(page_title="Первый агент", page_icon="🤖", layout="wide")
@@ -180,25 +181,16 @@ with st.sidebar:
 
             demo_context_limit = demo_limit_raw if demo_limit_raw > 0 else None
 
-            changed = (
-                system_prompt != cfg.system_prompt
-                or model != cfg.model
-                or abs(temperature - cfg.temperature) > 1e-9
-                or max_tokens != cfg.max_tokens
-                or stream != cfg.stream
-                or demo_context_limit != (cfg.demo_context_limit or 0)
+            updated_config = AgentConfig(
+                model=model,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=stream,
+                demo_context_limit=demo_context_limit,
             )
-            if changed:
-                agent.set_config(
-                    AgentConfig(
-                        model=model,
-                        system_prompt=system_prompt,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stream=stream,
-                        demo_context_limit=demo_context_limit,
-                    )
-                )
+            if not configs_equal(cfg, updated_config):
+                agent.set_config(updated_config)
 
         chat_stats = store.get_chat_stats(chat_id)
         st.caption(
@@ -293,28 +285,26 @@ else:
 
             with st.chat_message("assistant"):
                 if agent.config.stream:
-                    placeholder = st.empty()
-
-                    def on_chunk(text):
-                        placeholder.markdown(text)
+                    placeholder = st.skeleton()
+                    indicator = WaitingIndicator(st.spinner("Ожидание ответа..."), placeholder)
 
                     try:
-                        result = agent.ask(prompt, on_chunk=on_chunk)
+                        result = agent.ask(prompt, on_chunk=indicator.show_chunk)
                     except ContextLimitError as exc:
-                        placeholder.empty()
+                        indicator.clear()
                         st.warning(str(exc))
                     except ApiContextOverflowError as exc:
-                        placeholder.empty()
+                        indicator.clear()
                         st.error(str(exc))
                         st.caption(
                             "Совет: включите демо-лимит контекста в настройках, "
                             "чтобы отлавливать переполнение до запроса."
                         )
                     except Exception as exc:
-                        placeholder.empty()
+                        indicator.clear()
                         st.error(f"Ошибка: {exc}")
                     else:
-                        placeholder.markdown(result.text)
+                        indicator.show_chunk(result.text)
                         st.rerun()
                 else:
                     try:
