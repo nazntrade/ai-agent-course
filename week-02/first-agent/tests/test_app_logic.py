@@ -44,7 +44,7 @@ class FakeSpinner:
 class ConfigsEqualTest(unittest.TestCase):
     def setUp(self):
         self.base = AgentConfig(
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             system_prompt="Ты — помощник",
             temperature=0.2,
             max_tokens=1500,
@@ -96,6 +96,29 @@ class ConfigsEqualTest(unittest.TestCase):
 
     def test_stream_change_not_equal(self):
         self.assertFalse(configs_equal(self.base, replace(self.base, stream=False)))
+
+    def test_summarize_change_not_equal(self):
+        self.assertFalse(
+            configs_equal(self.base, replace(self.base, summarize=False))
+        )
+        self.assertFalse(
+            configs_equal(
+                replace(self.base, summarize=False),
+                replace(self.base, summarize=True),
+            )
+        )
+
+    def test_keep_recent_turns_change_not_equal(self):
+        self.assertFalse(
+            configs_equal(self.base, replace(self.base, keep_recent_turns=5))
+        )
+        self.assertFalse(
+            configs_equal(self.base, replace(self.base, keep_recent_turns=0))
+        )
+
+    def test_same_summarize_and_keep_equal(self):
+        other = replace(self.base, summarize=True, keep_recent_turns=3)
+        self.assertTrue(configs_equal(self.base, other))
 
     def test_temperature_beyond_tolerance_not_equal(self):
         self.assertFalse(

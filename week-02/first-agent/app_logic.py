@@ -31,6 +31,10 @@ def configs_equal(current: AgentConfig, updated: AgentConfig) -> bool:
         return False
     if bool(current.stream) != bool(updated.stream):
         return False
+    if bool(current.summarize) != bool(updated.summarize):
+        return False
+    if current.keep_recent_turns != updated.keep_recent_turns:
+        return False
     if abs(current.temperature - updated.temperature) > 1e-9:
         return False
     if (current.demo_context_limit or None) != (updated.demo_context_limit or None):

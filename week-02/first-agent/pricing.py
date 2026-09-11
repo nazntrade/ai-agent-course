@@ -14,8 +14,9 @@ from stats import TurnStats
 
 # Official DeepSeek tariffs, USD per 1M tokens
 # (source: https://api-docs.deepseek.com/quick_start/pricing, checked 2026-09-10).
-# The legacy name ``deepseek-v4-flash`` is served by DeepSeek-V4.1-Flash and is
-# billed at the Flash price.
+# Both the canonical ``deepseek-flash`` and its legacy ``deepseek-v4-flash``
+# alias are served by DeepSeek-V4.1-Flash and billed at the Flash price. The
+# legacy key is retained so historical rows can still be priced.
 FLASH_COST = {
     "input_cache_miss": {"off_peak": 0.15, "peak": 0.30},
     "input_cache_hit": {"off_peak": 0.003, "peak": 0.006},
@@ -28,6 +29,7 @@ PRO_COST = {
 }
 
 _MODEL_TARIFFS = {
+    "deepseek-flash": FLASH_COST,
     "deepseek-v4-flash": FLASH_COST,
     "deepseek-v4-pro": PRO_COST,
 }

@@ -85,5 +85,65 @@ class EstimateCostTest(unittest.TestCase):
         self.assertAlmostEqual(est.cost_usd, input_usd + output_usd, places=12)
 
 
+class CanonicalFlashTariffTest(unittest.TestCase):
+    """The canonical ``deepseek-flash`` must be priced exactly like the legacy ID."""
+
+    def test_canonical_model_has_tariff(self):
+        est = estimate_cost(
+            "deepseek-flash", TurnStats(request_tokens=1000, response_tokens=500)
+        )
+        self.assertTrue(est.tariff_known)
+        self.assertIsNotNone(est.cost_usd)
+
+    def test_cache_split_off_peak(self):
+        dt = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)  # off-peak
+        stats = TurnStats(
+            request_tokens=1000,
+            response_tokens=500,
+            prompt_cache_hit_tokens=400,
+            prompt_cache_miss_tokens=600,
+        )
+        est = estimate_cost("deepseek-flash", stats, dt)
+        input_usd = (600 * 0.15 + 400 * 0.003) / 1e6
+        output_usd = 500 * 0.60 / 1e6
+        self.assertAlmostEqual(est.cost_usd, input_usd + output_usd, places=12)
+        self.assertTrue(est.cache_split_known)
+        self.assertEqual(est.window, "off_peak")
+        self.assertIn("cache hit/miss", est.assumption)
+
+    def test_no_cache_split_uses_miss_rate(self):
+        dt = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)  # off-peak
+        stats = TurnStats(request_tokens=1000, response_tokens=500)
+        est = estimate_cost("deepseek-flash", stats, dt)
+        input_usd = 1000 * 0.15 / 1e6
+        output_usd = 500 * 0.60 / 1e6
+        self.assertAlmostEqual(est.cost_usd, input_usd + output_usd, places=12)
+        self.assertFalse(est.cache_split_known)
+        self.assertIn("cache-miss", est.assumption)
+
+    def test_peak_window_rates(self):
+        dt = datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc)  # peak
+        stats = TurnStats(request_tokens=1000, response_tokens=500)
+        est = estimate_cost("deepseek-flash", stats, dt)
+        self.assertEqual(est.window, "peak")
+        input_usd = 1000 * 0.30 / 1e6
+        output_usd = 500 * 1.20 / 1e6
+        self.assertAlmostEqual(est.cost_usd, input_usd + output_usd, places=12)
+
+    def test_canonical_and_legacy_costs_match(self):
+        dt = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+        stats = TurnStats(
+            request_tokens=1234,
+            response_tokens=567,
+            prompt_cache_hit_tokens=100,
+            prompt_cache_miss_tokens=1134,
+        )
+        canonical = estimate_cost("deepseek-flash", stats, dt)
+        legacy = estimate_cost("deepseek-v4-flash", stats, dt)
+        self.assertAlmostEqual(canonical.cost_usd, legacy.cost_usd, places=12)
+        self.assertEqual(canonical.assumption, legacy.assumption)
+        self.assertEqual(canonical.window, legacy.window)
+
+
 if __name__ == "__main__":
     unittest.main()

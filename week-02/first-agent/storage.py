@@ -12,6 +12,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from context import SUMMARY_FORMAT_VERSION
+from models import LEGACY_MODEL_ALIASES
 from stats import TurnStats
 from tokens import estimate_tokens
 
@@ -32,6 +34,8 @@ CREATE TABLE IF NOT EXISTS chats (
     demo_context_limit  INTEGER,
     history_tokens_est  INTEGER,
     cost_usd            REAL,
+    summary_cache_hit_tokens  INTEGER,
+    summary_cache_miss_tokens INTEGER,
     created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -67,13 +71,38 @@ CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id                INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    content                TEXT    NOT NULL,
+    covered_messages_count INTEGER NOT NULL,
+    format_version         INTEGER NOT NULL DEFAULT 1,
+    prompt_tokens          INTEGER,
+    response_tokens        INTEGER,
+    total_tokens           INTEGER,
+    cost_usd               REAL,
+    cost_assumption        TEXT,
+    created_at             TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_summaries_chat ON summaries(chat_id);
 """
 
 # Columns added after the Day 7 schema; the migration adds whichever are missing.
+# The ``NOT NULL DEFAULT`` columns fill existing rows with the default on
+# ``ALTER TABLE``, so no backfill is required and the migration is idempotent.
 _NEW_CHAT_COLUMNS = {
     "demo_context_limit": "INTEGER",
     "history_tokens_est": "INTEGER",
     "cost_usd": "REAL",
+    "summarize": "INTEGER NOT NULL DEFAULT 1",
+    "keep_recent_turns": "INTEGER NOT NULL DEFAULT 3",
+    "summary_input_tokens": "INTEGER",
+    "summary_output_tokens": "INTEGER",
+    "summary_cost_usd": "REAL",
+    "summary_cache_hit_tokens": "INTEGER",
+    "summary_cache_miss_tokens": "INTEGER",
 }
 
 
@@ -89,6 +118,7 @@ class ChatSummary:
     history_tokens_est: int | None = None
     cost_usd: float | None = None
     turns_count: int = 0
+    summary_cost_usd: float | None = None
 
 
 @dataclass
@@ -109,6 +139,26 @@ class ChatStats:
     history_tokens_est: int | None
     cost_usd: float | None
     turns_count: int
+    summary_input_tokens: int | None = None
+    summary_output_tokens: int | None = None
+    summary_cost_usd: float | None = None
+    summary_cache_hit_tokens: int | None = None
+    summary_cache_miss_tokens: int | None = None
+
+
+@dataclass
+class StoredSummary:
+    """The current per-chat summary and the tokens of its last generation call."""
+
+    content: str
+    covered_messages_count: int
+    format_version: int
+    prompt_tokens: int | None = None
+    response_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+    cost_assumption: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass
@@ -146,8 +196,21 @@ class ChatStore:
             for name, decl in _NEW_CHAT_COLUMNS.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE chats ADD COLUMN {name} {decl}")
+            self._normalize_legacy_models(conn)
             self._backfill_history_tokens_est(conn)
             conn.commit()
+
+    def _normalize_legacy_models(self, conn) -> None:
+        """Rewrite exact legacy model IDs stored in existing chats.
+
+        Only known aliases are migrated; any other value (custom or
+        provider-specific) is left untouched. The UPDATE is idempotent, so
+        reopening the database repeatedly is safe.
+        """
+        for legacy, canonical in LEGACY_MODEL_ALIASES.items():
+            conn.execute(
+                "UPDATE chats SET model = ? WHERE model = ?", (canonical, legacy)
+            )
 
     def _backfill_history_tokens_est(self, conn) -> None:
         """Fill history_tokens_est for NULL chats that already have messages."""
@@ -172,6 +235,7 @@ class ChatStore:
                 """
                 SELECT c.id, c.title, c.updated_at,
                        c.input_tokens, c.output_tokens, c.history_tokens_est, c.cost_usd,
+                       c.summary_cost_usd,
                        (SELECT COUNT(*) FROM turns t WHERE t.chat_id = c.id) AS turns_count
                 FROM chats c
                 ORDER BY c.updated_at DESC, c.id DESC
@@ -186,7 +250,8 @@ class ChatStore:
                 output_tokens=row[4],
                 history_tokens_est=row[5],
                 cost_usd=row[6],
-                turns_count=row[7],
+                summary_cost_usd=row[7],
+                turns_count=row[8],
             )
             for row in rows
         ]
@@ -195,8 +260,8 @@ class ChatStore:
         with closing(self._connect()) as conn:
             cursor = conn.execute(
                 "INSERT INTO chats (title, system_prompt, model, temperature, "
-                "max_tokens, stream, demo_context_limit) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "max_tokens, stream, demo_context_limit, summarize, keep_recent_turns) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     DEFAULT_CHAT_TITLE,
                     config.system_prompt,
@@ -205,6 +270,8 @@ class ChatStore:
                     config.max_tokens,
                     int(config.stream),
                     getattr(config, "demo_context_limit", None),
+                    int(getattr(config, "summarize", True)),
+                    int(getattr(config, "keep_recent_turns", 3)),
                 ),
             )
             conn.commit()
@@ -214,7 +281,7 @@ class ChatStore:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT system_prompt, model, temperature, max_tokens, stream, "
-                "demo_context_limit FROM chats WHERE id = ?",
+                "demo_context_limit, summarize, keep_recent_turns FROM chats WHERE id = ?",
                 (chat_id,),
             ).fetchone()
         if row is None:
@@ -226,6 +293,8 @@ class ChatStore:
             "max_tokens": row[3],
             "stream": bool(row[4]),
             "demo_context_limit": row[5],
+            "summarize": bool(row[6]),
+            "keep_recent_turns": row[7],
         }
 
     def save_config(self, chat_id: int, config) -> None:
@@ -233,6 +302,7 @@ class ChatStore:
             conn.execute(
                 "UPDATE chats SET system_prompt = ?, model = ?, temperature = ?, "
                 "max_tokens = ?, stream = ?, demo_context_limit = ?, "
+                "summarize = ?, keep_recent_turns = ?, "
                 "updated_at = datetime('now') WHERE id = ?",
                 (
                     config.system_prompt,
@@ -241,6 +311,8 @@ class ChatStore:
                     config.max_tokens,
                     int(config.stream),
                     getattr(config, "demo_context_limit", None),
+                    int(getattr(config, "summarize", True)),
+                    int(getattr(config, "keep_recent_turns", 3)),
                     chat_id,
                 ),
             )
@@ -424,6 +496,125 @@ class ChatStore:
                 conn.rollback()
                 raise
 
+    def load_summary(self, chat_id: int) -> StoredSummary | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT content, covered_messages_count, format_version, "
+                "prompt_tokens, response_tokens, total_tokens, cost_usd, "
+                "cost_assumption, updated_at "
+                "FROM summaries WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return StoredSummary(
+            content=row[0],
+            covered_messages_count=row[1],
+            format_version=row[2],
+            prompt_tokens=row[3],
+            response_tokens=row[4],
+            total_tokens=row[5],
+            cost_usd=row[6],
+            cost_assumption=row[7],
+            updated_at=row[8],
+        )
+
+    def _accumulate_summary_stats(self, conn, chat_id: int, stats) -> None:
+        """Add the known ``summary_*`` counters to a chat row within a transaction.
+
+        ``None`` values are skipped so a missing usage never becomes a fake 0.
+        """
+        columns = (
+            ("summary_input_tokens", stats.request_tokens),
+            ("summary_output_tokens", stats.response_tokens),
+            ("summary_cache_hit_tokens", stats.prompt_cache_hit_tokens),
+            ("summary_cache_miss_tokens", stats.prompt_cache_miss_tokens),
+            ("summary_cost_usd", stats.cost_usd),
+        )
+        for column, value in columns:
+            if value is None:
+                continue
+            conn.execute(
+                f"UPDATE chats SET {column} = COALESCE({column}, 0) + ? WHERE id = ?",
+                (value, chat_id),
+            )
+
+    def save_summary(
+        self,
+        chat_id: int,
+        content: str,
+        covered_messages_count: int,
+        stats: TurnStats | None = None,
+    ) -> None:
+        """Upsert the current summary and accumulate its tokens/cost on the chat.
+
+        One transaction: the summary row is replaced (keeping a single current
+        row per chat) and the chat's cumulative ``summary_*`` counters are
+        bumped. ``stats`` may aggregate several summarisation attempts; only
+        this successful update is stored on the ``summaries`` row.
+        """
+        stats = stats if stats is not None else TurnStats()
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO summaries (
+                        chat_id, content, covered_messages_count, format_version,
+                        prompt_tokens, response_tokens, total_tokens,
+                        cost_usd, cost_assumption
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        content = excluded.content,
+                        covered_messages_count = excluded.covered_messages_count,
+                        format_version = excluded.format_version,
+                        prompt_tokens = excluded.prompt_tokens,
+                        response_tokens = excluded.response_tokens,
+                        total_tokens = excluded.total_tokens,
+                        cost_usd = excluded.cost_usd,
+                        cost_assumption = excluded.cost_assumption,
+                        updated_at = datetime('now')
+                    """,
+                    (
+                        chat_id,
+                        content,
+                        covered_messages_count,
+                        SUMMARY_FORMAT_VERSION,
+                        stats.request_tokens,
+                        stats.response_tokens,
+                        stats.total_tokens,
+                        stats.cost_usd,
+                        stats.cost_assumption,
+                    ),
+                )
+
+                self._accumulate_summary_stats(conn, chat_id, stats)
+
+                conn.execute(
+                    "UPDATE chats SET updated_at = datetime('now') WHERE id = ?",
+                    (chat_id,),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def record_summary_attempt(self, chat_id: int, stats=None) -> None:
+        """Accumulate the cost of failed summarisation attempts.
+
+        Adds the known counters to the chat without touching the ``summaries``
+        row or ``chats.updated_at``, so billing an attempt never implies the
+        summary was updated.
+        """
+        stats = stats if stats is not None else TurnStats()
+        with closing(self._connect()) as conn:
+            try:
+                self._accumulate_summary_stats(conn, chat_id, stats)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
     def delete_chat(self, chat_id: int) -> None:
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
@@ -446,7 +637,9 @@ class ChatStore:
     def get_chat_stats(self, chat_id: int) -> ChatStats:
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT input_tokens, output_tokens, history_tokens_est, cost_usd "
+                "SELECT input_tokens, output_tokens, history_tokens_est, cost_usd, "
+                "summary_input_tokens, summary_output_tokens, summary_cost_usd, "
+                "summary_cache_hit_tokens, summary_cache_miss_tokens "
                 "FROM chats WHERE id = ?",
                 (chat_id,),
             ).fetchone()
@@ -461,6 +654,11 @@ class ChatStore:
             history_tokens_est=row[2],
             cost_usd=row[3],
             turns_count=turns_count,
+            summary_input_tokens=row[4],
+            summary_output_tokens=row[5],
+            summary_cost_usd=row[6],
+            summary_cache_hit_tokens=row[7],
+            summary_cache_miss_tokens=row[8],
         )
 
     def get_last_selected_id(self) -> int | None:

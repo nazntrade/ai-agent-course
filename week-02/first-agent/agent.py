@@ -6,14 +6,27 @@ The module does not depend on Streamlit and can be tested in isolation.
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from context import (
+    COMPRESSION_BATCH_TURNS,
+    SUMMARY_MAX_TOKENS,
+    SUMMARY_RETRY_MAX_TOKENS,
+    SUMMARY_TEMPERATURE,
+    build_payload,
+    build_summarization_messages,
+    clamp_covered_messages,
+    plan_compression,
+    validate_summary,
+)
+from models import DEFAULT_MODEL, normalize_model
 from pricing import estimate_cost
-from stats import AskResult, TurnStats
+from stats import AskResult, SummaryOutcome, TurnStats, aggregate_stats
 from tokens import estimate_tokens
 
 BASE_URL = "https://api.deepseek.com"
@@ -35,12 +48,22 @@ def get_client():
 class AgentConfig:
     """Agent configuration: model and generation parameters."""
 
-    model: str = "deepseek-v4-flash"
+    model: str = DEFAULT_MODEL
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     temperature: float = 0.2
     max_tokens: int = 1500
     stream: bool = True
     demo_context_limit: int | None = None
+    summarize: bool = True
+    keep_recent_turns: int = 3
+
+    def __post_init__(self):
+        """Normalize a legacy model ID to its canonical form.
+
+        Normalizing here means any config source (constructor, restored store
+        row, UI input) always reaches the API under the canonical ID.
+        """
+        self.model = normalize_model(self.model)
 
 
 class ContextLimitError(Exception):
@@ -172,6 +195,17 @@ class ChatAgent:
             history.extend(store.load_messages(chat_id))
         self._history = history
 
+        self._summary_content = None
+        self._covered_messages_count = 0
+        load_summary = getattr(store, "load_summary", None) if store is not None else None
+        if load_summary is not None and chat_id is not None:
+            stored = load_summary(chat_id)
+            if stored is not None:
+                self._summary_content = stored.content
+                self._covered_messages_count = clamp_covered_messages(
+                    stored.covered_messages_count, len(history) - 1
+                )
+
     @property
     def history(self):
         """A copy of the history so external code cannot mutate it."""
@@ -189,7 +223,7 @@ class ChatAgent:
         if self._store is not None:
             self._store.save_config(self._chat_id, config)
 
-    def ask(self, user_message: str, on_chunk=None) -> AskResult:
+    def ask(self, user_message: str, on_chunk=None, on_summarizing=None) -> AskResult:
         """Send a message to the LLM and return the answer plus its statistics.
 
         Supports both streaming and non-streaming modes:
@@ -197,32 +231,49 @@ class ChatAgent:
           accumulated text, and capture usage/finish reason from the chunks.
         - ``stream=False``: single response; ``on_chunk`` is not called.
 
-        The demo context limit is checked before the API call and before any
-        history/database mutation. On any API error the added user message is
-        rolled back; a provider context-overflow error is mapped to
-        :class:`ApiContextOverflowError`.
+        When the demo context limit is exceeded, compression is attempted first
+        (if enabled) so a long chat can still produce a reply; only when the
+        compressed payload still does not fit (or compression is disabled) is
+        :class:`ContextLimitError` raised, before any history/database mutation.
+
+        After a successful turn, compression runs in batches: the first summary
+        is created as soon as one old turn accumulates, later updates only once
+        enough additional turns accumulate. A compression failure never breaks
+        the turn: it is reported through ``AskResult.summary_error``.
         """
         if not user_message.strip():
             raise ValueError("Message must not be empty")
 
+        summary_error = None
+
         # Demo pre-check runs before the API call and before mutating history.
-        messages = self._history + [{"role": "user", "content": user_message}]
-        est_input = sum(estimate_tokens(message["content"]) for message in messages)
+        payload_messages = self._build_payload(user_message)
+        est_input = sum(
+            estimate_tokens(message["content"]) for message in payload_messages
+        )
         if (
             self._config.demo_context_limit is not None
             and est_input + self._config.max_tokens > self._config.demo_context_limit
         ):
-            raise ContextLimitError(
-                estimated_input_tokens=est_input,
-                limit_tokens=self._config.demo_context_limit,
-                requested_output_tokens=self._config.max_tokens,
-            )
+            if self._config.summarize:
+                err = self._try_compress(on_summarizing, min_batch=1)
+                summary_error = summary_error or err
+                payload_messages = self._build_payload(user_message)
+                est_input = sum(
+                    estimate_tokens(message["content"]) for message in payload_messages
+                )
+            if est_input + self._config.max_tokens > self._config.demo_context_limit:
+                raise ContextLimitError(
+                    estimated_input_tokens=est_input,
+                    limit_tokens=self._config.demo_context_limit,
+                    requested_output_tokens=self._config.max_tokens,
+                )
 
         self._history.append({"role": "user", "content": user_message})
 
         payload = {
             "model": self._config.model,
-            "messages": list(self._history),
+            "messages": payload_messages,
             "temperature": self._config.temperature,
             "max_tokens": self._config.max_tokens,
             "stream": self._config.stream,
@@ -285,4 +336,158 @@ class ChatAgent:
                 self._history.pop()
                 raise
 
-        return AskResult(text=answer, stats=stats)
+        # Batch compression: the first summary is created eagerly, subsequent
+        # updates only after COMPRESSION_BATCH_TURNS more turns accumulate.
+        min_batch = COMPRESSION_BATCH_TURNS if self._covered_messages_count > 0 else 1
+        err = self._try_compress(on_summarizing, min_batch)
+        summary_error = summary_error or err
+
+        return AskResult(text=answer, stats=stats, summary_error=summary_error)
+
+    def _build_payload(self, user_message):
+        """Assemble the messages for the next request, applying the summary."""
+        return build_payload(
+            self._config.system_prompt,
+            self._history[1:],
+            user_message,
+            self._summary_content,
+            self._covered_messages_count,
+            self._config.summarize,
+        )
+
+    def _try_compress(self, on_summarizing, min_batch) -> str | None:
+        """Compress old history into the summary when enough turns accumulated.
+
+        Every executed summarisation attempt is billed, even when the summary
+        itself is not updated: a failed run records the aggregate attempt cost
+        without touching the summary or its coverage boundary, while a
+        successful run stores the summary and the aggregate stats in one call.
+        Returns a human-readable error string on failure, or ``None`` when
+        there was nothing to compress or it succeeded.
+        """
+        if not self._config.summarize:
+            return None
+        plan = plan_compression(
+            self._history[1:],
+            self._covered_messages_count,
+            self._config.keep_recent_turns,
+            min_batch,
+        )
+        if plan is None:
+            return None
+
+        try:
+            cm = on_summarizing() if on_summarizing is not None else None
+            with (cm or nullcontext()):
+                outcome = self._run_summarization(plan.messages_to_merge)
+        except Exception as exc:
+            return (
+                "Не удалось обновить сводку истории "
+                f"({exc}). Переписка сохранена; сжатие повторится, "
+                "когда накопится достаточно старых ходов."
+            )
+
+        aggregate = aggregate_stats(outcome.attempts)
+
+        if outcome.text is None:
+            accounting_note = ""
+            recorder = (
+                getattr(self._store, "record_summary_attempt", None)
+                if self._store is not None
+                else None
+            )
+            if outcome.attempts and recorder is not None:
+                try:
+                    recorder(self._chat_id, stats=aggregate)
+                except Exception as exc:
+                    accounting_note = (
+                        f" Сохранить расход попыток не удалось ({exc})."
+                    )
+            return (
+                f"Сводка истории не обновлена ({outcome.error}). "
+                "Переписка и прежняя сводка не изменены."
+                f"{accounting_note} "
+                "Сжатие повторится, когда накопится следующая порция старых ходов."
+            )
+
+        try:
+            save_summary = (
+                getattr(self._store, "save_summary", None)
+                if self._store is not None
+                else None
+            )
+            if save_summary is not None:
+                save_summary(
+                    self._chat_id,
+                    outcome.text,
+                    plan.new_covered_messages_count,
+                    stats=aggregate,
+                )
+            self._summary_content = outcome.text
+            self._covered_messages_count = plan.new_covered_messages_count
+            return None
+        except Exception as exc:
+            return (
+                "Не удалось обновить сводку истории "
+                f"({exc}). Переписка сохранена; сжатие повторится, "
+                "когда накопится достаточно старых ходов."
+            )
+
+    def _summary_attempt_stats(self, response) -> TurnStats:
+        """Extract usage/finish reason of one summarisation attempt and price it."""
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        usage_map = _extract_usage(getattr(response, "usage", None))
+        stats = TurnStats(
+            request_tokens=usage_map.get("prompt_tokens"),
+            response_tokens=usage_map.get("completion_tokens"),
+            total_tokens=usage_map.get("total_tokens"),
+            prompt_cache_hit_tokens=usage_map.get("prompt_cache_hit_tokens"),
+            prompt_cache_miss_tokens=usage_map.get("prompt_cache_miss_tokens"),
+            finish_reason=finish_reason,
+        )
+        cost = estimate_cost(self._config.model, stats, datetime.now(timezone.utc))
+        stats.cost_usd = cost.cost_usd
+        stats.cost_assumption = cost.assumption
+        return stats
+
+    def _run_summarization(self, messages_to_merge) -> SummaryOutcome:
+        """Run one or two summarisation attempts and return their outcome.
+
+        Provider and validation failures are never raised: every executed
+        attempt is kept in ``attempts`` so it can be billed, and the failure is
+        reported through ``error``. Only the statistics of the executed calls
+        and the parsed text/error are returned.
+        """
+        messages = build_summarization_messages(
+            self._summary_content, messages_to_merge
+        )
+        attempts = []
+        try:
+            response = self._request_summary(messages, SUMMARY_MAX_TOKENS)
+            attempts.append(self._summary_attempt_stats(response))
+            if attempts[-1].finish_reason in ("length", "max_tokens"):
+                response = self._request_summary(messages, SUMMARY_RETRY_MAX_TOKENS)
+                attempts.append(self._summary_attempt_stats(response))
+            if attempts[-1].finish_reason in ("length", "max_tokens"):
+                return SummaryOutcome(
+                    attempts=attempts,
+                    error=(
+                        "ответ модели обрезан "
+                        f"(finish_reason={attempts[-1].finish_reason})"
+                    ),
+                )
+            text = response.choices[0].message.content or ""
+            validate_summary(text)
+            return SummaryOutcome(attempts=attempts, text=text)
+        except Exception as exc:
+            return SummaryOutcome(attempts=attempts, error=str(exc))
+
+    def _request_summary(self, messages, max_tokens):
+        """Issue a single non-stream summarisation request."""
+        return self._client.chat.completions.create(
+            model=self._config.model,
+            messages=messages,
+            stream=False,
+            temperature=SUMMARY_TEMPERATURE,
+            max_tokens=max_tokens,
+        )

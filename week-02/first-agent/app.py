@@ -8,7 +8,10 @@ from agent import (
     get_client,
 )
 from app_logic import WaitingIndicator, configs_equal
+from context import build_payload
+from models import display_name
 from storage import DEFAULT_CHAT_TITLE, ChatStore
+from tokens import estimate_tokens
 
 st.set_page_config(page_title="Первый агент", page_icon="🤖", layout="wide")
 st.title("Первый агент")
@@ -27,6 +30,12 @@ if "store" not in st.session_state:
 
 store = st.session_state.store
 
+# A summary update failure is reported on the next render, after the rerun that
+# follows a successful turn; popping it here ensures it is shown exactly once.
+pending_summary_error = st.session_state.pop("summary_error", None)
+if pending_summary_error:
+    st.warning(pending_summary_error)
+
 
 def chat_exists(chat_id):
     return any(chat.id == chat_id for chat in store.list_chats())
@@ -38,6 +47,12 @@ def _fmt_num(value):
 
 def _fmt_cost(value):
     return "нет данных" if value is None else f"≈${value:.6f}"
+
+
+def _sum_optional(a, b):
+    if a is None and b is None:
+        return None
+    return (a or 0) + (b or 0)
 
 
 def _chat_compact(chat):
@@ -149,6 +164,13 @@ with st.sidebar:
                 "System prompt", value=cfg.system_prompt, key=f"system_prompt_{chat_id}"
             )
             model = st.text_input("Модель", value=cfg.model, key=f"model_{chat_id}")
+            known_name = display_name(model)
+            if known_name is not None:
+                st.caption(f"Полное название модели: {known_name}")
+            else:
+                st.caption(
+                    f"Неизвестное имя модели: в запрос уйдёт введённый ID «{model}»."
+                )
             temperature = st.slider(
                 "Temperature",
                 min_value=0.0,
@@ -166,6 +188,24 @@ with st.sidebar:
             )
             stream = st.checkbox(
                 "Потоковый вывод", value=bool(cfg.stream), key=f"stream_{chat_id}"
+            )
+            summarize = st.checkbox(
+                "Сжимать историю автоматически",
+                value=bool(cfg.summarize),
+                key=f"summarize_{chat_id}",
+            )
+            keep_recent_turns = st.number_input(
+                "Последних ходов без сжатия",
+                min_value=0,
+                value=int(cfg.keep_recent_turns),
+                step=1,
+                key=f"keep_recent_turns_{chat_id}",
+            )
+            st.caption(
+                "Последние N ходов всегда уходят в модель без сжатия. Более "
+                "старые сворачиваются в сводку порциями (по 3 хода), поэтому "
+                "между сжатиями в запрос может уходить немного больше N ходов. "
+                "Полная переписка хранится в базе и отображается."
             )
             demo_limit_raw = st.number_input(
                 "Демо-лимит контекста, токены",
@@ -188,6 +228,8 @@ with st.sidebar:
                 max_tokens=max_tokens,
                 stream=stream,
                 demo_context_limit=demo_context_limit,
+                summarize=summarize,
+                keep_recent_turns=keep_recent_turns,
             )
             if not configs_equal(cfg, updated_config):
                 agent.set_config(updated_config)
@@ -224,15 +266,98 @@ else:
                     )
                 st.caption(_turn_summary(turn))
 
+    with st.expander("Сжатие истории", expanded=False):
+        chat_stats = store.get_chat_stats(chat_id)
+        st.markdown(
+            "Всего на попытки сжатия (включая оборванные и неуспешные): "
+            f"вх {_fmt_num(chat_stats.summary_input_tokens)} · "
+            f"вых {_fmt_num(chat_stats.summary_output_tokens)} · "
+            f"cache hit {_fmt_num(chat_stats.summary_cache_hit_tokens)} / "
+            f"miss {_fmt_num(chat_stats.summary_cache_miss_tokens)} · "
+            f"{_fmt_cost(chat_stats.summary_cost_usd)}"
+        )
+
+        summary = store.load_summary(chat_id)
+        if summary is None:
+            st.caption("Сводки ещё нет — она появится после первых ходов.")
+        else:
+            st.markdown(summary.content)
+            covered_turns = summary.covered_messages_count // 2
+            st.markdown(
+                f"Сводка заменяет первые {summary.covered_messages_count} сообщений "
+                f"({covered_turns} ходов) в запросе к модели; успешно обновлена: "
+                f"{summary.updated_at}"
+            )
+            st.markdown(
+                "Последнее успешное обновление сводки (агрегат попыток): "
+                f"вх {_fmt_num(summary.prompt_tokens)} · "
+                f"вых {_fmt_num(summary.response_tokens)} · "
+                f"{_fmt_cost(summary.cost_usd)}"
+            )
+            messages = store.load_messages(chat_id)
+            system_prompt = agent.config.system_prompt
+            full_payload = build_payload(
+                system_prompt, messages, "", summarize_enabled=False
+            )
+            compressed_payload = build_payload(
+                system_prompt,
+                messages,
+                "",
+                summary_content=summary.content,
+                covered_messages_count=summary.covered_messages_count,
+                summarize_enabled=True,
+            )
+            full_tokens = sum(
+                estimate_tokens(m["content"]) for m in full_payload
+            )
+            compressed_tokens = sum(
+                estimate_tokens(m["content"]) for m in compressed_payload
+            )
+            st.markdown(
+                f"≈ Контекст запроса без сжатия: {full_tokens} ток. · "
+                f"со сжатием: {compressed_tokens} ток."
+            )
+        st.caption(
+            "Провайдер тарифицирует каждую выполненную попытку, даже если сводка "
+            "не обновлена. Накопительная строка учитывает все попытки; дата "
+            "успешного обновления относится только к самой сводке."
+        )
+
     with st.expander("Статистика текущего чата", expanded=False):
         chat_stats = store.get_chat_stats(chat_id)
+        total_input = _sum_optional(
+            chat_stats.input_tokens, chat_stats.summary_input_tokens
+        )
+        total_cost = _sum_optional(chat_stats.cost_usd, chat_stats.summary_cost_usd)
         st.markdown(f"Ходов: {chat_stats.turns_count}")
         st.markdown(f"Накопленный вход: {_fmt_num(chat_stats.input_tokens)} ток.")
         st.markdown(f"Накопленный выход: {_fmt_num(chat_stats.output_tokens)} ток.")
         st.markdown(
             f"≈ Уникальная история: {_fmt_num(chat_stats.history_tokens_est)} ток."
         )
-        st.markdown(f"≈ Стоимость: {_fmt_cost(chat_stats.cost_usd)}")
+        st.markdown(f"≈ Стоимость ходов: {_fmt_cost(chat_stats.cost_usd)}")
+        st.markdown(
+            f"Накопленный вход на сжатие: "
+            f"{_fmt_num(chat_stats.summary_input_tokens)} ток."
+        )
+        st.markdown(
+            f"Накопленный выход на сжатие: "
+            f"{_fmt_num(chat_stats.summary_output_tokens)} ток."
+        )
+        st.markdown(
+            f"Накопленный cache hit на сжатие: "
+            f"{_fmt_num(chat_stats.summary_cache_hit_tokens)} ток."
+        )
+        st.markdown(
+            f"Накопленный cache miss на сжатие: "
+            f"{_fmt_num(chat_stats.summary_cache_miss_tokens)} ток."
+        )
+        st.markdown(
+            f"≈ Стоимость попыток сжатия (включая оборванные): "
+            f"{_fmt_cost(chat_stats.summary_cost_usd)}"
+        )
+        st.markdown(f"Итоговый вход: {_fmt_num(total_input)} ток.")
+        st.markdown(f"≈ Итоговая стоимость: {_fmt_cost(total_cost)}")
 
         turn_rows = []
         for index, turn in enumerate(store.list_turns(chat_id), start=1):
@@ -267,7 +392,11 @@ else:
                     "Накопленный вход": _fmt_num(chat.input_tokens),
                     "Накопленный выход": _fmt_num(chat.output_tokens),
                     "≈ Уникальная история": _fmt_num(chat.history_tokens_est),
-                    "≈ Стоимость": _fmt_cost(chat.cost_usd),
+                    "≈ Стоимость ходов": _fmt_cost(chat.cost_usd),
+                    "≈ Стоимость сжатия": _fmt_cost(chat.summary_cost_usd),
+                    "≈ Итого": _fmt_cost(
+                        _sum_optional(chat.cost_usd, chat.summary_cost_usd)
+                    ),
                 }
             )
         if comparison_rows:
@@ -289,7 +418,11 @@ else:
                     indicator = WaitingIndicator(st.spinner("Ожидание ответа..."), placeholder)
 
                     try:
-                        result = agent.ask(prompt, on_chunk=indicator.show_chunk)
+                        result = agent.ask(
+                            prompt,
+                            on_chunk=indicator.show_chunk,
+                            on_summarizing=lambda: st.spinner("Сжимаю историю..."),
+                        )
                     except ContextLimitError as exc:
                         indicator.clear()
                         st.warning(str(exc))
@@ -305,12 +438,17 @@ else:
                         st.error(f"Ошибка: {exc}")
                     else:
                         indicator.show_chunk(result.text)
+                        st.session_state.summary_error = result.summary_error
                         st.rerun()
                 else:
                     try:
                         with st.spinner("Ожидание ответа..."):
-                            result = agent.ask(prompt)
+                            result = agent.ask(
+                                prompt,
+                                on_summarizing=lambda: st.spinner("Сжимаю историю..."),
+                            )
                         st.markdown(result.text)
+                        st.session_state.summary_error = result.summary_error
                         st.rerun()
                     except ContextLimitError as exc:
                         st.warning(str(exc))

@@ -6,7 +6,7 @@ from openai import OpenAI
 
 load_dotenv()
 
-MODEL = "deepseek-v4-flash"
+MODEL = "deepseek-flash"
 MAX_TOKENS = 1500
 TEMPERATURE = 0.2
 BASE_URL = "https://api.deepseek.com"

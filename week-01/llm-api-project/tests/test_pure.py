@@ -2,10 +2,12 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import common
 from days.day2 import validate_recipe
 from days.day3 import OPERATIONS, calculate_optimum, parse_final_answer, validate_answer
 from days.day4 import count_words
 from days.day5 import (
+    DAY5_MODELS,
     FLASH_COST,
     calculate_cost,
     compute_tokens_per_second,
@@ -379,6 +381,23 @@ class ValidateDay5AnswerTest(unittest.TestCase):
         ok, reason = validate_day5_answer("нет ответа")
         self.assertFalse(ok)
         self.assertEqual(reason, "нет строки ANSWER в корректном формате")
+
+
+class ModelIdentifierTest(unittest.TestCase):
+    def test_common_model_is_canonical(self):
+        self.assertEqual(common.MODEL, "deepseek-flash")
+
+    def test_day5_flash_spec_is_canonical(self):
+        flash = next(spec for spec in DAY5_MODELS if spec["key"] == "deepseek_flash")
+        self.assertEqual(flash["model"], "deepseek-flash")
+        self.assertEqual(flash["label"], "DeepSeek V4.1 Flash (средняя)")
+        self.assertEqual(flash["official_name"], "DeepSeek-V4.1-Flash")
+
+    def test_day5_pro_spec_unchanged(self):
+        pro = next(spec for spec in DAY5_MODELS if spec["key"] == "deepseek_pro")
+        self.assertEqual(pro["model"], "deepseek-v4-pro")
+        self.assertEqual(pro["label"], "DeepSeek V4 Pro (сильная)")
+        self.assertEqual(pro["official_name"], "DeepSeek-V4-Pro-0813")
 
 
 if __name__ == "__main__":
