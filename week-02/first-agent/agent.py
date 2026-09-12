@@ -18,15 +18,36 @@ from context import (
     SUMMARY_MAX_TOKENS,
     SUMMARY_RETRY_MAX_TOKENS,
     SUMMARY_TEMPERATURE,
+    build_facts_payload,
     build_payload,
+    build_sliding_payload,
     build_summarization_messages,
     clamp_covered_messages,
     plan_compression,
     validate_summary,
 )
+from facts import (
+    FACTS_MAX_TOKENS,
+    FACTS_RETRY_MAX_TOKENS,
+    FACTS_TEMPERATURE,
+    FactsOutcome,
+    build_facts_extraction_messages,
+    parse_facts_response,
+)
 from models import DEFAULT_MODEL, normalize_model
 from pricing import estimate_cost
 from stats import AskResult, SummaryOutcome, TurnStats, aggregate_stats
+from strategies import (
+    DEFAULT_FACTS_WINDOW,
+    DEFAULT_SLIDING_WINDOW,
+    STRATEGY_FACTS,
+    STRATEGY_FULL,
+    STRATEGY_SLIDING,
+    STRATEGY_SUMMARY,
+    normalize_strategy,
+    normalize_window,
+    summary_compression_enabled,
+)
 from tokens import estimate_tokens
 
 BASE_URL = "https://api.deepseek.com"
@@ -46,7 +67,7 @@ def get_client():
 
 @dataclass
 class AgentConfig:
-    """Agent configuration: model and generation parameters."""
+    """Agent configuration: model, generation and context-strategy parameters."""
 
     model: str = DEFAULT_MODEL
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -56,14 +77,29 @@ class AgentConfig:
     demo_context_limit: int | None = None
     summarize: bool = True
     keep_recent_turns: int = 3
+    context_strategy: str | None = None
+    sliding_window_messages: int = 6
+    facts_window_messages: int = 6
 
     def __post_init__(self):
-        """Normalize a legacy model ID to its canonical form.
+        """Normalize the model, the context strategy and the window sizes.
 
-        Normalizing here means any config source (constructor, restored store
-        row, UI input) always reaches the API under the canonical ID.
+        ``context_strategy`` is the single source of truth for the payload
+        mode. When it is missing, the legacy ``summarize`` flag maps onto
+        full/summary. ``summarize`` itself is never rewritten from the
+        strategy, so an explicitly disabled compression stays disabled.
         """
         self.model = normalize_model(self.model)
+        if self.context_strategy is None:
+            self.context_strategy = STRATEGY_SUMMARY if self.summarize else STRATEGY_FULL
+        else:
+            self.context_strategy = normalize_strategy(self.context_strategy)
+        self.sliding_window_messages = normalize_window(
+            self.sliding_window_messages, DEFAULT_SLIDING_WINDOW
+        )
+        self.facts_window_messages = normalize_window(
+            self.facts_window_messages, DEFAULT_FACTS_WINDOW
+        )
 
 
 class ContextLimitError(Exception):
@@ -190,21 +226,58 @@ class ChatAgent:
             config = AgentConfig(**store.load_config(chat_id))
         self._config = config if config is not None else AgentConfig()
 
+        self._active_branch_id = None
+        get_active = getattr(store, "get_active_branch", None) if store is not None else None
+        if get_active is not None and chat_id is not None:
+            branch = get_active(chat_id)
+            if branch is not None:
+                self._active_branch_id = branch.id
+
         history = [{"role": "system", "content": self._config.system_prompt}]
         if store is not None and chat_id is not None:
-            history.extend(store.load_messages(chat_id))
+            load_line = getattr(store, "load_branch_line", None)
+            if load_line is not None:
+                history.extend(
+                    {"role": message.role, "content": message.content}
+                    for message in load_line(chat_id)
+                )
+            else:
+                history.extend(store.load_messages(chat_id))
         self._history = history
 
         self._summary_content = None
         self._covered_messages_count = 0
-        load_summary = getattr(store, "load_summary", None) if store is not None else None
-        if load_summary is not None and chat_id is not None:
-            stored = load_summary(chat_id)
+        self._facts = []
+        self._facts_anchor = None
+        self._reload_auxiliary_state()
+
+    def _reload_auxiliary_state(self) -> None:
+        """Load the summary and facts for the active line without API calls.
+
+        Every accessor is duck-typed: a store that predates Day 10 simply
+        leaves the auxiliary state empty instead of breaking.
+        """
+        if self._store is None or self._chat_id is None:
+            return
+
+        load_summary = getattr(self._store, "load_summary", None)
+        if load_summary is not None:
+            stored = load_summary(self._chat_id, branch_id=self._active_branch_id)
             if stored is not None:
                 self._summary_content = stored.content
                 self._covered_messages_count = clamp_covered_messages(
-                    stored.covered_messages_count, len(history) - 1
+                    stored.covered_messages_count, len(self._history) - 1
                 )
+            else:
+                self._summary_content = None
+                self._covered_messages_count = 0
+
+        load_facts = getattr(self._store, "load_facts", None)
+        self._facts = load_facts(self._chat_id) if load_facts is not None else []
+        get_anchor = getattr(self._store, "get_facts_anchor", None)
+        self._facts_anchor = (
+            get_anchor(self._chat_id) if get_anchor is not None else None
+        )
 
     @property
     def history(self):
@@ -216,14 +289,32 @@ class ChatAgent:
         """A copy of the config so external mutation cannot corrupt state."""
         return AgentConfig(**asdict(self._config))
 
+    @property
+    def active_branch_id(self):
+        """The active branch id, or ``None`` for the main line."""
+        return self._active_branch_id
+
     def set_config(self, config: AgentConfig):
-        """Replace the configuration, persisting it when a store is bound."""
+        """Replace the configuration, persisting it when a store is bound.
+
+        A strategy change reloads the auxiliary summary/facts state for the
+        active line; this is local and never triggers a paid call.
+        """
+        strategy_changed = config.context_strategy != self._config.context_strategy
         self._config = config
         self._history[0]["content"] = config.system_prompt
+        if strategy_changed:
+            self._reload_auxiliary_state()
         if self._store is not None:
             self._store.save_config(self._chat_id, config)
 
-    def ask(self, user_message: str, on_chunk=None, on_summarizing=None) -> AskResult:
+    def ask(
+        self,
+        user_message: str,
+        on_chunk=None,
+        on_summarizing=None,
+        on_facts_updating=None,
+    ) -> AskResult:
         """Send a message to the LLM and return the answer plus its statistics.
 
         Supports both streaming and non-streaming modes:
@@ -231,37 +322,36 @@ class ChatAgent:
           accumulated text, and capture usage/finish reason from the chunks.
         - ``stream=False``: single response; ``on_chunk`` is not called.
 
-        When the demo context limit is exceeded, compression is attempted first
-        (if enabled) so a long chat can still produce a reply; only when the
-        compressed payload still does not fit (or compression is disabled) is
-        :class:`ContextLimitError` raised, before any history/database mutation.
+        The payload is assembled from the configured context strategy. When the
+        demo context limit is exceeded, only the summary strategy may attempt a
+        fallback compression; every other strategy fails before any request or
+        mutation so no paid call happens.
 
-        After a successful turn, compression runs in batches: the first summary
-        is created as soon as one old turn accumulates, later updates only once
-        enough additional turns accumulate. A compression failure never breaks
-        the turn: it is reported through ``AskResult.summary_error``.
+        Post-turn work depends on the strategy: ``summary`` may update the
+        rolling summary, ``sticky_facts`` may extract facts, and
+        ``full``/``sliding``/``branching`` never trigger an auxiliary call.
+        Failures are reported through ``summary_error``/``facts_error`` and
+        never break the already-saved turn.
         """
         if not user_message.strip():
             raise ValueError("Message must not be empty")
 
+        strategy = self._config.context_strategy
         summary_error = None
+        facts_error = None
 
         # Demo pre-check runs before the API call and before mutating history.
         payload_messages = self._build_payload(user_message)
-        est_input = sum(
-            estimate_tokens(message["content"]) for message in payload_messages
-        )
+        est_input = self._estimate_payload(payload_messages)
         if (
             self._config.demo_context_limit is not None
             and est_input + self._config.max_tokens > self._config.demo_context_limit
         ):
-            if self._config.summarize:
+            if summary_compression_enabled(strategy, self._config.summarize):
                 err = self._try_compress(on_summarizing, min_batch=1)
                 summary_error = summary_error or err
                 payload_messages = self._build_payload(user_message)
-                est_input = sum(
-                    estimate_tokens(message["content"]) for message in payload_messages
-                )
+                est_input = self._estimate_payload(payload_messages)
             if est_input + self._config.max_tokens > self._config.demo_context_limit:
                 raise ContextLimitError(
                     estimated_input_tokens=est_input,
@@ -330,29 +420,98 @@ class ChatAgent:
         self._history.append({"role": "assistant", "content": answer})
         if self._store is not None:
             try:
-                self._store.save_turn(self._chat_id, user_message, answer, stats=stats)
+                if self._active_branch_id is None:
+                    self._store.save_turn(
+                        self._chat_id, user_message, answer, stats=stats
+                    )
+                else:
+                    self._store.save_turn(
+                        self._chat_id,
+                        user_message,
+                        answer,
+                        stats=stats,
+                        branch_id=self._active_branch_id,
+                    )
             except Exception:
                 self._history.pop()
                 self._history.pop()
                 raise
+            self._record_last_context(est_input, stats)
 
-        # Batch compression: the first summary is created eagerly, subsequent
-        # updates only after COMPRESSION_BATCH_TURNS more turns accumulate.
-        min_batch = COMPRESSION_BATCH_TURNS if self._covered_messages_count > 0 else 1
-        err = self._try_compress(on_summarizing, min_batch)
-        summary_error = summary_error or err
+        if strategy == STRATEGY_SUMMARY:
+            # Batch compression: the first summary is created eagerly, later
+            # updates only after COMPRESSION_BATCH_TURNS more turns accumulate.
+            min_batch = (
+                COMPRESSION_BATCH_TURNS if self._covered_messages_count > 0 else 1
+            )
+            err = self._try_compress(on_summarizing, min_batch)
+            summary_error = summary_error or err
+        elif strategy == STRATEGY_FACTS:
+            facts_error = self._try_update_facts(on_facts_updating)
 
-        return AskResult(text=answer, stats=stats, summary_error=summary_error)
+        return AskResult(
+            text=answer,
+            stats=stats,
+            summary_error=summary_error,
+            facts_error=facts_error,
+        )
+
+    @staticmethod
+    def _estimate_payload(payload_messages) -> int:
+        return sum(estimate_tokens(message["content"]) for message in payload_messages)
+
+    def _record_last_context(self, est_input, stats) -> None:
+        """Store the size of the last main payload for the statistics panel.
+
+        The exact ``prompt_tokens`` is preferred; when the provider reported
+        none, the local estimate of the sent payload is used. This is a
+        display-only metric, so a failure must not fail the saved turn.
+        """
+        if self._store is None:
+            return
+        setter = getattr(self._store, "set_last_context_tokens", None)
+        if setter is None:
+            return
+        tokens = stats.request_tokens if stats.request_tokens is not None else est_input
+        try:
+            setter(self._chat_id, tokens)
+        except Exception:
+            pass
 
     def _build_payload(self, user_message):
-        """Assemble the messages for the next request, applying the summary."""
+        """Assemble the messages for the next request by context strategy."""
+        strategy = self._config.context_strategy
+        history = self._history[1:]
+        if strategy == STRATEGY_SLIDING:
+            return build_sliding_payload(
+                self._config.system_prompt,
+                history,
+                user_message,
+                self._config.sliding_window_messages,
+            )
+        if strategy == STRATEGY_FACTS:
+            return build_facts_payload(
+                self._config.system_prompt,
+                self._facts,
+                history,
+                user_message,
+                self._config.facts_window_messages,
+            )
+        if strategy == STRATEGY_SUMMARY:
+            return build_payload(
+                self._config.system_prompt,
+                history,
+                user_message,
+                self._summary_content,
+                self._covered_messages_count,
+                summary_compression_enabled(strategy, self._config.summarize),
+            )
+        # full and branching both send the uncompressed line history.
         return build_payload(
             self._config.system_prompt,
-            self._history[1:],
+            history,
             user_message,
-            self._summary_content,
-            self._covered_messages_count,
-            self._config.summarize,
+            summarize_enabled=False,
         )
 
     def _try_compress(self, on_summarizing, min_batch) -> str | None:
@@ -365,7 +524,9 @@ class ChatAgent:
         Returns a human-readable error string on failure, or ``None`` when
         there was nothing to compress or it succeeded.
         """
-        if not self._config.summarize:
+        if not summary_compression_enabled(
+            self._config.context_strategy, self._config.summarize
+        ):
             return None
         plan = plan_compression(
             self._history[1:],
@@ -422,6 +583,7 @@ class ChatAgent:
                     outcome.text,
                     plan.new_covered_messages_count,
                     stats=aggregate,
+                    branch_id=self._active_branch_id,
                 )
             self._summary_content = outcome.text
             self._covered_messages_count = plan.new_covered_messages_count
@@ -433,7 +595,7 @@ class ChatAgent:
                 "когда накопится достаточно старых ходов."
             )
 
-    def _summary_attempt_stats(self, response) -> TurnStats:
+    def _attempt_stats(self, response) -> TurnStats:
         """Extract usage/finish reason of one summarisation attempt and price it."""
         finish_reason = getattr(response.choices[0], "finish_reason", None)
         usage_map = _extract_usage(getattr(response, "usage", None))
@@ -464,10 +626,10 @@ class ChatAgent:
         attempts = []
         try:
             response = self._request_summary(messages, SUMMARY_MAX_TOKENS)
-            attempts.append(self._summary_attempt_stats(response))
+            attempts.append(self._attempt_stats(response))
             if attempts[-1].finish_reason in ("length", "max_tokens"):
                 response = self._request_summary(messages, SUMMARY_RETRY_MAX_TOKENS)
-                attempts.append(self._summary_attempt_stats(response))
+                attempts.append(self._attempt_stats(response))
             if attempts[-1].finish_reason in ("length", "max_tokens"):
                 return SummaryOutcome(
                     attempts=attempts,
@@ -489,5 +651,126 @@ class ChatAgent:
             messages=messages,
             stream=False,
             temperature=SUMMARY_TEMPERATURE,
+            max_tokens=max_tokens,
+        )
+
+    def _try_update_facts(self, on_facts_updating) -> str | None:
+        """Update sticky facts from the messages not yet covered by the anchor.
+
+        Only runs for the ``sticky_facts`` strategy inside a user turn; opening
+        a chat, changing settings or switching lines never calls the provider.
+        A successful call (including a valid empty list) advances the anchor and
+        records an ok bucket; interrupted, invalid or failed calls go to the
+        fail bucket and leave facts and anchor untouched. Returns a warning
+        string on failure, or ``None`` on success/no-op.
+        """
+        strategy = self._config.context_strategy
+        if strategy != STRATEGY_FACTS or self._store is None or self._chat_id is None:
+            return None
+        load_after = getattr(self._store, "load_line_messages_after", None)
+        save_facts = getattr(self._store, "save_facts", None)
+        if load_after is None or save_facts is None:
+            return None
+
+        anchor = self._facts_anchor or 0
+        pending = load_after(self._chat_id, anchor)
+        if not pending:
+            return None
+        pending_messages = [
+            {"role": message.role, "content": message.content} for message in pending
+        ]
+        new_anchor = max(
+            message.id for message in pending if message.id is not None
+        )
+
+        try:
+            cm = on_facts_updating() if on_facts_updating is not None else None
+            with (cm or nullcontext()):
+                outcome = self._run_facts_update(self._facts, pending_messages)
+        except Exception as exc:
+            return (
+                f"Не удалось обновить факты ({exc}). Переписка сохранена; "
+                "прежняя память не изменена."
+            )
+
+        record = getattr(self._store, "record_facts_attempt", None)
+        if record is not None:
+            for attempt_stats, ok in outcome.attempts:
+                try:
+                    record(self._chat_id, attempt_stats, not ok)
+                except Exception:
+                    # Accounting must never break an already-saved turn.
+                    pass
+
+        if outcome.operations is None:
+            return (
+                f"Факты не обновлены ({outcome.error}). "
+                "Переписка и прежняя память не изменены."
+            )
+
+        try:
+            save_facts(self._chat_id, outcome.operations, new_anchor)
+        except Exception as exc:
+            return (
+                f"Не удалось сохранить факты ({exc}). "
+                "Переписка и прежняя память не изменены."
+            )
+
+        load_facts = getattr(self._store, "load_facts", None)
+        if load_facts is not None:
+            try:
+                self._facts = load_facts(self._chat_id)
+            except Exception:
+                # The facts were saved; a reload failure must not fail the turn.
+                pass
+        self._facts_anchor = new_anchor
+        return None
+
+    def _run_facts_update(self, active_facts, pending_messages) -> FactsOutcome:
+        """Run one or two facts-extraction attempts and return their outcome.
+
+        A single retry is made only when the response is truncated
+        (``length``/``max_tokens``), mirroring the summary pipeline. Every
+        executed attempt is kept as a ``(stats, ok)`` pair so the caller can
+        bill it into the correct bucket; provider and parse failures are
+        reported through ``error`` instead of being raised.
+        """
+        messages = build_facts_extraction_messages(active_facts, pending_messages)
+        attempts: list[tuple[TurnStats, bool]] = []
+        try:
+            response = self._request_facts(messages, FACTS_MAX_TOKENS)
+            stats = self._attempt_stats(response)
+            if stats.finish_reason in ("length", "max_tokens"):
+                attempts.append((stats, False))
+                response = self._request_facts(messages, FACTS_RETRY_MAX_TOKENS)
+                stats = self._attempt_stats(response)
+                if stats.finish_reason in ("length", "max_tokens"):
+                    attempts.append((stats, False))
+                    return FactsOutcome(
+                        attempts=attempts,
+                        error=(
+                            "ответ модели обрезан "
+                            f"(finish_reason={stats.finish_reason})"
+                        ),
+                    )
+            text = response.choices[0].message.content or ""
+            try:
+                operations = parse_facts_response(text)
+            except ValueError:
+                # The call was executed and must still be billed as a failure.
+                attempts.append((stats, False))
+                raise
+            attempts.append((stats, True))
+            return FactsOutcome(attempts=attempts, operations=operations)
+        except Exception as exc:
+            return FactsOutcome(attempts=attempts, error=str(exc))
+
+    def _request_facts(self, messages, max_tokens):
+        """Issue a single non-stream facts-extraction request."""
+        return self._client.chat.completions.create(
+            model=self._config.model,
+            messages=messages,
+            stream=False,
+            temperature=FACTS_TEMPERATURE,
             max_tokens=max_tokens,
         )

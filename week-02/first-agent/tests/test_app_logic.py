@@ -134,6 +134,43 @@ class ConfigsEqualTest(unittest.TestCase):
         self.assertTrue(configs_equal(self.base, replace(self.base)))
 
 
+class ConfigsEqualStrategyTest(unittest.TestCase):
+    """Day 10: the context strategy and windows must be compared for real."""
+
+    def setUp(self):
+        self.base = AgentConfig(context_strategy="summary", summarize=True)
+
+    def test_strategy_change_not_equal(self):
+        self.assertFalse(
+            configs_equal(self.base, replace(self.base, context_strategy="full"))
+        )
+
+    def test_sliding_window_change_not_equal(self):
+        self.assertFalse(
+            configs_equal(
+                self.base, replace(self.base, sliding_window_messages=10)
+            )
+        )
+
+    def test_facts_window_change_not_equal(self):
+        self.assertFalse(
+            configs_equal(self.base, replace(self.base, facts_window_messages=10))
+        )
+
+    def test_full_strategy_ignores_summarize_flag(self):
+        enabled = AgentConfig(context_strategy="full", summarize=True)
+        disabled = AgentConfig(context_strategy="full", summarize=False)
+        self.assertTrue(configs_equal(enabled, disabled))
+
+    def test_same_strategy_and_windows_equal(self):
+        other = replace(
+            self.base,
+            sliding_window_messages=self.base.sliding_window_messages,
+            facts_window_messages=self.base.facts_window_messages,
+        )
+        self.assertTrue(configs_equal(self.base, other))
+
+
 class WaitingIndicatorTest(unittest.TestCase):
     def test_spinner_entered_at_construction_not_exited(self):
         spinner = FakeSpinner()

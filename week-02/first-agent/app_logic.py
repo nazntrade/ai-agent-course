@@ -21,7 +21,9 @@ def configs_equal(current: AgentConfig, updated: AgentConfig) -> bool:
     ``0`` both mean "disabled": this avoids a spurious config save on every
     rerun when the demo limit is turned off. ``temperature`` is compared with
     a small tolerance to survive float round-trips through the UI widget.
-    Every other field is compared exactly.
+    ``summarize`` is compared by its effective value (the strategy must also be
+    ``summary``), so a UI that derives it from the strategy cannot cause a
+    spurious save. Every other field is compared exactly.
     """
     if current.model != updated.model:
         return False
@@ -31,7 +33,19 @@ def configs_equal(current: AgentConfig, updated: AgentConfig) -> bool:
         return False
     if bool(current.stream) != bool(updated.stream):
         return False
-    if bool(current.summarize) != bool(updated.summarize):
+    if current.context_strategy != updated.context_strategy:
+        return False
+    if current.sliding_window_messages != updated.sliding_window_messages:
+        return False
+    if current.facts_window_messages != updated.facts_window_messages:
+        return False
+    current_summarize = (
+        bool(current.summarize) and current.context_strategy == "summary"
+    )
+    updated_summarize = (
+        bool(updated.summarize) and updated.context_strategy == "summary"
+    )
+    if current_summarize != updated_summarize:
         return False
     if current.keep_recent_turns != updated.keep_recent_turns:
         return False

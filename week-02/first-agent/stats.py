@@ -37,11 +37,13 @@ class AskResult:
 
     ``summary_error`` is set when post-turn history compression failed: the
     turn itself was still saved, but the summary could not be updated.
+    ``facts_error`` is the analogous warning for the sticky-facts pipeline.
     """
 
     text: str
     stats: TurnStats
     summary_error: str | None = None
+    facts_error: str | None = None
 
 
 @dataclass

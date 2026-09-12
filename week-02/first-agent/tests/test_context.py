@@ -8,12 +8,15 @@ import unittest
 
 from context import (
     COMPRESSION_BATCH_TURNS,
+    build_facts_payload,
     build_payload,
+    build_sliding_payload,
     build_summarization_messages,
     clamp_covered_messages,
     plan_compression,
     validate_summary,
 )
+from facts import Fact, FACT_STATUS_ACTIVE
 
 
 def make_pairs(turns):
@@ -203,6 +206,71 @@ class ValidateSummaryTest(unittest.TestCase):
 
     def test_accepts_non_empty(self):
         validate_summary("Короткая сводка")  # must not raise
+
+
+class BuildSlidingPayloadTest(unittest.TestCase):
+    def test_keeps_last_window_minus_one_history_plus_current(self):
+        pairs = make_pairs(3)  # 6 messages
+        payload = build_sliding_payload("система", pairs, "новый", 3)
+        # system + last 2 history messages + new user = 4 messages
+        self.assertEqual(
+            [m["role"] for m in payload],
+            ["system", "user", "assistant", "user"],
+        )
+        self.assertEqual(payload[0]["content"], "система")
+        self.assertEqual(payload[-1]["content"], "новый")
+        contents = [m["content"] for m in payload]
+        self.assertNotIn("вопрос 1", contents)
+        self.assertIn("ответ 3", contents)
+
+    def test_window_one_sends_only_current_request(self):
+        pairs = make_pairs(3)
+        payload = build_sliding_payload("система", pairs, "новый", 1)
+        self.assertEqual([m["role"] for m in payload], ["system", "user"])
+        self.assertEqual(payload[-1]["content"], "новый")
+
+    def test_window_larger_than_history_sends_everything(self):
+        pairs = make_pairs(2)
+        payload = build_sliding_payload("система", pairs, "новый", 100)
+        self.assertEqual(len(payload), 1 + 4 + 1)
+        self.assertEqual(payload[1]["content"], "вопрос 1")
+
+    def test_has_no_summary_or_facts_block(self):
+        pairs = make_pairs(3)
+        payload = build_sliding_payload("система", pairs, "новый", 2)
+        self.assertEqual(payload[0]["role"], "system")
+        self.assertEqual(payload.count({"role": "system", "content": "система"}), 1)
+        # Only one system message exists (the prompt), no summary/facts block.
+        self.assertEqual(sum(1 for m in payload if m["role"] == "system"), 1)
+
+
+class BuildFactsPayloadTest(unittest.TestCase):
+    @staticmethod
+    def _fact(key, value, status=FACT_STATUS_ACTIVE):
+        return Fact(1, "goal", key, value, status, None, None)
+
+    def test_active_facts_add_a_system_block(self):
+        pairs = make_pairs(3)
+        payload = build_facts_payload(
+            "система", [self._fact("проект", "Орбита")], pairs, "новый", 3
+        )
+        self.assertEqual(payload[0]["content"], "система")
+        self.assertEqual(payload[1]["role"], "system")
+        self.assertIn("Орбита", payload[1]["content"])
+        self.assertEqual(payload[-1]["content"], "новый")
+
+    def test_without_active_facts_matches_sliding(self):
+        pairs = make_pairs(2)
+        payload = build_facts_payload("система", [], pairs, "новый", 2)
+        self.assertEqual([m["role"] for m in payload], ["system", "assistant", "user"])
+        self.assertEqual(sum(1 for m in payload if m["role"] == "system"), 1)
+
+    def test_window_one_keeps_only_current(self):
+        payload = build_facts_payload(
+            "система", [self._fact("k", "v")], make_pairs(3), "новый", 1
+        )
+        self.assertEqual([m["role"] for m in payload], ["system", "system", "user"])
+        self.assertEqual(payload[-1]["content"], "новый")
 
 
 if __name__ == "__main__":

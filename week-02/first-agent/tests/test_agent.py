@@ -19,6 +19,7 @@ from context import (
     SUMMARY_TEMPERATURE,
     build_payload,
 )
+from facts import FACTS_MAX_TOKENS, FACTS_TEMPERATURE, FactOperation
 from stats import TurnStats
 from storage import ChatStore
 from tokens import estimate_tokens
@@ -71,6 +72,11 @@ def turn(text):
 def summary(text, usage=None, finish_reason=None):
     """A script step producing a non-stream summary response."""
     return lambda kwargs: make_response(text, usage=usage, finish_reason=finish_reason)
+
+
+def facts_json(text, usage=None, finish_reason=None):
+    """A script step producing a non-stream facts-extraction response."""
+    return summary(text, usage=usage, finish_reason=finish_reason)
 
 
 def raises(exc):
@@ -1577,6 +1583,469 @@ class ChatAgentCompressionTest(unittest.TestCase):
             self.assertIsNone(stats.summary_cache_hit_tokens)
             self.assertIsNone(stats.summary_cache_miss_tokens)
             self.assertIsNone(stats.summary_cost_usd)
+
+
+class ContextStrategyAgentTest(unittest.TestCase):
+    """Day 10: payload selection and auxiliary calls per strategy."""
+
+    def setUp(self):
+        os.environ.pop("DEEPSEEK_API_KEY", None)
+
+    def test_full_strategy_sends_full_history_and_never_summarizes(self):
+        client = FakeClient(chunks=chunks_of(["ок"]))
+        agent = ChatAgent(client, config=AgentConfig(context_strategy="full"))
+        for i in range(1, 5):
+            agent.ask(f"вопрос {i}")
+
+        # Only the four main turns, no auxiliary summarisation call.
+        self.assertEqual(client.calls, 4)
+        messages = client.last_kwargs["messages"]
+        self.assertEqual(len(messages), 1 + 3 * 2 + 1)
+        self.assertEqual(messages[1]["content"], "вопрос 1")
+        self.assertNotIn("Предыдущая сводка", " ".join(m["content"] for m in messages))
+
+    def test_sliding_strategy_keeps_only_window(self):
+        client = FakeClient(chunks=chunks_of(["ок"]))
+        agent = ChatAgent(
+            client,
+            config=AgentConfig(context_strategy="sliding", sliding_window_messages=3),
+        )
+        for i in range(1, 6):
+            agent.ask(f"вопрос {i}")
+
+        self.assertEqual(client.calls, 5)
+        messages = client.last_kwargs["messages"]
+        self.assertEqual(
+            [m["role"] for m in messages],
+            ["system", "user", "assistant", "user"],
+        )
+        contents = [m["content"] for m in messages]
+        self.assertIn("вопрос 4", contents)
+        self.assertIn("ок", contents)
+        self.assertNotIn("вопрос 1", contents)
+
+    def test_sliding_demo_limit_checks_window_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            system = "Ты помощник"
+            long_text = "достаточно длинный текст сообщения " * 10
+            chat_id = store.create_chat(
+                AgentConfig(
+                    system_prompt=system,
+                    context_strategy="sliding",
+                    sliding_window_messages=1,
+                    max_tokens=100,
+                )
+            )
+            for i in range(1, 6):
+                store.save_turn(chat_id, f"{long_text} {i}", f"{long_text} ответ {i}")
+
+            new_message = f"{long_text} новый вопрос"
+            window_est = estimate_tokens(system) + estimate_tokens(new_message)
+            limit = window_est + 100  # fits the window, not the full history
+            store.save_config(
+                chat_id,
+                AgentConfig(
+                    system_prompt=system,
+                    context_strategy="sliding",
+                    sliding_window_messages=1,
+                    max_tokens=100,
+                    demo_context_limit=limit,
+                ),
+            )
+
+            client = FakeClient(chunks=chunks_of(["ок"]))
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            agent.ask(new_message)
+            self.assertEqual(client.calls, 1)
+            self.assertEqual(len(client.payloads[0]["messages"]), 2)
+
+    def test_sliding_demo_limit_exceeded_raises_without_calls(self):
+        config = AgentConfig(
+            context_strategy="sliding",
+            sliding_window_messages=1,
+            demo_context_limit=5,
+            max_tokens=5,
+        )
+        client = FakeClient(chunks=chunks_of(["ок"]))
+        agent = ChatAgent(client, config=config)
+        with self.assertRaises(ContextLimitError):
+            agent.ask("Очень длинный вопрос, который точно превысит лимит")
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(len(agent.history), 1)
+
+    def test_facts_strategy_one_call_per_turn_and_no_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(
+                AgentConfig(context_strategy="sticky_facts")
+            )
+            client = FakeClient(
+                script=[
+                    turn("ответ 1"),
+                    facts_json(
+                        '{"facts": [{"key": "city", "value": "Москва"}]}',
+                        usage=make_usage(10, 5),
+                    ),
+                ]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("вопрос 1")
+
+            self.assertEqual(client.calls, 2)
+            self.assertIsNone(result.summary_error)
+            self.assertIsNone(result.facts_error)
+            facts_kwargs = client.payloads[1]
+            self.assertFalse(facts_kwargs["stream"])
+            self.assertEqual(facts_kwargs["temperature"], FACTS_TEMPERATURE)
+            self.assertEqual(facts_kwargs["max_tokens"], FACTS_MAX_TOKENS)
+            facts = store.load_facts(chat_id)
+            self.assertEqual([(f.key, f.value) for f in facts], [("city", "Москва")])
+            self.assertIsNotNone(store.get_facts_anchor(chat_id))
+            stats = store.get_chat_stats(chat_id)
+            self.assertEqual(stats.facts_ok_input_tokens, 10)
+            self.assertEqual(stats.facts_ok_output_tokens, 5)
+            self.assertIsNone(stats.summary_input_tokens)
+
+            # The next main payload clearly includes the stored fact.
+            client2 = FakeClient(
+                script=[
+                    turn("ответ 2"),
+                    facts_json('{"facts": []}', usage=make_usage(3, 2)),
+                ]
+            )
+            agent2 = ChatAgent(client2, store=store, chat_id=chat_id)
+            agent2.ask("вопрос 2")
+            joined = " ".join(m["content"] for m in client2.payloads[0]["messages"])
+            self.assertIn("Москва", joined)
+
+    def test_facts_empty_list_is_noop_but_advances_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            client = FakeClient(
+                script=[
+                    turn("ответ 1"),
+                    facts_json(
+                        '{"facts": [{"key": "k", "value": "v"}]}',
+                        usage=make_usage(1, 1),
+                    ),
+                    turn("ответ 2"),
+                    facts_json('{"facts": []}', usage=make_usage(2, 2)),
+                ]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result1 = agent.ask("вопрос 1")
+            anchor_after_first = store.get_facts_anchor(chat_id)
+            result2 = agent.ask("вопрос 2")
+            anchor_after_second = store.get_facts_anchor(chat_id)
+
+            self.assertIsNone(result1.facts_error)
+            self.assertIsNone(result2.facts_error)
+            self.assertGreater(anchor_after_second, anchor_after_first)
+            self.assertEqual(len(store.load_facts(chat_id)), 1)
+
+    def test_facts_invalid_response_sets_error_and_preserves_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            client = FakeClient(
+                script=[
+                    turn("ответ"),
+                    facts_json("not json", usage=make_usage(10, 5)),
+                ]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("вопрос")
+
+            self.assertIsNotNone(result.facts_error)
+            self.assertEqual(store.load_facts(chat_id), [])
+            self.assertIsNone(store.get_facts_anchor(chat_id))
+            self.assertEqual(len(store.load_messages(chat_id)), 2)
+            stats = store.get_chat_stats(chat_id)
+            self.assertEqual(stats.facts_fail_input_tokens, 10)
+            self.assertIsNone(stats.facts_ok_input_tokens)
+
+    def test_facts_truncated_retries_and_bills_both_to_fail_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            client = FakeClient(
+                script=[
+                    turn("ответ"),
+                    facts_json(
+                        "обрезано", usage=make_usage(10, 5), finish_reason="length"
+                    ),
+                    facts_json(
+                        "обрезано 2", usage=make_usage(20, 10), finish_reason="length"
+                    ),
+                ]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("вопрос")
+
+            self.assertIsNotNone(result.facts_error)
+            self.assertEqual(client.calls, 3)
+            stats = store.get_chat_stats(chat_id)
+            self.assertEqual(stats.facts_fail_input_tokens, 30)
+            self.assertEqual(stats.facts_fail_output_tokens, 15)
+            self.assertIsNone(store.get_facts_anchor(chat_id))
+
+    def test_facts_exception_sets_error_and_keeps_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            client = FakeClient(
+                script=[turn("ответ"), raises(RuntimeError("facts boom"))]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("вопрос")
+
+            self.assertIsNotNone(result.facts_error)
+            self.assertEqual(len(store.load_messages(chat_id)), 2)
+            self.assertEqual(store.load_facts(chat_id), [])
+            self.assertIsNone(store.get_facts_anchor(chat_id))
+
+    def test_facts_retry_after_failure_reprocesses_whole_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            client = FakeClient(
+                script=[
+                    turn("ответ 1"),
+                    facts_json("bad", usage=make_usage(1, 1), finish_reason="length"),
+                    facts_json("bad2", usage=make_usage(1, 1), finish_reason="length"),
+                    turn("ответ 2"),
+                    facts_json(
+                        '{"facts": [{"key": "k", "value": "v"}]}',
+                        usage=make_usage(1, 1),
+                    ),
+                ]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            agent.ask("вопрос 1")
+            self.assertIsNone(store.get_facts_anchor(chat_id))
+            result = agent.ask("вопрос 2")
+
+            self.assertIsNone(result.facts_error)
+            retry_call = client.payloads[4]
+            joined = " ".join(m["content"] for m in retry_call["messages"])
+            self.assertEqual(joined.count("вопрос 1"), 1)
+            self.assertEqual(joined.count("ответ 1"), 1)
+            self.assertEqual(joined.count("вопрос 2"), 1)
+            self.assertEqual(len(store.load_facts(chat_id)), 1)
+
+    def test_opening_facts_chat_does_not_call_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            store.save_turn(chat_id, "вопрос", "ответ")
+            store.save_facts(chat_id, [FactOperation("k", "v")], 2)
+            client = FakeClient()
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            self.assertEqual(client.calls, 0)
+            self.assertEqual([f.key for f in agent._facts], ["k"])
+
+    def test_switching_strategy_keeps_data_without_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="sticky_facts"))
+            store.save_facts(chat_id, [FactOperation("k", "v")], 2)
+            store.save_summary(chat_id, "Сводка", 2, stats=TurnStats(request_tokens=1))
+            client = FakeClient()
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            agent.set_config(AgentConfig(context_strategy="full"))
+            agent.set_config(AgentConfig(context_strategy="sticky_facts"))
+            self.assertEqual(client.calls, 0)
+            self.assertEqual(len(store.load_facts(chat_id)), 1)
+            self.assertEqual(store.load_summary(chat_id).content, "Сводка")
+
+    def test_facts_demo_limit_checks_facts_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            system = "Ты помощник"
+            long_text = "достаточно длинный текст сообщения " * 10
+            chat_id = store.create_chat(
+                AgentConfig(
+                    system_prompt=system,
+                    context_strategy="sticky_facts",
+                    facts_window_messages=1,
+                    max_tokens=100,
+                )
+            )
+            for i in range(1, 6):
+                store.save_turn(chat_id, f"{long_text} {i}", f"{long_text} ответ {i}")
+            last_id = store.load_history(chat_id)[-1].id
+            store.save_facts(chat_id, [FactOperation("city", "Москва")], last_id)
+            new_message = f"{long_text} новый вопрос"
+            from facts import format_facts_block
+
+            facts = store.load_facts(chat_id)
+            facts_block = format_facts_block(facts)
+            window_est = (
+                estimate_tokens(system)
+                + estimate_tokens(facts_block)
+                + estimate_tokens(new_message)
+            )
+            limit = window_est + 100
+            store.save_config(
+                chat_id,
+                AgentConfig(
+                    system_prompt=system,
+                    context_strategy="sticky_facts",
+                    facts_window_messages=1,
+                    max_tokens=100,
+                    demo_context_limit=limit,
+                ),
+            )
+
+            client = FakeClient(
+                script=[
+                    turn("ок"),
+                    facts_json('{"facts": []}', usage=make_usage(1, 1)),
+                ]
+            )
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            agent.ask(new_message)
+            # The main request (which passed the demo check) plus one facts call.
+            self.assertEqual(client.calls, 2)
+            messages = client.payloads[0]["messages"]
+            self.assertEqual(len(messages), 3)  # system + facts + current
+
+    def test_branching_payload_uses_active_line_and_no_aux_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="branching"))
+            store.save_turn(chat_id, "q1", "a1")
+            store.save_turn(chat_id, "q2", "a2")
+            checkpoint = store.load_branch_history(chat_id)[1].id
+            branch = store.create_branch(chat_id, "B", None, checkpoint)
+            store.save_turn(chat_id, "bq", "ba", branch_id=branch)
+            store.set_active_branch(chat_id, branch)
+
+            client = FakeClient(script=[turn("ответ")])
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            result = agent.ask("новый")
+
+            self.assertEqual(client.calls, 1)
+            self.assertIsNone(result.summary_error)
+            self.assertIsNone(result.facts_error)
+            contents = [m["content"] for m in client.last_kwargs["messages"]]
+            self.assertIn("q1", contents)  # shared prefix
+            self.assertIn("bq", contents)  # active branch tail
+            self.assertNotIn("q2", contents)  # after the checkpoint
+            # The new turn is stored on the active branch.
+            self.assertEqual(store.get_active_branch(chat_id).id, branch)
+
+    def test_branching_sibling_isolation_and_branch_id_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="branching"))
+            store.save_turn(chat_id, "q1", "a1")
+            checkpoint = store.load_branch_history(chat_id)[1].id
+            first = store.create_branch(chat_id, "B1", None, checkpoint)
+            second = store.create_branch(chat_id, "B2", None, checkpoint)
+            store.save_turn(chat_id, "only-b2", "a-b2", branch_id=second)
+            store.set_active_branch(chat_id, first)
+
+            client = FakeClient(script=[turn("ответ")])
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            agent.ask("новый")
+            contents = [m["content"] for m in client.last_kwargs["messages"]]
+            self.assertNotIn("only-b2", contents)
+
+            branch_messages = [
+                m for m in store.load_branch_history(chat_id) if m.content == "новый"
+            ]
+            self.assertEqual(len(branch_messages), 1)
+
+    def test_branching_demo_limit_checks_line_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            system = "Ты помощник"
+            long_text = "достаточно длинный текст сообщения " * 10
+            chat_id = store.create_chat(
+                AgentConfig(
+                    system_prompt=system,
+                    context_strategy="branching",
+                    max_tokens=100,
+                )
+            )
+            for i in range(1, 6):
+                store.save_turn(chat_id, f"{long_text} {i}", f"{long_text} ответ {i}")
+            checkpoint = store.load_branch_history(chat_id)[1].id
+            branch = store.create_branch(chat_id, "B", None, checkpoint)
+            store.set_active_branch(chat_id, branch)
+            new_message = "новый короткий вопрос"
+
+            line = store.load_branch_line(chat_id)
+            line_est = estimate_tokens(system) + sum(
+                estimate_tokens(m.content) for m in line
+            )
+            limit = line_est + estimate_tokens(new_message) + 100
+            store.save_config(
+                chat_id,
+                AgentConfig(
+                    system_prompt=system,
+                    context_strategy="branching",
+                    max_tokens=100,
+                    demo_context_limit=limit,
+                ),
+            )
+
+            client = FakeClient(chunks=chunks_of(["ок"]))
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+            agent.ask(new_message)
+            self.assertEqual(client.calls, 1)
+            self.assertEqual(len(agent.history), 1 + 2 + 2)
+
+    def test_delete_branch_reloads_parent_line_without_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig(context_strategy="branching"))
+            store.save_turn(chat_id, "q1", "a1")
+            checkpoint = store.load_branch_history(chat_id)[1].id
+            parent = store.create_branch(chat_id, "A", None, checkpoint)
+            store.save_turn(chat_id, "aq", "aa", branch_id=parent)
+            parent_checkpoint = store.load_line_checkpoints(
+                chat_id, parent
+            )[-1].id
+            child = store.create_branch(
+                chat_id,
+                "B",
+                parent_branch_id=parent,
+                fork_message_id=parent_checkpoint,
+            )
+            store.save_turn(chat_id, "bq", "ba", branch_id=child)
+            store.set_active_branch(chat_id, child)
+
+            client = FakeClient()
+            store.delete_branch(chat_id, child)
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+
+            self.assertEqual(client.calls, 0)
+            self.assertEqual(agent.active_branch_id, parent)
+            self.assertEqual(agent.history[0]["role"], "system")
+            self.assertEqual(
+                [message["content"] for message in agent.history[1:]],
+                ["q1", "a1", "aq", "aa"],
+            )
+
+    def test_strategy_switch_rebuilds_payload(self):
+        client = FakeClient(chunks=chunks_of(["ок"]))
+        agent = ChatAgent(client, config=AgentConfig(context_strategy="full"))
+        for i in range(1, 4):
+            agent.ask(f"вопрос {i}")
+
+        agent.set_config(
+            AgentConfig(context_strategy="sliding", sliding_window_messages=2)
+        )
+        agent.ask("ещё")
+        messages = client.last_kwargs["messages"]
+        # system + last history message + current
+        self.assertEqual(
+            [m["role"] for m in messages], ["system", "assistant", "user"]
+        )
 
 
 class ModelNormalizationTest(unittest.TestCase):

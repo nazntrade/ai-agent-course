@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from facts import format_facts_block
+
 SUMMARY_FORMAT_VERSION = 1
 # Reasoning models spend part of the output budget on hidden reasoning, so the
 # visible summary needs headroom beyond the text itself. The base budget covers
@@ -132,3 +134,41 @@ def validate_summary(text) -> None:
     """Reject an empty or whitespace-only summary."""
     if text is None or not str(text).strip():
         raise ValueError("Summary must not be empty")
+
+
+def build_sliding_payload(
+    system_prompt, messages, new_user_message, window_messages
+):
+    """Assemble a payload with only the last ``window_messages`` messages.
+
+    ``window_messages`` counts the total non-system messages including the new
+    user message, so ``window_messages - 1`` history messages are kept. A window
+    of 1 sends only the current request. The system prompt is never part of the
+    window.
+    """
+    window = max(int(window_messages), 1)
+    payload = [{"role": "system", "content": system_prompt}]
+    if window > 1:
+        payload.extend(list(messages)[-(window - 1):])
+    payload.append({"role": "user", "content": new_user_message})
+    return payload
+
+
+def build_facts_payload(
+    system_prompt, facts, messages, new_user_message, window_messages
+):
+    """Assemble a sliding payload plus a sticky-facts system block.
+
+    The active-facts block is inserted right after the system prompt when at
+    least one fact is active; the recent-message window follows the same rule
+    as :func:`build_sliding_payload`.
+    """
+    window = max(int(window_messages), 1)
+    payload = [{"role": "system", "content": system_prompt}]
+    facts_block = format_facts_block(facts)
+    if facts_block:
+        payload.append({"role": "system", "content": facts_block})
+    if window > 1:
+        payload.extend(list(messages)[-(window - 1):])
+    payload.append({"role": "user", "content": new_user_message})
+    return payload

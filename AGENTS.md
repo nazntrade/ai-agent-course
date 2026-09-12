@@ -63,7 +63,9 @@
 - Существующий проект развивать на месте; не создавать и не распаковывать новые архивные копии.
 - Для запускаемого проекта сохранять run_app.bat.
 - Для человеческого AI-интерфейса всегда показывать индикатор ожидания. Если выбранная модель и конфигурация поддерживают streaming, выводить ответ потоково; иначе показать итоговый ответ после завершения запроса.
-- README обновлять после каждого учебного этапа.
+- README обновлять после каждого учебного этапа: новый учебный день — новый раздел.
+- Отчёт за текущий день ведём накопительно и при необходимости дополняем.
+- Отчёты прошлых дней сохраняем и не переписываем; обнаруженные в них фактические ошибки исправляем точечно.
 
 ## Код
 - Не хранить API-ключи в исходном коде.
@@ -83,7 +85,10 @@
 - All comments, docstrings, TODO/FIXME notes, developer-facing error messages, and technical documentation inside source code must be written in English.
 - Use clear English names for classes, functions, variables, modules, tests, and configuration keys.
 - Do not add comments for obvious code. A comment must explain why a decision exists, a non-obvious constraint, or a potential risk — not repeat what the code already says.
-- User-facing interface text and end-user README instructions may be written in Russian.
+- New screens and features must use English interface text — buttons, select options, labels, hints and error messages.
+- If the text of an existing interface element is changed, translate that element to English.
+- Do not deliberately translate other existing, not-yet-translated screens.
+- Communication with the user, reports, explanations and README files stay in Russian; end-user README instructions remain in Russian.
 
 ## Тестирование
 - Автоматические проверки внешних API выполнять с фиктивным ключом и моками, без реальных сетевых вызовов.
