@@ -8,13 +8,7 @@ permission:
     "*": deny
     "README.md": allow
     "week-*/README.md": allow
-  bash:
-    "*": deny
-    "git status*": allow
-    "git diff*": allow
-    "git log*": allow
-    "git show*": allow
-    "git ls-files*": allow
+  bash: deny
   task:
     "*": deny
     developer: allow

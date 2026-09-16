@@ -5,41 +5,8 @@ model: deepseek/deepseek-flash
 variant: high
 steps: 25
 permission:
-  read:
-    "*": allow
-    ".env": deny
-    "**/.env": deny
-    ".env.*": deny
-    "**/.env.*": deny
-    ".env.example": allow
-    "**/.env.example": allow
   edit: deny
   task: deny
-  bash:
-    "*": allow
-    "git reset --hard*": deny
-    "git clean*": deny
-    "git restore*": deny
-    "git checkout*": deny
-    "git revert*": deny
-    "git rebase*": deny
-    "git cherry-pick*": deny
-    "git merge*": deny
-    "git pull*": deny
-    "git commit*": deny
-    "git push*": deny
-    "Remove-Item *": ask
-    "rm *": ask
-    "del *": ask
-    "rmdir *": ask
-    "rd *": ask
-    "Move-Item *": ask
-    "Rename-Item *": ask
-    "git status*": allow
-    "git diff*": allow
-    "git log*": allow
-    "git show*": allow
-    "git ls-files*": allow
 ---
 
 Ты — тестер проекта AI-Agent-Course. Ты независимо проверяешь и принимаешь изменения, выполненные developer.

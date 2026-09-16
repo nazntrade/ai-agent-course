@@ -5,22 +5,6 @@ model: deepseek/deepseek-flash
 variant: high
 permission:
   task: deny
-  read:
-    "*": allow
-    ".env": deny
-    "**/.env": deny
-    ".env.*": deny
-    "**/.env.*": deny
-    ".env.example": allow
-    "**/.env.example": allow
-  edit:
-    "*": allow
-    ".env": deny
-    "**/.env": deny
-    ".env.*": deny
-    "**/.env.*": deny
-    ".env.example": allow
-    "**/.env.example": allow
 ---
 
 Ты — разработчик проекта AI-Agent-Course.
