@@ -19,12 +19,14 @@ from memory import (
     validate_memory_value,
 )
 from models import display_name
+from profile import format_profile_block
 from storage import (
     DEFAULT_CHAT_TITLE,
     BranchHasChildrenError,
     ChatStore,
     DuplicateBranchNameError,
     DuplicateMemoryKeyError,
+    DuplicateProfileNameError,
 )
 from strategies import (
     STRATEGY_BRANCHING,
@@ -35,6 +37,14 @@ from strategies import (
     strategy_label,
 )
 from tokens import estimate_tokens
+
+# Two mutually exclusive UI modes. Chat is the default landing mode and keeps
+# only the conversation: the diagnostics panels move behind the second mode so
+# the main screen stays short. The mode lives in session state under a widget
+# key, so it survives chat switches and reruns.
+MODE_CHAT = "Chat"
+MODE_DIAGNOSTICS = "Diagnostics / Memory"
+MODE_KEY = "ui_mode"
 
 st.set_page_config(page_title="Memory State Agent", page_icon="🤖", layout="wide")
 st.title("Memory State Agent")
@@ -62,6 +72,16 @@ if pending_summary_error:
 pending_facts_error = st.session_state.pop("facts_error", None)
 if pending_facts_error:
     st.warning(pending_facts_error)
+
+
+def _open_diagnostics():
+    """Callback: switch the UI to Diagnostics from the Chat profile row."""
+    st.session_state[MODE_KEY] = MODE_DIAGNOSTICS
+
+
+def _open_profile_create_form():
+    """Callback: reveal the hidden profile create form in Diagnostics."""
+    st.session_state["profile_create_open"] = True
 
 
 def chat_exists(chat_id):
@@ -106,6 +126,35 @@ def _turn_summary(turn):
         f"{_fmt_cost(turn.cost_usd)} · "
         f"finish: {turn.finish_reason or 'no data'}"
     )
+
+
+def _render_chat_history(store, chat_id):
+    """Render the active line's messages with their turn statistics.
+
+    Only the conversation is drawn here: no diagnostics panel is rendered in
+    Chat mode, so the input field follows the history with nothing in between.
+    """
+    history = store.load_branch_history(chat_id)
+    for message in history:
+        with st.chat_message(message.role):
+            st.markdown(message.content)
+            turn = message.turn
+            if turn is None:
+                st.caption("turn stats: no data")
+            elif message.role == "user":
+                est = turn.user_message_tokens_est
+                if est is not None:
+                    st.caption(f"≈ {est} tokens of the message (estimate)")
+                else:
+                    st.caption("turn stats: no data")
+            else:
+                st.caption(f"response tokens: {_fmt_num(turn.response_tokens)}")
+                if turn.finish_reason == "length":
+                    st.caption(
+                        "The response hit the max_tokens limit (output length "
+                        "limit, not context)"
+                    )
+                st.caption(_turn_summary(turn))
 
 
 def _branch_snippet(message):
@@ -317,6 +366,252 @@ def _render_memory_add_form(scope, scope_token, store, agent, chat_id, branch_id
                 st.rerun()
 
 
+def _profile_edit_form(store, agent, profile):
+    """Edit one existing profile and persist the change."""
+    name = st.text_input(
+        "Name", value=profile.name, key=f"profile_edit_name_{profile.id}"
+    )
+    addressing = st.text_input(
+        "Addressing",
+        value=profile.addressing,
+        key=f"profile_edit_addressing_{profile.id}",
+    )
+    style = st.text_input(
+        "Style", value=profile.style, key=f"profile_edit_style_{profile.id}"
+    )
+    profile_format = st.text_input(
+        "Format",
+        value=profile.format,
+        key=f"profile_edit_format_{profile.id}",
+    )
+    constraints = st.text_input(
+        "Constraints",
+        value=profile.constraints,
+        key=f"profile_edit_constraints_{profile.id}",
+    )
+    domain_context = st.text_input(
+        "Domain context",
+        value=profile.domain_context,
+        key=f"profile_edit_domain_context_{profile.id}",
+    )
+    col_save, col_cancel = st.columns(2)
+    if col_save.button("Save profile", key=f"profile_edit_save_{profile.id}"):
+        try:
+            store.update_profile(
+                profile.id,
+                name,
+                addressing,
+                style,
+                profile_format,
+                constraints=constraints,
+                domain_context=domain_context,
+            )
+        except DuplicateProfileNameError:
+            st.error("A profile with this name already exists.")
+        except KeyError:
+            st.error("This profile no longer exists.")
+        except ValueError:
+            st.error("Profile name must not be empty.")
+        else:
+            st.session_state.pop("profile_edit_target", None)
+            agent.reload_profile()
+            st.rerun()
+    if col_cancel.button("Cancel", key=f"profile_edit_cancel_{profile.id}"):
+        st.session_state.pop("profile_edit_target", None)
+        st.rerun()
+
+
+def _profile_clone_form(store, agent, profile):
+    """Clone one profile under a prefilled "<name> (copy)" name."""
+    new_name = st.text_input(
+        "New profile name",
+        value=f"{profile.name} (copy)",
+        key=f"profile_clone_name_{profile.id}",
+    )
+    col_save, col_cancel = st.columns(2)
+    if col_save.button("Clone profile", key=f"profile_clone_save_{profile.id}"):
+        try:
+            store.clone_profile(profile.id, new_name)
+        except DuplicateProfileNameError:
+            st.error("A profile with this name already exists.")
+        except KeyError:
+            st.error("This profile no longer exists.")
+        except ValueError:
+            st.error("Profile name must not be empty.")
+        else:
+            st.session_state.pop("profile_clone_target", None)
+            agent.reload_profile()
+            st.rerun()
+    if col_cancel.button("Cancel", key=f"profile_clone_cancel_{profile.id}"):
+        st.session_state.pop("profile_clone_target", None)
+        st.rerun()
+
+
+def _profile_create_form(store, agent):
+    """Create a new profile; a fresh nonce clears the form after success."""
+    nonce = st.session_state.get("profile_create_nonce", 0)
+    name = st.text_input("Name", key=f"profile_new_name_{nonce}")
+    addressing = st.text_input("Addressing", key=f"profile_new_addressing_{nonce}")
+    style = st.text_input("Style", key=f"profile_new_style_{nonce}")
+    profile_format = st.text_input("Format", key=f"profile_new_format_{nonce}")
+    constraints = st.text_input("Constraints", key=f"profile_new_constraints_{nonce}")
+    domain_context = st.text_input(
+        "Domain context", key=f"profile_new_domain_context_{nonce}"
+    )
+    if st.button("Create profile", key="profile_create"):
+        try:
+            store.create_profile(
+                name,
+                addressing,
+                style,
+                profile_format,
+                constraints=constraints,
+                domain_context=domain_context,
+            )
+        except DuplicateProfileNameError:
+            st.error("A profile with this name already exists.")
+        except ValueError:
+            st.error("Profile name must not be empty.")
+        else:
+            st.session_state["profile_create_nonce"] = nonce + 1
+            st.session_state.pop("profile_edit_target", None)
+            agent.reload_profile()
+            st.rerun()
+
+
+def _render_active_profile_selector(store, agent, chat_id):
+    """Render the active-profile selector and return the assigned profile.
+
+    Both modes reuse this one widget, so the key stays unique per chat: Chat
+    shows it compactly next to the message input, Diagnostics inside the
+    "User profiles" panel. A deleted profile leaves a stale id in the widget
+    state; it is dropped before the selectbox renders the current assignment.
+    A changed selection is persisted and reloaded before the rerun, so the
+    next request uses it. Reading and writing the assignment never calls the
+    provider.
+    """
+    profiles = store.list_profiles()
+    profile_names = {profile.id: profile.name for profile in profiles}
+    options = [None] + [profile.id for profile in profiles]
+    active = store.get_active_profile(chat_id)
+    active_id = active.id if active is not None else None
+
+    select_key = f"active_profile_{chat_id}"
+    if st.session_state.get(select_key) not in options:
+        st.session_state.pop(select_key, None)
+    selected = st.selectbox(
+        "Active profile for this chat",
+        options=options,
+        index=options.index(active_id) if active_id in options else 0,
+        format_func=lambda value: (
+            "No profile"
+            if value is None
+            else profile_names.get(value, str(value))
+        ),
+        key=select_key,
+    )
+    if selected != active_id:
+        store.set_active_profile(chat_id, selected)
+        agent.reload_profile()
+        st.rerun()
+
+    return active
+
+
+def _render_user_profiles(store, agent, chat_id):
+    """Render profile selection, preview and CRUD for the active chat.
+
+    The section is separate from the memory layers: a profile is not memory and
+    is never stored as a memory item. Every successful mutation reloads the
+    agent's cached profile and reruns, so the next request sees the persisted
+    state. No handler here calls the provider. The create form stays hidden
+    until the toggle is clicked, so the panel opens with the profile list only.
+    """
+    active = _render_active_profile_selector(store, agent, chat_id)
+    profiles = store.list_profiles()
+
+    preview = format_profile_block(active)
+    if preview is None:
+        st.caption("No profile: no profile block is added to the request.")
+    else:
+        st.code(preview)
+        st.caption(f"≈ {estimate_tokens(preview)} tokens in the request.")
+
+    edit_target = st.session_state.get("profile_edit_target")
+    clone_target = st.session_state.get("profile_clone_target")
+    pending_delete = st.session_state.get("pending_profile_delete_id")
+
+    st.markdown("Profiles")
+    for profile in profiles:
+        st.markdown(f"**{profile.name}**")
+        col_edit, col_clone, col_delete = st.columns(3)
+        if col_edit.button("Edit", key=f"profile_edit_{profile.id}"):
+            st.session_state["profile_edit_target"] = profile.id
+            st.session_state.pop("profile_clone_target", None)
+            st.rerun()
+        if col_clone.button("Clone", key=f"profile_clone_{profile.id}"):
+            st.session_state["profile_clone_target"] = profile.id
+            st.session_state.pop("profile_edit_target", None)
+            st.rerun()
+        if col_delete.button("Delete", key=f"profile_delete_{profile.id}"):
+            st.session_state["pending_profile_delete_id"] = profile.id
+            st.rerun()
+
+    if edit_target is not None:
+        target = next(
+            (profile for profile in profiles if profile.id == edit_target), None
+        )
+        if target is None:
+            st.session_state.pop("profile_edit_target", None)
+            st.error("This profile no longer exists.")
+        else:
+            _profile_edit_form(store, agent, target)
+
+    if clone_target is not None:
+        target = next(
+            (profile for profile in profiles if profile.id == clone_target), None
+        )
+        if target is None:
+            st.session_state.pop("profile_clone_target", None)
+            st.error("This profile no longer exists.")
+        else:
+            _profile_clone_form(store, agent, target)
+
+    if pending_delete is not None:
+        target = next(
+            (profile for profile in profiles if profile.id == pending_delete), None
+        )
+        if target is None:
+            st.session_state.pop("pending_profile_delete_id", None)
+            st.error("This profile no longer exists.")
+        else:
+            st.warning(
+                f'Delete profile "{target.name}"? Chats using it will switch to '
+                "No profile."
+            )
+            col_yes, col_no = st.columns(2)
+            if col_yes.button("Yes, delete profile", key="profile_delete_confirm"):
+                try:
+                    store.delete_profile(target.id)
+                except KeyError:
+                    st.error("This profile no longer exists.")
+                else:
+                    st.session_state.pop("pending_profile_delete_id", None)
+                    agent.reload_profile()
+                    st.rerun()
+            if col_no.button("Cancel", key="profile_delete_cancel"):
+                st.session_state.pop("pending_profile_delete_id", None)
+                st.rerun()
+
+    st.button(
+        "➕ Create profile",
+        key="profile_create_toggle",
+        on_click=_open_profile_create_form,
+    )
+    if st.session_state.get("profile_create_open"):
+        _profile_create_form(store, agent)
+
+
 # Resolve the active chat on startup: keep the current chat if it still
 # exists, otherwise open the last selected chat, otherwise the newest one.
 # With no chats at all nothing is selected: the user creates the first chat
@@ -349,6 +644,15 @@ chat_id = st.session_state.chat_id
 agent = st.session_state.agent
 
 with st.sidebar:
+    # The mode switch is the first sidebar control and renders even with no
+    # chats, so Diagnostics stays reachable and the empty state remains usable.
+    st.radio(
+        "Mode",
+        options=(MODE_CHAT, MODE_DIAGNOSTICS),
+        key=MODE_KEY,
+    )
+    mode = st.session_state[MODE_KEY]
+
     st.header("Chats")
 
     # The icon buttons must keep their intrinsic width on every sidebar state
@@ -384,11 +688,12 @@ with st.sidebar:
         label = f"▶ {chat.title}" if chat.id == chat_id else chat.title
         # Stretch the chat button so long titles shrink and ellipsize inside
         # their own column instead of forcing the row wider and clipping the
-        # icons. The icon buttons stay content-sized so the sidebar width does
-        # not change their width.
-        col_name, col_rename, col_delete = st.columns(
-            [0.6, 0.2, 0.2], gap="small"
-        )
+        # icons. The two icon buttons form a single right-aligned horizontal
+        # group (`wrap=False` keeps it on one row), so the pair stays pinned to
+        # the right edge of the sidebar with a fixed inner gap and the distance
+        # to the right edge does not change when the sidebar is widened or
+        # narrowed.
+        col_name, col_actions = st.columns([0.6, 0.4], gap="small")
         if col_name.button(
             label, key=f"chat_{chat.id}", use_container_width=True
         ):
@@ -398,26 +703,32 @@ with st.sidebar:
                 st.session_state.pending_branch_delete_id = None
                 st.session_state.rename_chat_id = None
                 st.rerun()
-        if col_rename.button(
-            "",
-            key=f"rename_{chat.id}",
-            icon=":material/edit:",
-            help="Rename chat",
-            width="content",
-        ):
-            st.session_state.rename_chat_id = chat.id
-            st.session_state.pending_delete_id = None
-            st.rerun()
-        if col_delete.button(
-            "",
-            key=f"delete_{chat.id}",
-            icon=":material/delete:",
-            help="Delete chat",
-            width="content",
-        ):
-            st.session_state.pending_delete_id = chat.id
-            st.session_state.rename_chat_id = None
-            st.rerun()
+        with col_actions:
+            with st.container(
+                horizontal=True,
+                horizontal_alignment="right",
+                wrap=False,
+            ):
+                if st.button(
+                    "",
+                    key=f"rename_{chat.id}",
+                    icon=":material/edit:",
+                    help="Rename chat",
+                    width="content",
+                ):
+                    st.session_state.rename_chat_id = chat.id
+                    st.session_state.pending_delete_id = None
+                    st.rerun()
+                if st.button(
+                    "",
+                    key=f"delete_{chat.id}",
+                    icon=":material/delete:",
+                    help="Delete chat",
+                    width="content",
+                ):
+                    st.session_state.pending_delete_id = chat.id
+                    st.session_state.rename_chat_id = None
+                    st.rerun()
 
         if rename_id == chat.id:
             new_title = st.text_input(
@@ -600,6 +911,17 @@ with st.sidebar:
             if not configs_equal(cfg, updated_config):
                 agent.set_config(updated_config)
 
+        # Always visible: which profile the agent will apply to every request in
+        # this chat. Reading it is a local store lookup and never calls the API.
+        sidebar_profile = store.get_active_profile(chat_id)
+        sidebar_profile_name = (
+            sidebar_profile.name if sidebar_profile is not None else "No profile"
+        )
+        st.caption(
+            f"Active profile: {sidebar_profile_name} · applied to every request "
+            "in this chat automatically."
+        )
+
         active_strategy = agent.config.context_strategy
         chat_stats = store.get_chat_stats(chat_id)
         st.caption(
@@ -612,29 +934,7 @@ with st.sidebar:
 
 if agent is None:
     st.info('No conversations yet. Click "Create chat" in the sidebar to start.')
-else:
-    history = store.load_branch_history(chat_id)
-    for message in history:
-        with st.chat_message(message.role):
-            st.markdown(message.content)
-            turn = message.turn
-            if turn is None:
-                st.caption("turn stats: no data")
-            elif message.role == "user":
-                est = turn.user_message_tokens_est
-                if est is not None:
-                    st.caption(f"≈ {est} tokens of the message (estimate)")
-                else:
-                    st.caption("turn stats: no data")
-            else:
-                st.caption(f"response tokens: {_fmt_num(turn.response_tokens)}")
-                if turn.finish_reason == "length":
-                    st.caption(
-                        "The response hit the max_tokens limit (output length "
-                        "limit, not context)"
-                    )
-                st.caption(_turn_summary(turn))
-
+elif mode == MODE_DIAGNOSTICS:
     # Day 11 explicit memory layers. Working memory is bound to this chat and
     # the exact active line; long-term memory is global and never receives a
     # chat or branch id, so it stays visible from every chat.
@@ -758,6 +1058,13 @@ else:
         st.code(system_prompt)
         st.markdown(f"Invariants · ≈ {estimate_tokens(invariants)} tokens")
         st.code(invariants)
+
+    with st.expander("User profiles", expanded=False):
+        st.caption(
+            "A profile describes how to answer this user. It is not memory, and "
+            "the invariants above always outrank it."
+        )
+        _render_user_profiles(store, agent, chat_id)
 
     active_strategy = agent.config.context_strategy
 
@@ -1271,7 +1578,35 @@ else:
         else:
             st.caption("No conversations yet.")
 
-    prompt = st.chat_input("Enter a message")
+else:
+    _render_chat_history(store, chat_id)
+
+    # Compact profile row: the active profile is the only profile control Chat
+    # mode needs; the full list and CRUD live in Diagnostics behind the button.
+    # The row and the message input share one bottom-pinned container: on its
+    # own, st.chat_input is pinned to the window bottom while the row would stay
+    # in the flow after the history, so the gap between them grew with the
+    # history length. Inside st.bottom the input renders inline, directly below
+    # the row, so both stay attached to the bottom of the main area. Bottom
+    # alignment puts the button on the selectbox baseline: the selector is
+    # taller than the button, so top alignment would pin it to the label line.
+    with st.bottom:
+        col_profile, col_manage = st.columns(
+            [0.75, 0.25], vertical_alignment="bottom"
+        )
+        with col_profile:
+            _render_active_profile_selector(store, agent, chat_id)
+        with col_manage:
+            st.button(
+                "Manage profiles",
+                key="manage_profiles",
+                on_click=_open_diagnostics,
+            )
+
+        prompt = st.chat_input("Enter a message")
+
+    # The reply stays in the main area: rendering it inside st.bottom would
+    # draw the streamed answer into the pinned container instead of the history.
     if prompt is not None:
         if not prompt.strip():
             st.warning("Message must not be empty.")

@@ -10,6 +10,8 @@ import os
 import tempfile
 import unittest
 
+from streamlit.proto.Block_pb2 import Block as BlockProto
+from streamlit.proto.RootContainer_pb2 import RootContainer as RootContainerProto
 from streamlit.testing.v1 import AppTest
 
 from agent import AgentConfig
@@ -19,12 +21,16 @@ from memory import (
     WORKING_MEMORY_BLOCK_TITLE,
     format_memory_block,
 )
+from profile import format_profile_block
 from storage import ChatStore
 from tokens import estimate_tokens
 
 APP_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py"
 )
+
+MODE_KEY = "ui_mode"
+MODE_DIAGNOSTICS = "Diagnostics / Memory"
 
 WINDOW_FIELDS = {
     "summary": "Recent turns without compression",
@@ -33,6 +39,23 @@ WINDOW_FIELDS = {
     "full": None,
     "branching": None,
 }
+
+
+def open_diagnostics(app):
+    """Switch a running ``AppTest`` to Diagnostics and assert a clean rerun.
+
+    The mode radio is addressed by its user key: ``WidgetList`` exposes the
+    same key lookup as any ``ElementList`` and fails with ``KeyError`` when the
+    radio is missing. The helper returns the app so a test can keep chaining.
+    """
+    app.radio(MODE_KEY).set_value(MODE_DIAGNOSTICS).run(timeout=30)
+    if len(app.exception) != 0:
+        raise AssertionError(
+            "Switching to Diagnostics raised: "
+            f"{[item.value for item in app.exception]}"
+        )
+    return app
+
 
 
 class AppUiTest(unittest.TestCase):
@@ -297,7 +320,7 @@ class BranchAppUiTest(unittest.TestCase):
         app.session_state["client"] = object()
         app.run(timeout=30)
         self.assertEqual(len(app.exception), 0)
-        return app
+        return open_diagnostics(app)
 
     @staticmethod
     def _button(app, key):
@@ -530,7 +553,7 @@ class MemoryAppUiTest(unittest.TestCase):
             app.session_state["chat_id"] = chat_id
         app.run(timeout=30)
         self.assertEqual(len(app.exception), 0)
-        return app
+        return open_diagnostics(app)
 
     @staticmethod
     def _button(app, key):
@@ -948,6 +971,545 @@ class MemoryAppUiTest(unittest.TestCase):
                 for item in branch_app.markdown
             )
         )
+
+
+class ProfileAppUiTest(unittest.TestCase):
+    """Day 12 user-profile section rendered and mutated through the UI."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(os.path.join(self._tmp.name, "profile_ui.db"))
+        self.chat_id = self.store.create_chat(AgentConfig(context_strategy="full"))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, chat_id=None):
+        app = AppTest.from_file(APP_PATH)
+        app.session_state["store"] = self.store
+        app.session_state["client"] = object()
+        if chat_id is not None:
+            app.session_state["chat_id"] = chat_id
+        app.run(timeout=30)
+        self.assertEqual(len(app.exception), 0)
+        return open_diagnostics(app)
+
+    @staticmethod
+    def _button(app, key):
+        return next(button for button in app.button if button.key == key)
+
+    @staticmethod
+    def _selectbox(app, key):
+        return next(item for item in app.selectbox if item.key == key)
+
+    @staticmethod
+    def _text_input(app, key):
+        return next(item for item in app.text_input if item.key == key)
+
+    @staticmethod
+    def _captions(app):
+        return [item.value for item in app.caption]
+
+    def test_section_renders_selector_preview_and_seeded_profiles(self):
+        app = self._run()
+        self.assertIn("User profiles", [item.label for item in app.expander])
+        self.assertTrue(
+            any(
+                item.key == f"active_profile_{self.chat_id}"
+                for item in app.selectbox
+            )
+        )
+        markdown_texts = [item.value for item in app.markdown]
+        self.assertTrue(
+            any("**Concise engineer**" in text for text in markdown_texts)
+        )
+        self.assertTrue(
+            any("**Detailed tutor**" in text for text in markdown_texts)
+        )
+        # With no assignment the preview explains that no block is added.
+        self.assertTrue(
+            any(
+                "No profile: no profile block is added to the request." in text
+                for text in self._captions(app)
+            )
+        )
+        # The sidebar always states the active profile.
+        self.assertTrue(
+            any(
+                "Active profile: No profile · applied to every request in this "
+                "chat automatically." in text
+                for text in self._captions(app)
+            )
+        )
+
+    def test_selecting_profile_persists_and_updates_preview(self):
+        target = self.store.list_profiles()[1]
+        app = self._run()
+        box = self._selectbox(app, f"active_profile_{self.chat_id}")
+        self.assertIsNone(box.value)
+
+        box.select(target.id).run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        active = self.store.get_active_profile(self.chat_id)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.id, target.id)
+
+        block = format_profile_block(active)
+        self.assertTrue(any(item.value == block for item in app.code))
+        self.assertTrue(
+            any(
+                f"≈ {estimate_tokens(block)} tokens in the request." in text
+                for text in self._captions(app)
+            )
+        )
+        self.assertTrue(
+            any(
+                f"Active profile: {target.name} · applied to every request in "
+                "this chat automatically." in text
+                for text in self._captions(app)
+            )
+        )
+
+    def test_selecting_no_profile_clears_assignment(self):
+        target = self.store.list_profiles()[0]
+        self.store.set_active_profile(self.chat_id, target.id)
+        app = self._run()
+        box = self._selectbox(app, f"active_profile_{self.chat_id}")
+        self.assertEqual(box.value, target.id)
+
+        # Index 0 is the "No profile" option.
+        box.select_index(0).run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIsNone(self.store.get_active_profile(self.chat_id))
+        self.assertTrue(
+            any(
+                "No profile: no profile block is added to the request." in text
+                for text in self._captions(app)
+            )
+        )
+
+    def test_create_profile_persists_and_clears_form(self):
+        app = self._run()
+        self._button(app, "profile_create_toggle").click().run(timeout=30)
+        self._text_input(app, "profile_new_name_0").set_value("My profile")
+        self._text_input(app, "profile_new_style_0").set_value("short")
+        app.run(timeout=30)
+
+        self._button(app, "profile_create").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        created = next(
+            profile
+            for profile in self.store.list_profiles()
+            if profile.name == "My profile"
+        )
+        self.assertEqual(created.style, "short")
+        self.assertEqual(self._text_input(app, "profile_new_name_1").value, "")
+
+    def test_create_blank_name_shows_error_without_change(self):
+        app = self._run()
+        before = len(self.store.list_profiles())
+        self._button(app, "profile_create_toggle").click().run(timeout=30)
+        self._button(app, "profile_create").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(
+            any(
+                "Profile name must not be empty." in error.value
+                for error in app.error
+            )
+        )
+        self.assertEqual(len(self.store.list_profiles()), before)
+
+    def test_create_duplicate_name_shows_error(self):
+        app = self._run()
+        self._button(app, "profile_create_toggle").click().run(timeout=30)
+        self._text_input(app, "profile_new_name_0").set_value(
+            "  concise   ENGINEER "
+        ).run(timeout=30)
+        self._button(app, "profile_create").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(
+            any("already exists" in error.value for error in app.error)
+        )
+        self.assertEqual(len(self.store.list_profiles()), 2)
+
+    def test_edit_updates_store(self):
+        target = self.store.list_profiles()[0]
+        app = self._run()
+        self._button(app, f"profile_edit_{target.id}").click().run(timeout=30)
+        self._text_input(app, f"profile_edit_name_{target.id}").set_value(
+            "Renamed"
+        ).run(timeout=30)
+        self._button(app, f"profile_edit_save_{target.id}").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(self.store.get_profile(target.id).name, "Renamed")
+
+    def test_edit_cancel_keeps_profile(self):
+        target = self.store.list_profiles()[0]
+        app = self._run()
+        self._button(app, f"profile_edit_{target.id}").click().run(timeout=30)
+        self._text_input(app, f"profile_edit_name_{target.id}").set_value(
+            "Renamed"
+        ).run(timeout=30)
+        self._button(
+            app, f"profile_edit_cancel_{target.id}"
+        ).click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(self.store.get_profile(target.id).name, target.name)
+
+    def test_edit_of_removed_profile_shows_fallback(self):
+        target = self.store.list_profiles()[0]
+        app = self._run()
+        self._button(app, f"profile_edit_{target.id}").click().run(timeout=30)
+        self.store.delete_profile(target.id)
+
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(
+            any(
+                "This profile no longer exists." in error.value
+                for error in app.error
+            )
+        )
+
+    def test_clone_prefills_copy_name_and_creates_it(self):
+        target = self.store.list_profiles()[0]
+        app = self._run()
+        self._button(app, f"profile_clone_{target.id}").click().run(timeout=30)
+
+        field = self._text_input(app, f"profile_clone_name_{target.id}")
+        self.assertEqual(field.value, f"{target.name} (copy)")
+
+        self._button(app, f"profile_clone_save_{target.id}").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        clone = next(
+            profile
+            for profile in self.store.list_profiles()
+            if profile.name == f"{target.name} (copy)"
+        )
+        self.assertEqual(clone.addressing, target.addressing)
+        self.assertEqual(clone.style, target.style)
+
+    def test_delete_requires_confirmation_and_clears_active_profile(self):
+        target = self.store.list_profiles()[0]
+        self.store.set_active_profile(self.chat_id, target.id)
+        app = self._run()
+
+        self._button(app, f"profile_delete_{target.id}").click().run(timeout=30)
+        self.assertTrue(
+            any(
+                f'Delete profile "{target.name}"? Chats using it will switch '
+                "to No profile." in warning.value
+                for warning in app.warning
+            )
+        )
+        self._button(app, "profile_delete_cancel").click().run(timeout=30)
+        self.assertIsNotNone(self.store.get_profile(target.id))
+
+        self._button(app, f"profile_delete_{target.id}").click().run(timeout=30)
+        self._button(app, "profile_delete_confirm").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIsNone(self.store.get_profile(target.id))
+        self.assertIsNone(self.store.get_active_profile(self.chat_id))
+        self.assertTrue(
+            any(
+                "No profile: no profile block is added to the request." in text
+                for text in self._captions(app)
+            )
+        )
+
+
+class ModeAppUiTest(unittest.TestCase):
+    """Chat and Diagnostics split: default mode, layout and switching."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(os.path.join(self._tmp.name, "mode_ui.db"))
+        self.chat_id = self.store.create_chat(AgentConfig())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, chat_id=None, store=None):
+        app = AppTest.from_file(APP_PATH)
+        app.session_state["store"] = store if store is not None else self.store
+        app.session_state["client"] = object()
+        if chat_id is not None:
+            app.session_state["chat_id"] = chat_id
+        app.run(timeout=30)
+        self.assertEqual(len(app.exception), 0)
+        return app
+
+    @staticmethod
+    def _button(app, key):
+        return next(button for button in app.button if button.key == key)
+
+    @staticmethod
+    def _keys(app):
+        return {node.key for node in app if getattr(node, "key", None)}
+
+    @staticmethod
+    def _column_containing(app, key):
+        """Return the ``st.columns`` column that renders the element ``key``."""
+        return next(
+            column
+            for column in app.columns
+            if any(getattr(node, "key", None) == key for node in column)
+        )
+
+    @staticmethod
+    def _parent_block(root, target):
+        """Return the block that directly contains ``target`` in the app tree."""
+        for node in root:
+            children = getattr(node, "children", None)
+            if children and any(child is target for child in children.values()):
+                return node
+        raise AssertionError("the element has no parent block")
+
+    def test_default_mode_is_chat_without_diagnostics(self):
+        app = self._run()
+
+        self.assertEqual(app.radio(MODE_KEY).value, "Chat")
+        self.assertNotIn("Memory layers", [item.value for item in app.subheader])
+        diagnostic_labels = {
+            "Short-term memory · current line",
+            "Working memory · this chat & line",
+            "Long-term memory · shared across chats",
+            "System prompt & invariants (not memory)",
+            "User profiles",
+            "History compression",
+            "Sticky Facts",
+            "Branches",
+            "Current chat statistics",
+            "Conversation comparison",
+        }
+        self.assertFalse(
+            diagnostic_labels & {item.label for item in app.expander}
+        )
+        self.assertFalse(
+            any(
+                key.startswith(("profile_", "mem_", "branch_"))
+                for key in self._keys(app)
+            )
+        )
+        self.assertEqual(len(app.chat_input), 1)
+
+    def test_chat_input_comes_after_history_without_diagnostics_between(self):
+        self.store.save_turn(self.chat_id, "вопрос", "ответ")
+        app = self._run()
+
+        # The history is the last thing in the main container and no
+        # diagnostics panel is interleaved with it.
+        main_types = [node.type for node in app.main]
+        self.assertGreaterEqual(main_types.count("chat_message"), 2)
+        self.assertNotIn("expander", main_types)
+        self.assertFalse(
+            any(node.type == "chat_input" for node in app.main)
+        )
+
+        # Streamlit pins the chat input into its own bottom container, so it is
+        # not a sibling of the messages. In the ordered app tree the input
+        # still comes after the whole history, with nothing in between.
+        ordered = list(app)
+        input_index = ordered.index(app.chat_input[0])
+        message_positions = [
+            index
+            for index, node in enumerate(ordered)
+            if node.type == "chat_message"
+        ]
+        self.assertTrue(message_positions)
+        self.assertGreater(input_index, max(message_positions))
+
+    def test_chat_profile_selector_persists_assignment_in_store_and_agent(self):
+        target = self.store.list_profiles()[1]
+        app = self._run()
+        box = next(
+            item
+            for item in app.selectbox
+            if item.key == f"active_profile_{self.chat_id}"
+        )
+        self.assertIsNone(box.value)
+
+        box.select(target.id).run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.radio(MODE_KEY).value, "Chat")
+        self.assertEqual(
+            self.store.get_active_profile(self.chat_id).id, target.id
+        )
+        self.assertEqual(
+            app.session_state["agent"].active_profile.id, target.id
+        )
+
+    def test_manage_profiles_switches_to_diagnostics_with_crud(self):
+        app = self._run()
+        profile = self.store.list_profiles()[0]
+
+        self._button(app, "manage_profiles").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.radio(MODE_KEY).value, MODE_DIAGNOSTICS)
+        keys = {button.key for button in app.button}
+        self.assertIn(f"profile_edit_{profile.id}", keys)
+        self.assertIn(f"profile_clone_{profile.id}", keys)
+        self.assertIn(f"profile_delete_{profile.id}", keys)
+        # The create form stays hidden until its own toggle is used.
+        self.assertNotIn("profile_create", keys)
+        self.assertNotIn(
+            "profile_new_name_0", {item.key for item in app.text_input}
+        )
+
+    def test_profile_row_bottom_aligns_the_manage_profiles_button(self):
+        app = self._run()
+
+        selector_column = self._column_containing(
+            app, f"active_profile_{self.chat_id}"
+        )
+        manage_column = self._column_containing(app, "manage_profiles")
+
+        # Both controls live in one row: a single column container holds them.
+        self.assertIs(
+            self._parent_block(app, selector_column),
+            self._parent_block(app, manage_column),
+        )
+
+        # The row aligns its content to the bottom, so the button sits on the
+        # selectbox baseline instead of the label line. AppTest cannot measure
+        # the rendered pixels, but it pins the structural alignment request.
+        bottom = BlockProto.Column.VerticalAlignment.BOTTOM
+        self.assertEqual(selector_column.proto.vertical_alignment, bottom)
+        self.assertEqual(manage_column.proto.vertical_alignment, bottom)
+
+    def test_profile_row_and_chat_input_share_one_bottom_container(self):
+        app = self._run()
+
+        selector_column = self._column_containing(
+            app, f"active_profile_{self.chat_id}"
+        )
+        manage_column = self._column_containing(app, "manage_profiles")
+        profile_row = self._parent_block(app, selector_column)
+
+        chat_input = app.chat_input[0]
+        bottom_container = self._parent_block(app, chat_input)
+
+        # The input is rendered inline, not pinned to the window on its own:
+        # the whole profile row sits in the very same container one level
+        # above it, so both controls move as a single bottom block.
+        self.assertIsNot(bottom_container, app.main)
+        self.assertIs(self._parent_block(app, profile_row), bottom_container)
+        self.assertIs(self._parent_block(app, manage_column), profile_row)
+
+        # That shared container is the dedicated bottom container of the main
+        # area, not an ordinary container placed in the history flow. The row
+        # has moved out of the main container entirely.
+        self.assertIs(bottom_container, app[RootContainerProto.BOTTOM])
+        self.assertFalse(any(node is profile_row for node in app.main))
+
+        # The row renders directly above the input and the history stays
+        # outside the container, so the history length cannot change the gap
+        # between the row and the input.
+        children = list(bottom_container.children.values())
+        self.assertLess(children.index(profile_row), children.index(chat_input))
+        self.assertFalse(
+            any(node.type == "chat_message" for node in bottom_container)
+        )
+
+    def test_profile_create_toggle_reveals_hidden_form(self):
+        app = self._run()
+        open_diagnostics(app)
+
+        self.assertNotIn("profile_create", {button.key for button in app.button})
+
+        self._button(app, "profile_create_toggle").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn("profile_create", {button.key for button in app.button})
+        self.assertIn(
+            "profile_new_name_0", {item.key for item in app.text_input}
+        )
+
+    def test_diagnostics_mode_survives_chat_switch_and_rerun(self):
+        other_id = self.store.create_chat(AgentConfig())
+        app = self._run(chat_id=other_id)
+        open_diagnostics(app)
+
+        self._button(app, f"chat_{self.chat_id}").click().run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.session_state["chat_id"], self.chat_id)
+        self.assertEqual(app.radio(MODE_KEY).value, MODE_DIAGNOSTICS)
+        self.assertIn("Memory layers", [item.value for item in app.subheader])
+
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.radio(MODE_KEY).value, MODE_DIAGNOSTICS)
+
+    def test_empty_state_renders_in_both_modes(self):
+        empty_store = ChatStore(os.path.join(self._tmp.name, "empty_mode.db"))
+        app = self._run(store=empty_store)
+
+        self.assertEqual(app.radio(MODE_KEY).value, "Chat")
+        self.assertTrue(
+            any("No conversations yet" in item.value for item in app.info)
+        )
+        self.assertEqual(len(app.chat_input), 0)
+
+        open_diagnostics(app)
+
+        self.assertEqual(app.radio(MODE_KEY).value, MODE_DIAGNOSTICS)
+        self.assertTrue(
+            any("No conversations yet" in item.value for item in app.info)
+        )
+        self.assertEqual(len(app.chat_input), 0)
+
+    def test_diagnostics_contains_all_criterion_panels(self):
+        app = self._run(chat_id=self.chat_id)
+        open_diagnostics(app)
+
+        # Diagnostics is a read-only panel area: the message input belongs to
+        # Chat mode only.
+        self.assertEqual(len(app.chat_input), 0)
+
+        labels = {item.label for item in app.expander}
+        for label in (
+            "Short-term memory · current line",
+            "Working memory · this chat & line",
+            "Long-term memory · shared across chats",
+            "System prompt & invariants (not memory)",
+            "User profiles",
+            "History compression",
+            "Current chat statistics",
+            "Conversation comparison",
+        ):
+            with self.subTest(panel=label):
+                self.assertIn(label, labels)
+        self.assertIn("Memory layers", [item.value for item in app.subheader])
+
+        facts_chat = self.store.create_chat(
+            AgentConfig(context_strategy="sticky_facts")
+        )
+        facts_app = self._run(chat_id=facts_chat)
+        open_diagnostics(facts_app)
+        self.assertIn(
+            "Sticky Facts", [item.label for item in facts_app.expander]
+        )
+
+        branch_chat = self.store.create_chat(
+            AgentConfig(context_strategy="branching")
+        )
+        branch_app = self._run(chat_id=branch_chat)
+        open_diagnostics(branch_app)
+        self.assertIn("Branches", [item.label for item in branch_app.expander])
 
 
 if __name__ == "__main__":

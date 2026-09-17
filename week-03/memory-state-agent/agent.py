@@ -42,6 +42,7 @@ from memory import (
 )
 from models import DEFAULT_MODEL, normalize_model
 from pricing import estimate_cost
+from profile import UserProfile, format_profile_block
 from stats import AskResult, SummaryOutcome, TurnStats, aggregate_stats
 from strategies import (
     DEFAULT_FACTS_WINDOW,
@@ -262,6 +263,31 @@ class ChatAgent:
         self._working_memory = []
         self._long_term_memory = []
         self._reload_memory()
+        self._active_profile = None
+        self._reload_profile()
+
+    def _resolve_active_profile(self) -> UserProfile | None:
+        """Return the profile manually assigned to this chat, if any.
+
+        This is the single place where the active profile is chosen, so a future
+        automatic router only has to change this method. The store access is
+        duck-typed: a store without ``get_active_profile`` yields ``None``, and a
+        missing or dangling assignment means No profile.
+        """
+        if self._store is None or self._chat_id is None:
+            return None
+        get_active = getattr(self._store, "get_active_profile", None)
+        if get_active is None:
+            return None
+        return get_active(self._chat_id)
+
+    def _reload_profile(self) -> None:
+        """Re-read the active profile from the store; never calls the provider."""
+        self._active_profile = self._resolve_active_profile()
+
+    def reload_profile(self) -> None:
+        """Public counterpart of ``_reload_profile`` used by the UI after edits."""
+        self._reload_profile()
 
     def _reload_memory(self) -> None:
         """Load working and long-term memory for the active line without API calls.
@@ -339,6 +365,11 @@ class ChatAgent:
     def long_term_memory(self):
         """A copy of the global long-term memory."""
         return list(self._long_term_memory)
+
+    @property
+    def active_profile(self):
+        """The profile currently applied to requests, or ``None`` for No profile."""
+        return self._active_profile
 
     def set_config(self, config: AgentConfig):
         """Replace the configuration, persisting it when a store is bound.
@@ -528,10 +559,13 @@ class ChatAgent:
     def _build_payload(self, user_message):
         """Assemble the messages for the next request by context strategy.
 
-        After the strategy-specific payload is built, the explicit memory blocks
-        are inserted in the fixed order invariants, working, long-term. With no
-        invariants and empty memory the payload is exactly the Day 9-10 one.
+        After the strategy-specific payload is built, the explicit blocks are
+        inserted in the fixed order profile, invariants, working, long-term. The
+        profile is re-read from the store first, so deleting the active profile
+        while a chat is open already drops its block from the next request. With
+        no profile, invariants and memory the payload is the Day 9-11 one.
         """
+        self._reload_profile()
         strategy = self._config.context_strategy
         history = self._history[1:]
         if strategy == STRATEGY_SLIDING:
@@ -569,8 +603,17 @@ class ChatAgent:
         return self._with_memory_blocks(payload)
 
     def _with_memory_blocks(self, payload):
-        """Insert invariants and memory blocks right after the system prompt."""
+        """Insert the profile, invariants and memory blocks after the system prompt.
+
+        The profile block is only added when ``format_profile_block`` returns a
+        block, so No profile never contributes an empty system message. The
+        order is profile, invariants, working, long-term; with no blocks the
+        original payload is returned unchanged.
+        """
         blocks = []
+        profile_block = format_profile_block(self._active_profile)
+        if profile_block is not None:
+            blocks.append(profile_block)
         invariants = (self._config.invariants or "").strip()
         if invariants:
             blocks.append("Инварианты (соблюдай всегда):\n" + invariants)

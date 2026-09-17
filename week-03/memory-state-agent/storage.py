@@ -22,6 +22,7 @@ from memory import (
     validate_memory_value,
 )
 from models import LEGACY_MODEL_ALIASES
+from profile import UserProfile, normalize_profile_name, validate_profile_name
 from stats import TurnStats
 from strategies import (
     STRATEGY_FULL,
@@ -37,6 +38,29 @@ DEFAULT_CHAT_TITLE = "New chat"
 # first-message title just like ``DEFAULT_CHAT_TITLE``.
 LEGACY_CHAT_TITLES = ("Новый чат",)
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "chat_history.db"
+
+# A fresh database starts with two contrastive demo profiles. They are ordinary
+# editable rows, never special-cased by the UI or the agent, and the marker
+# below stops them from coming back after the user deletes them.
+_DEFAULT_PROFILE_SEED_MARKER = "default_profiles_seeded"
+_DEFAULT_PROFILES = (
+    {
+        "name": "Concise engineer",
+        "addressing": "Address the user directly, without honorifics.",
+        "style": "Short, technical, no filler.",
+        "format": "Lead with the result, then key points as a short list.",
+        "constraints": "Skip introductions, apologies and repetition.",
+        "domain_context": "Software engineering.",
+    },
+    {
+        "name": "Detailed tutor",
+        "addressing": "Address the user as a learner.",
+        "style": "Detailed, plain language, explain the reasoning.",
+        "format": "Step-by-step explanation with concrete examples.",
+        "constraints": "Define terms and avoid unexplained jargon.",
+        "domain_context": "Learning and study support.",
+    },
+)
 
 
 class DuplicateBranchNameError(ValueError):
@@ -74,6 +98,19 @@ class DuplicateMemoryKeyError(ValueError):
     def __init__(self, key: str):
         self.key = key
         super().__init__(f"Memory key already exists: {key}")
+
+
+class DuplicateProfileNameError(ValueError):
+    """Raised when a profile name already exists.
+
+    Names are compared after whitespace collapsing and case folding, so the
+    ``name`` attribute keeps the cleaned name the caller tried to insert and
+    nothing is written.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"Profile name already exists: {name}")
 
 
 _SCHEMA = """
@@ -201,6 +238,22 @@ CREATE TABLE IF NOT EXISTS long_term_memory (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_long_term_memory_key
     ON long_term_memory(item_key);
+
+-- A user profile is a separate entity, not a memory layer: it describes how the
+-- assistant should answer one user. Chats reference a profile through
+-- ``active_profile_id`` (added by the Day 12 migration); deleting a profile
+-- clears the reference instead of deleting the chat.
+CREATE TABLE IF NOT EXISTS user_profiles (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL,
+    addressing     TEXT NOT NULL DEFAULT '',
+    style          TEXT NOT NULL DEFAULT '',
+    format         TEXT NOT NULL DEFAULT '',
+    constraints    TEXT NOT NULL DEFAULT '',
+    domain_context TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # Columns added after the Day 7 schema; the migration adds whichever are missing.
@@ -236,6 +289,9 @@ _NEW_CHAT_COLUMNS = {
     "last_context_tokens": "INTEGER",
     # Day 11: user-authored invariants always sent to the model.
     "invariants": "TEXT",
+    # Day 12: the profile manually assigned to this chat (NULL = No profile).
+    # Old chats get NULL, so a migrated database keeps behaving as before.
+    "active_profile_id": "INTEGER REFERENCES user_profiles(id) ON DELETE SET NULL",
 }
 
 # Columns added after the original ``messages``/``summaries`` tables. They stay
@@ -365,6 +421,7 @@ class ChatStore:
             self._normalize_legacy_models(conn)
             self._backfill_context_strategy(conn)
             self._backfill_history_tokens_est(conn)
+            self._seed_default_profiles(conn)
             conn.commit()
 
     @staticmethod
@@ -435,6 +492,40 @@ class ChatStore:
                 "UPDATE chats SET history_tokens_est = ? WHERE id = ?",
                 (total, chat_id),
             )
+
+    @staticmethod
+    def _seed_default_profiles(conn) -> None:
+        """Insert the demo profiles once, on the first database initialization.
+
+        The marker in ``app_state`` is written even when the table was already
+        populated, so a database migrated from Day 11 (empty table) is seeded
+        exactly once and explicitly deleted demo profiles never come back.
+        """
+        marker = conn.execute(
+            "SELECT 1 FROM app_state WHERE key = ?",
+            (_DEFAULT_PROFILE_SEED_MARKER,),
+        ).fetchone()
+        if marker is not None:
+            return
+        count = conn.execute("SELECT COUNT(*) FROM user_profiles").fetchone()[0]
+        if count == 0:
+            for profile in _DEFAULT_PROFILES:
+                conn.execute(
+                    "INSERT INTO user_profiles (name, addressing, style, format, "
+                    "constraints, domain_context) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        profile["name"],
+                        profile["addressing"],
+                        profile["style"],
+                        profile["format"],
+                        profile["constraints"],
+                        profile["domain_context"],
+                    ),
+                )
+        conn.execute(
+            "INSERT OR REPLACE INTO app_state (key, value) VALUES (?, '1')",
+            (_DEFAULT_PROFILE_SEED_MARKER,),
+        )
 
     def list_chats(self) -> list[ChatSummary]:
         with closing(self._connect()) as conn:
@@ -1703,5 +1794,225 @@ class ChatStore:
             conn.execute(
                 "INSERT OR REPLACE INTO app_state (key, value) VALUES ('last_chat_id', ?)",
                 (str(chat_id),),
+            )
+            conn.commit()
+
+    # --- User profiles (Day 12) ----------------------------------------------
+    #
+    # A profile is a separate entity, not a memory item: it is shared across
+    # chats and the chat only stores which profile is active. Names are unique
+    # after whitespace collapsing and case folding.
+
+    _PROFILE_SELECT = (
+        "SELECT id, name, addressing, style, format, constraints, "
+        "domain_context, created_at, updated_at FROM user_profiles"
+    )
+
+    @staticmethod
+    def _profile_from_row(row) -> UserProfile:
+        return UserProfile(
+            id=row[0],
+            name=row[1],
+            addressing=row[2],
+            style=row[3],
+            format=row[4],
+            constraints=row[5],
+            domain_context=row[6],
+            created_at=row[7],
+            updated_at=row[8],
+        )
+
+    @staticmethod
+    def _clean_profile_text(value) -> str:
+        """Strip a profile field; ``None`` becomes an empty string."""
+        return str(value).strip() if value is not None else ""
+
+    @staticmethod
+    def _profile_name_exists(conn, name, exclude_id=None) -> bool:
+        """Return ``True`` when another profile already uses this name."""
+        normalized = normalize_profile_name(name)
+        for profile_id, existing_name in conn.execute(
+            "SELECT id, name FROM user_profiles"
+        ).fetchall():
+            if exclude_id is not None and profile_id == exclude_id:
+                continue
+            if normalize_profile_name(existing_name) == normalized:
+                return True
+        return False
+
+    def list_profiles(self) -> list[UserProfile]:
+        """Return all profiles ordered by id."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(self._PROFILE_SELECT + " ORDER BY id").fetchall()
+        return [self._profile_from_row(row) for row in rows]
+
+    def get_profile(self, profile_id: int) -> UserProfile | None:
+        """Return one profile, or ``None`` when the id is unknown."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                self._PROFILE_SELECT + " WHERE id = ?", (profile_id,)
+            ).fetchone()
+        return self._profile_from_row(row) if row is not None else None
+
+    def get_active_profile(self, chat_id: int) -> UserProfile | None:
+        """Return the profile assigned to a chat, or ``None`` for No profile.
+
+        An unknown chat and a dangling reference both yield ``None`` instead of
+        raising: deleting a profile must never break the chat that used it.
+        """
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT p.id, p.name, p.addressing, p.style, p.format, "
+                "p.constraints, p.domain_context, p.created_at, p.updated_at "
+                "FROM chats c JOIN user_profiles p ON p.id = c.active_profile_id "
+                "WHERE c.id = ?",
+                (chat_id,),
+            ).fetchone()
+        return self._profile_from_row(row) if row is not None else None
+
+    def create_profile(
+        self,
+        name,
+        addressing="",
+        style="",
+        format="",
+        constraints="",
+        domain_context="",
+    ) -> int:
+        """Insert a profile and return its id; duplicate names are rejected."""
+        cleaned_name = validate_profile_name(name)
+        values = (
+            cleaned_name,
+            self._clean_profile_text(addressing),
+            self._clean_profile_text(style),
+            self._clean_profile_text(format),
+            self._clean_profile_text(constraints),
+            self._clean_profile_text(domain_context),
+        )
+        with closing(self._connect()) as conn:
+            if self._profile_name_exists(conn, cleaned_name):
+                raise DuplicateProfileNameError(cleaned_name)
+            cursor = conn.execute(
+                "INSERT INTO user_profiles (name, addressing, style, format, "
+                "constraints, domain_context) VALUES (?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def update_profile(
+        self,
+        profile_id,
+        name,
+        addressing="",
+        style="",
+        format="",
+        constraints="",
+        domain_context="",
+    ) -> None:
+        """Overwrite a profile's fields, keeping ``created_at`` unchanged.
+
+        A missing profile raises ``KeyError`` and a name used by another profile
+        raises ``DuplicateProfileNameError``; nothing is written in either case.
+        """
+        cleaned_name = validate_profile_name(name)
+        values = (
+            cleaned_name,
+            self._clean_profile_text(addressing),
+            self._clean_profile_text(style),
+            self._clean_profile_text(format),
+            self._clean_profile_text(constraints),
+            self._clean_profile_text(domain_context),
+        )
+        with closing(self._connect()) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM user_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if existing is None:
+                raise KeyError(f"profile {profile_id} not found")
+            if self._profile_name_exists(conn, cleaned_name, exclude_id=profile_id):
+                raise DuplicateProfileNameError(cleaned_name)
+            conn.execute(
+                "UPDATE user_profiles SET name = ?, addressing = ?, style = ?, "
+                "format = ?, constraints = ?, domain_context = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (*values, profile_id),
+            )
+            conn.commit()
+
+    def clone_profile(self, profile_id, new_name) -> int:
+        """Copy a profile under a new name and return the new id.
+
+        The copy is independent: later edits to either profile never affect the
+        other, and the clone gets fresh timestamps.
+        """
+        cleaned_name = validate_profile_name(new_name)
+        with closing(self._connect()) as conn:
+            source = conn.execute(
+                "SELECT addressing, style, format, constraints, domain_context "
+                "FROM user_profiles WHERE id = ?",
+                (profile_id,),
+            ).fetchone()
+            if source is None:
+                raise KeyError(f"profile {profile_id} not found")
+            if self._profile_name_exists(conn, cleaned_name):
+                raise DuplicateProfileNameError(cleaned_name)
+            cursor = conn.execute(
+                "INSERT INTO user_profiles (name, addressing, style, format, "
+                "constraints, domain_context) VALUES (?, ?, ?, ?, ?, ?)",
+                (cleaned_name, *source),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def delete_profile(self, profile_id) -> None:
+        """Delete a profile and switch every chat that used it to No profile.
+
+        Clearing the references and deleting the row run in one transaction, so
+        a chat can never be left pointing at a profile that no longer exists. A
+        missing profile raises ``KeyError`` and changes nothing.
+        """
+        with closing(self._connect()) as conn:
+            try:
+                existing = conn.execute(
+                    "SELECT 1 FROM user_profiles WHERE id = ?", (profile_id,)
+                ).fetchone()
+                if existing is None:
+                    raise KeyError(f"profile {profile_id} not found")
+                conn.execute(
+                    "UPDATE chats SET active_profile_id = NULL "
+                    "WHERE active_profile_id = ?",
+                    (profile_id,),
+                )
+                conn.execute(
+                    "DELETE FROM user_profiles WHERE id = ?", (profile_id,)
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def set_active_profile(self, chat_id: int, profile_id) -> None:
+        """Assign a profile to a chat; ``None`` selects No profile.
+
+        An unknown chat or profile raises ``KeyError``. ``chats.updated_at`` is
+        deliberately untouched so selecting a profile never reorders the
+        sidebar.
+        """
+        with closing(self._connect()) as conn:
+            chat = conn.execute(
+                "SELECT 1 FROM chats WHERE id = ?", (chat_id,)
+            ).fetchone()
+            if chat is None:
+                raise KeyError(f"chat {chat_id} not found")
+            if profile_id is not None:
+                profile = conn.execute(
+                    "SELECT 1 FROM user_profiles WHERE id = ?", (profile_id,)
+                ).fetchone()
+                if profile is None:
+                    raise KeyError(f"profile {profile_id} not found")
+            conn.execute(
+                "UPDATE chats SET active_profile_id = ? WHERE id = ?",
+                (profile_id, chat_id),
             )
             conn.commit()

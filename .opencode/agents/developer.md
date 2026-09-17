@@ -4,6 +4,38 @@ mode: subagent
 model: deepseek/deepseek-flash
 variant: high
 permission:
+  bash:
+    "*": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git branch*": allow
+    "git branch -d*": deny
+    "git branch --delete*": deny
+    "git branch -m*": deny
+    "git branch --move*": deny
+    "git rev-parse*": allow
+    "setup.bat*": allow
+    ".\\setup.bat*": allow
+    "./setup.bat*": allow
+    ".\\*\\setup.bat*": allow
+    "./*/setup.bat*": allow
+    "test.bat*": allow
+    ".\\test.bat*": allow
+    "./test.bat*": allow
+    ".\\*\\test.bat*": allow
+    "./*/test.bat*": allow
+    "smoke_test.bat*": allow
+    ".\\smoke_test.bat*": allow
+    "./smoke_test.bat*": allow
+    ".\\*\\smoke_test.bat*": allow
+    "./*/smoke_test.bat*": allow
+    "run_app.bat*": allow
+    ".\\run_app.bat*": allow
+    "./run_app.bat*": allow
+    ".\\*\\run_app.bat*": allow
+    "./*/run_app.bat*": allow
   task: deny
 ---
 
@@ -17,6 +49,13 @@ permission:
 - Не читай и не изменяй секреты (.env, .env.*, API-ключи). Это правило модели: ограничения read/edit не дают технической гарантии при работе через bash.
 - После изменений показывай git diff.
 - Никогда не выполняй git commit и git push.
+
+Shell и разрешения:
+- Для чтения, поиска и просмотра используй Read, Glob и Grep; не дублируй их shell-командами (`rg`, `grep`, `Select-String`, `Get-Content`, `Test-Path` и т. п.).
+- Проверки запускай только через доверенные `.bat`-точки входа проекта: `setup.bat`, `test.bat`, `smoke_test.bat`, `run_app.bat` (например, `.\week-03\memory-state-agent\test.bat`). Из git доступны только безопасные read-only команды.
+- Прямые Python probe-команды запрещены: `python -c`, `py -c`, `.venv\Scripts\python.exe -c`.
+- Если команда получила автоматический deny, не проси пользователя снять запрет: примени разрешённую альтернативу (Read/Glob/Grep или доверенный `.bat`) либо пропусти необязательную проверку и продолжи задачу.
+- `Allow always` — временное разрешение текущей сессии, а не часть конфигурации; решение не должно от него зависеть.
 
 Протокол статусов:
 - если Architect не участвовал и существующего дизайна достаточно: ARCHITECTURE_STATUS: EXISTING_DESIGN_SUFFICIENT;
