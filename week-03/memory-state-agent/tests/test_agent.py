@@ -2109,5 +2109,112 @@ class ModelNormalizationTest(unittest.TestCase):
             self.assertIsNotNone(migrated.load_history(chat_id)[0].turn)
 
 
+class CompleteMethodTest(unittest.TestCase):
+    """``ChatAgent.complete`` is the standalone call used by the task stages.
+
+    It must borrow the model and defaults from the config, never touch the chat
+    history or the store, and only stream when an ``on_chunk`` consumer exists.
+    """
+
+    def setUp(self):
+        os.environ.pop("DEEPSEEK_API_KEY", None)
+
+    def test_non_stream_uses_the_config_model_and_defaults(self):
+        client = FakeClient(response=make_response("Готовый результат", usage=make_usage(30, 12)))
+        agent = ChatAgent(
+            client,
+            config=AgentConfig(model="custom-model", temperature=0.7, max_tokens=321),
+        )
+        text, stats = agent.complete([{"role": "user", "content": "do it"}])
+
+        self.assertEqual(text, "Готовый результат")
+        kwargs = client.last_kwargs
+        self.assertEqual(kwargs["model"], "custom-model")
+        self.assertEqual(kwargs["temperature"], 0.7)
+        self.assertEqual(kwargs["max_tokens"], 321)
+        self.assertFalse(kwargs["stream"])
+        self.assertNotIn("stream_options", kwargs)
+        self.assertEqual(kwargs["messages"], [{"role": "user", "content": "do it"}])
+        self.assertEqual(stats.request_tokens, 30)
+        self.assertEqual(stats.response_tokens, 12)
+        # A custom model has no configured tariff, so the cost stays unknown.
+        self.assertIsNone(stats.cost_usd)
+
+    def test_usage_is_priced_with_the_configured_model(self):
+        client = FakeClient(response=make_response("Р", usage=make_usage(30, 12)))
+        agent = ChatAgent(client)
+        _, stats = agent.complete([{"role": "user", "content": "x"}])
+        self.assertEqual(client.last_kwargs["model"], "deepseek-flash")
+        self.assertIsNotNone(stats.cost_usd)
+        self.assertIsNotNone(stats.cost_assumption)
+
+    def test_explicit_limits_override_the_config(self):
+        client = FakeClient(response=make_response("Р"))
+        agent = ChatAgent(client, config=AgentConfig(temperature=0.2, max_tokens=100))
+        agent.complete(
+            [{"role": "user", "content": "x"}], max_tokens=999, temperature=0.0
+        )
+        self.assertEqual(client.last_kwargs["max_tokens"], 999)
+        self.assertEqual(client.last_kwargs["temperature"], 0.0)
+
+    def test_stream_with_on_chunk_sends_stream_options_and_collects_usage(self):
+        client = FakeClient(
+            chunks=chunks_of(["При", "вет"]), usage=make_usage(7, 3)
+        )
+        agent = ChatAgent(client)
+        seen = []
+        text, stats = agent.complete(
+            [{"role": "user", "content": "x"}], stream=True, on_chunk=seen.append
+        )
+
+        self.assertEqual(text, "Привет")
+        self.assertEqual(seen, ["При", "Привет"])
+        kwargs = client.last_kwargs
+        self.assertTrue(kwargs["stream"])
+        self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+        self.assertEqual(stats.request_tokens, 7)
+        self.assertEqual(stats.response_tokens, 3)
+
+    def test_stream_without_on_chunk_is_not_streamed(self):
+        client = FakeClient(response=make_response("Один ответ", usage=make_usage(5, 4)))
+        agent = ChatAgent(client)
+        text, _ = agent.complete([{"role": "user", "content": "x"}], stream=True)
+
+        self.assertEqual(text, "Один ответ")
+        self.assertFalse(client.last_kwargs["stream"])
+        self.assertNotIn("stream_options", client.last_kwargs)
+
+    def test_history_is_untouched(self):
+        client = FakeClient(response=make_response("Р"))
+        agent = ChatAgent(client)
+        before = agent.history
+        agent.complete([{"role": "user", "content": "x"}])
+        self.assertEqual(agent.history, before)
+        self.assertEqual(len(agent.history), 1)
+
+    def test_store_is_not_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            chat_id = store.create_chat(AgentConfig())
+            client = FakeClient(response=make_response("Р", usage=make_usage(5, 4)))
+            agent = ChatAgent(client, store=store, chat_id=chat_id)
+
+            agent.complete([{"role": "user", "content": "x"}])
+
+            self.assertEqual(store.load_messages(chat_id), [])
+            self.assertEqual(store.get_chat_stats(chat_id).turns_count, 0)
+            self.assertEqual(
+                store.get_usage(chat_id), {"input_tokens": None, "output_tokens": None}
+            )
+            self.assertEqual(len(agent.history), 1)
+
+    def test_provider_exception_is_propagated(self):
+        client = FakeClient(error=RuntimeError("provider down"))
+        agent = ChatAgent(client)
+        with self.assertRaises(RuntimeError):
+            agent.complete([{"role": "user", "content": "x"}])
+        self.assertEqual(len(agent.history), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1753,5 +1753,26 @@ class BranchDuplicateLegacyMigrationTest(unittest.TestCase):
             )
 
 
+class DbPathPropertyTest(unittest.TestCase):
+    """``ChatStore.db_path`` is the public read-only handoff to other stores."""
+
+    def setUp(self):
+        os.environ.pop("DEEPSEEK_API_KEY", None)
+
+    def test_returns_the_file_the_store_was_opened_with(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "test.db")
+            store = ChatStore(path)
+            self.assertEqual(str(store.db_path), path)
+            # The file exists and is readable through the exposed path.
+            self.assertTrue(os.path.exists(str(store.db_path)))
+
+    def test_property_is_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(os.path.join(tmp, "test.db"))
+            with self.assertRaises(AttributeError):
+                store.db_path = os.path.join(tmp, "other.db")
+
+
 if __name__ == "__main__":
     unittest.main()

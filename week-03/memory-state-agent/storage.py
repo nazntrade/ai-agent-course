@@ -402,6 +402,15 @@ class ChatStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    @property
+    def db_path(self):
+        """The database file this store works on (read-only).
+
+        Other stores, notably ``task_storage.TaskRepository``, open the same
+        file so the task tables live next to the chat tables.
+        """
+        return self._db_path
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.execute("PRAGMA foreign_keys = ON")

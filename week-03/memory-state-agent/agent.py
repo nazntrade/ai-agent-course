@@ -38,6 +38,7 @@ from memory import (
     MEMORY_SCOPE_LONG_TERM,
     MEMORY_SCOPE_WORKING,
     build_memory_blocks,
+    format_invariants_block,
     insert_system_blocks,
 )
 from models import DEFAULT_MODEL, normalize_model
@@ -534,6 +535,79 @@ class ChatAgent:
             facts_error=facts_error,
         )
 
+    def complete(
+        self,
+        messages,
+        *,
+        max_tokens=None,
+        temperature=None,
+        stream=False,
+        on_chunk=None,
+    ):
+        """Run one standalone completion without touching the chat state.
+
+        Used by the task stages: the model comes from this agent's config, and
+        ``max_tokens``/``temperature`` fall back to the config when omitted.
+        Streaming only happens when both ``stream`` and ``on_chunk`` are given;
+        then ``stream_options={"include_usage": True}`` is set and the usage is
+        taken from the final chunk, exactly as in :meth:`ask`. The method never
+        touches ``_history``, never saves a turn, and never triggers the summary
+        or facts pipelines; provider exceptions are propagated to the caller,
+        which classifies them as ``API_ERROR``.
+        """
+        streaming = bool(stream) and on_chunk is not None
+        payload = {
+            "model": self._config.model,
+            "messages": list(messages),
+            "temperature": (
+                temperature if temperature is not None else self._config.temperature
+            ),
+            "max_tokens": (
+                max_tokens if max_tokens is not None else self._config.max_tokens
+            ),
+            "stream": streaming,
+        }
+
+        usage_map: dict = {}
+        finish_reason = None
+
+        if streaming:
+            payload["stream_options"] = {"include_usage": True}
+            response = self._client.chat.completions.create(**payload)
+            collected = []
+            for chunk in response:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage_map = _extract_usage(chunk_usage)
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.delta and choice.delta.content:
+                    collected.append(choice.delta.content)
+                    on_chunk("".join(collected))
+                if getattr(choice, "finish_reason", None) is not None:
+                    finish_reason = choice.finish_reason
+            text = "".join(collected)
+        else:
+            response = self._client.chat.completions.create(**payload)
+            text = response.choices[0].message.content or ""
+            usage_map = _extract_usage(getattr(response, "usage", None))
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+
+        stats = TurnStats(
+            request_tokens=usage_map.get("prompt_tokens"),
+            response_tokens=usage_map.get("completion_tokens"),
+            total_tokens=usage_map.get("total_tokens"),
+            prompt_cache_hit_tokens=usage_map.get("prompt_cache_hit_tokens"),
+            prompt_cache_miss_tokens=usage_map.get("prompt_cache_miss_tokens"),
+            finish_reason=finish_reason,
+            assistant_tokens_est=estimate_tokens(text),
+        )
+        cost = estimate_cost(self._config.model, stats, datetime.now(timezone.utc))
+        stats.cost_usd = cost.cost_usd
+        stats.cost_assumption = cost.assumption
+        return text, stats
+
     @staticmethod
     def _estimate_payload(payload_messages) -> int:
         return sum(estimate_tokens(message["content"]) for message in payload_messages)
@@ -614,9 +688,9 @@ class ChatAgent:
         profile_block = format_profile_block(self._active_profile)
         if profile_block is not None:
             blocks.append(profile_block)
-        invariants = (self._config.invariants or "").strip()
-        if invariants:
-            blocks.append("Инварианты (соблюдай всегда):\n" + invariants)
+        invariants_block = format_invariants_block(self._config.invariants)
+        if invariants_block is not None:
+            blocks.append(invariants_block)
         blocks.extend(
             build_memory_blocks(self._working_memory, self._long_term_memory)
         )

@@ -51,7 +51,9 @@
       "smoke_test.bat": "deny",
       "**/smoke_test.bat": "deny",
       "run_app.bat": "deny",
-      "**/run_app.bat": "deny"
+      "**/run_app.bat": "deny",
+      "publish_to_github.bat": "deny",
+      "**/publish_to_github.bat": "deny"
     },
     "glob": "allow",
     "grep": "allow",

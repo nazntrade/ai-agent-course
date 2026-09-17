@@ -7,12 +7,14 @@ plain ``MemoryItem`` objects and message lists.
 import unittest
 
 from memory import (
+    INVARIANTS_BLOCK_TITLE,
     LONG_TERM_MEMORY_BLOCK_TITLE,
     MEMORY_SCOPE_LONG_TERM,
     MEMORY_SCOPE_WORKING,
     WORKING_MEMORY_BLOCK_TITLE,
     MemoryItem,
     build_memory_blocks,
+    format_invariants_block,
     format_memory_block,
     insert_system_blocks,
     validate_memory_key,
@@ -180,6 +182,22 @@ class InsertSystemBlocksTest(unittest.TestCase):
             [message["content"] for message in result],
             ["first", "A", "summary", "hi"],
         )
+
+
+class FormatInvariantsBlockTest(unittest.TestCase):
+    """The single source of the invariants block of the chat payload."""
+
+    def test_returns_none_for_empty_values(self):
+        for value in (None, "", "   ", "\n\t "):
+            with self.subTest(value=value):
+                self.assertIsNone(format_invariants_block(value))
+
+    def test_matches_the_day10_inline_string_byte_for_byte(self):
+        text = "Не использовать сторонние библиотеки"
+        expected = "Инварианты (соблюдай всегда):\n" + text
+        self.assertEqual(format_invariants_block(text), expected)
+        self.assertEqual(format_invariants_block(f"  {text}  "), expected)
+        self.assertEqual(format_invariants_block(text), INVARIANTS_BLOCK_TITLE + "\n" + text)
 
 
 if __name__ == "__main__":

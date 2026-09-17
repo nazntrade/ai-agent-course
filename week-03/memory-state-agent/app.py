@@ -36,15 +36,32 @@ from strategies import (
     STRATEGY_SUMMARY,
     strategy_label,
 )
+from task_orchestrator import TaskOrchestrator
+from task_storage import TaskRepository
+from task_ui import (
+    MODE_KEY,
+    MODE_TASK,
+    PENDING_MODE_KEY,
+    render_diagnostics_task,
+    render_task_card,
+    report_task_error,
+)
+from tasks import ACTION_RETRY, ACTION_RUN_STEP
 from tokens import estimate_tokens
 
-# Two mutually exclusive UI modes. Chat is the default landing mode and keeps
-# only the conversation: the diagnostics panels move behind the second mode so
-# the main screen stays short. The mode lives in session state under a widget
+# Three mutually exclusive UI modes. Chat is the default landing mode and keeps
+# only the conversation: the diagnostics panels move behind the other two modes
+# so the main screen stays short. The mode lives in session state under a widget
 # key, so it survives chat switches and reruns.
 MODE_CHAT = "Chat"
 MODE_DIAGNOSTICS = "Diagnostics / Memory"
-MODE_KEY = "ui_mode"
+
+# Where the compact task card lives (FR-38). "bottom" keeps it as the first
+# element of the pinned chat bottom container. "sidebar" is the documented
+# fallback for a window where the card would leave fewer than three history
+# messages visible (for example 1024x768): the card moves above the chat
+# settings instead, and the bottom container keeps only the profile row.
+TASK_CARD_LOCATION = "bottom"
 
 st.set_page_config(page_title="Memory State Agent", page_icon="🤖", layout="wide")
 st.title("Memory State Agent")
@@ -62,6 +79,22 @@ if "store" not in st.session_state:
     st.session_state.store = ChatStore()
 
 store = st.session_state.store
+
+# The task state machine shares the chat database file. Both objects are created
+# lazily: an injected session_state entry (AppTest, a future alternative
+# repository) wins, and the orchestrator re-reads the chat configuration on every
+# call, so it does not need to be rebuilt when the active chat changes.
+if "task_repository" not in st.session_state:
+    st.session_state.task_repository = TaskRepository(store.db_path)
+
+if "task_orchestrator" not in st.session_state:
+    st.session_state.task_orchestrator = TaskOrchestrator(
+        store,
+        repository=st.session_state.task_repository,
+        client=client,
+    )
+
+task_orchestrator = st.session_state.task_orchestrator
 
 # A summary update failure is reported on the next render, after the rerun that
 # follows a successful turn; popping it here ensures it is shown exactly once.
@@ -643,12 +676,78 @@ elif (
 chat_id = st.session_state.chat_id
 agent = st.session_state.agent
 
+# The streamed text of a task step is written to a placeholder in the main chat
+# area: never into the pinned bottom container and never as a chat message. The
+# sidebar fallback renders the card before the chat area exists, so in that
+# layout the placeholder is created here; the default bottom layout creates it
+# below the history instead, so the stream stays next to the conversation.
+_task_stream_placeholder = (
+    st.empty()
+    if agent is not None and TASK_CARD_LOCATION == "sidebar"
+    else None
+)
+
+
+def _run_task_step(task_id, action=ACTION_RUN_STEP):
+    """Run ``run_step``/``retry`` with the stream shown in the main area.
+
+    The spinner is opened before the call, the first chunk replaces it with the
+    running text, and any error clears the placeholder entirely, so a partial
+    stream never looks like a stored artifact. Returns the orchestrator result
+    for the card to report.
+    """
+    global _task_stream_placeholder
+    placeholder = _task_stream_placeholder
+    if placeholder is None:
+        placeholder = st.empty()
+        _task_stream_placeholder = placeholder
+
+    indicator = WaitingIndicator(
+        placeholder.spinner("Running the task step..."), placeholder
+    )
+    try:
+        if action == ACTION_RETRY:
+            result = task_orchestrator.retry(
+                task_id, on_chunk=indicator.show_chunk
+            )
+        else:
+            result = task_orchestrator.run_step(
+                task_id, on_chunk=indicator.show_chunk
+            )
+    except Exception as exc:
+        indicator.clear()
+        report_task_error(f"Error: {exc}")
+        return None
+
+    if result.ok and result.stage_result is not None:
+        indicator.show_chunk(result.stage_result.text)
+    else:
+        indicator.clear()
+    return result
+
+
+def _render_task_card_in_sidebar(store, orchestrator, chat_id):
+    """Render the compact task card above the chat settings (FR-38 fallback)."""
+    render_task_card(
+        store, orchestrator, chat_id, on_run_step=_run_task_step
+    )
+
+
+# Apply a mode switch requested by the task card or the result dialog. The
+# request is a plain key because `MODE_KEY` belongs to the radio: Streamlit
+# forbids writing a widget key during the run that created the widget, so the
+# request is stored during that run and applied here, before the radio exists.
+_requested_mode = st.session_state.pop(PENDING_MODE_KEY, None)
+if _requested_mode in (MODE_CHAT, MODE_DIAGNOSTICS, MODE_TASK):
+    st.session_state[MODE_KEY] = _requested_mode
+
+
 with st.sidebar:
     # The mode switch is the first sidebar control and renders even with no
     # chats, so Diagnostics stays reachable and the empty state remains usable.
     st.radio(
         "Mode",
-        options=(MODE_CHAT, MODE_DIAGNOSTICS),
+        options=(MODE_CHAT, MODE_DIAGNOSTICS, MODE_TASK),
         key=MODE_KEY,
     )
     mode = st.session_state[MODE_KEY]
@@ -761,6 +860,9 @@ with st.sidebar:
         col_yes, col_no = st.columns(2)
         if col_yes.button("Yes, delete", key="delete_confirm"):
             store.delete_chat(pending_id)
+            # The deleted chat cascades to its tasks; the remembered selection
+            # lives in app_state and has to be dropped explicitly.
+            task_orchestrator.repository.clear_selection(pending_id)
             remaining = store.list_chats()
             st.session_state.chat_id = remaining[0].id if remaining else None
             st.session_state.agent = None
@@ -775,6 +877,12 @@ with st.sidebar:
 
     if agent is not None:
         st.divider()
+
+        if TASK_CARD_LOCATION == "sidebar" and mode == MODE_CHAT:
+            # Documented fallback (FR-38): the compact task section moves above
+            # the chat settings when the bottom card does not fit.
+            _render_task_card_in_sidebar(store, task_orchestrator, chat_id)
+            st.divider()
 
         with st.expander("Chat settings"):
             cfg = agent.config
@@ -1578,8 +1686,13 @@ elif mode == MODE_DIAGNOSTICS:
         else:
             st.caption("No conversations yet.")
 
-else:
+elif mode == MODE_CHAT:
     _render_chat_history(store, chat_id)
+
+    if TASK_CARD_LOCATION != "sidebar":
+        # The placeholder sits between the history and the pinned bottom
+        # container, so the streamed step text appears in the conversation area.
+        _task_stream_placeholder = st.empty()
 
     # Compact profile row: the active profile is the only profile control Chat
     # mode needs; the full list and CRUD live in Diagnostics behind the button.
@@ -1591,6 +1704,14 @@ else:
     # alignment puts the button on the selectbox baseline: the selector is
     # taller than the button, so top alignment would pin it to the label line.
     with st.bottom:
+        if TASK_CARD_LOCATION == "bottom":
+            # The task card is the first element of the bottom container: it
+            # never wraps the profile row, which stays a direct child rendered
+            # between the card and the message input (FR-33).
+            render_task_card(
+                store, task_orchestrator, chat_id, on_run_step=_run_task_step
+            )
+
         col_profile, col_manage = st.columns(
             [0.75, 0.25], vertical_alignment="bottom"
         )
@@ -1676,3 +1797,9 @@ else:
                         )
                     except Exception as exc:
                         st.error(f"Error: {exc}")
+
+else:
+    # Day 13 task diagnostics. User profiles stay in Diagnostics / Memory: this
+    # mode only shows the task state, its journal, artifacts, workflow, packet
+    # preview and usage. Rendering here never calls the provider.
+    render_diagnostics_task(store, task_orchestrator, chat_id)

@@ -17,6 +17,7 @@ MEMORY_SCOPE_LONG_TERM = "long_term"
 # prompts of Days 9-10; the UI uses its own English labels.
 WORKING_MEMORY_BLOCK_TITLE = "Рабочая память (краткосрочный контекст):"
 LONG_TERM_MEMORY_BLOCK_TITLE = "Долговременная память (учитывай и не противоречь):"
+INVARIANTS_BLOCK_TITLE = "Инварианты (соблюдай всегда):"
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,19 @@ def format_memory_block(items, title) -> str | None:
     for item in sorted(included, key=_item_id):
         lines.append(f"- {item.key}: {item.value}")
     return "\n".join(lines)
+
+
+def format_invariants_block(invariants) -> str | None:
+    """Render the user invariants as the single canonical system block.
+
+    Returns ``None`` for a missing or whitespace-only value, so the payload
+    builder can skip the block instead of sending an empty system message. The
+    produced text is byte-identical to the inline string of Days 10-12.
+    """
+    cleaned = str(invariants).strip() if invariants is not None else ""
+    if not cleaned:
+        return None
+    return INVARIANTS_BLOCK_TITLE + "\n" + cleaned
 
 
 def build_memory_blocks(working_items, long_term_items) -> list[str]:

@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from pricing import estimate_cost, is_peak_time
+from pricing import estimate_cost, estimate_tokens_cost, is_peak_time
 from stats import TurnStats
 
 
@@ -143,6 +143,45 @@ class CanonicalFlashTariffTest(unittest.TestCase):
         self.assertAlmostEqual(canonical.cost_usd, legacy.cost_usd, places=12)
         self.assertEqual(canonical.assumption, legacy.assumption)
         self.assertEqual(canonical.window, legacy.window)
+
+
+class EstimateTokensCostTest(unittest.TestCase):
+    """Pre-flight input-only preview: cache-miss rate of the current window."""
+
+    OFF_PEAK = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    PEAK = datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc)
+
+    def test_off_peak_uses_the_cache_miss_rate(self):
+        self.assertAlmostEqual(
+            estimate_tokens_cost("deepseek-flash", 1000, self.OFF_PEAK),
+            1000 * 0.15 / 1e6,
+            places=12,
+        )
+
+    def test_peak_uses_the_cache_miss_rate(self):
+        self.assertAlmostEqual(
+            estimate_tokens_cost("deepseek-flash", 1000, self.PEAK),
+            1000 * 0.30 / 1e6,
+            places=12,
+        )
+
+    def test_canonical_and_legacy_models_match(self):
+        canonical = estimate_tokens_cost("deepseek-flash", 500, self.OFF_PEAK)
+        legacy = estimate_tokens_cost("deepseek-v4-flash", 500, self.OFF_PEAK)
+        self.assertAlmostEqual(canonical, legacy, places=12)
+
+    def test_zero_tokens_is_free(self):
+        self.assertEqual(estimate_tokens_cost("deepseek-flash", 0, self.OFF_PEAK), 0.0)
+
+    def test_unknown_model_returns_none(self):
+        self.assertIsNone(estimate_tokens_cost("unknown-model", 1000, self.OFF_PEAK))
+
+    def test_missing_or_invalid_tokens_return_none(self):
+        for value in (None, -5, "many", object()):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    estimate_tokens_cost("deepseek-flash", value, self.OFF_PEAK)
+                )
 
 
 if __name__ == "__main__":

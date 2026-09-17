@@ -4,6 +4,37 @@ mode: subagent
 model: deepseek/deepseek-flash
 variant: high
 permission:
+  edit:
+    "AGENTS.md": deny
+    "**/AGENTS.md": deny
+    "PROJECT_RULES.md": deny
+    "**/PROJECT_RULES.md": deny
+    "PROJECT_STATE.md": deny
+    "**/PROJECT_STATE.md": deny
+    "STACK_PROFILE.md": deny
+    "**/STACK_PROFILE.md": deny
+    "STACK_PROFILES.md": deny
+    "**/STACK_PROFILES.md": deny
+    "opencode.json": deny
+    "**/opencode.json": deny
+    ".opencode/agents/*.md": deny
+    "**/.opencode/agents/*.md": deny
+    ".env": deny
+    "**/.env": deny
+    ".env.*": deny
+    "**/.env.*": deny
+    ".env.example": allow
+    "**/.env.example": allow
+    "setup.bat": deny
+    "**/setup.bat": deny
+    "test.bat": deny
+    "**/test.bat": deny
+    "smoke_test.bat": deny
+    "**/smoke_test.bat": deny
+    "run_app.bat": deny
+    "**/run_app.bat": deny
+    "publish_to_github.bat": deny
+    "**/publish_to_github.bat": deny
   bash:
     "*": deny
     "git status*": allow
@@ -56,6 +87,13 @@ Shell и разрешения:
 - Прямые Python probe-команды запрещены: `python -c`, `py -c`, `.venv\Scripts\python.exe -c`.
 - Если команда получила автоматический deny, не проси пользователя снять запрет: примени разрешённую альтернативу (Read/Glob/Grep или доверенный `.bat`) либо пропусти необязательную проверку и продолжи задачу.
 - `Allow always` — временное разрешение текущей сессии, а не часть конфигурации; решение не должно от него зависеть.
+
+## Контекст задачи
+- Работаешь только в PRODUCT-контексте (`TASK_CLASS: PRODUCT`): код приложения, продуктовые тесты, интерфейс и документация функции.
+- Задачу класса `MIXED` Coordinator останавливает до делегирования, поэтому до тебя она не доходит. Если ты всё же получил признаки MIXED (PRODUCT и GOVERNANCE в одном задании), не меняй ни один файл и верни `TASK_STATUS: STOPPED_FOR_SPLIT`.
+- Governance-файлы (`AGENTS.md`, `PROJECT_RULES.md`, `opencode.json`, `.opencode/agents/*.md` и служебные управляющие файлы) ты не изменяешь. Если для выполнения задания требуется такое изменение, не вноси его: заверши работу статусом `TASK_STATUS: GOVERNANCE_REQUIRED`, и Coordinator передаст задачу Configurator.
+- Если требуется критическое решение пользователя, которого нет в задании, заверши работу статусом `TASK_STATUS: WAITING_FOR_DECISION`; не жди разрешение бесконечно.
+- Не расширяй себе разрешения и не запрашивай широкие `allow` или `ask`.
 
 Протокол статусов:
 - если Architect не участвовал и существующего дизайна достаточно: ARCHITECTURE_STATUS: EXISTING_DESIGN_SUFFICIENT;

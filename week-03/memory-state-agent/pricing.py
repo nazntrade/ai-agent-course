@@ -1,8 +1,12 @@
 """Centralised DeepSeek tariffs and turn cost estimation (stdlib only).
 
-The cost is computed exclusively from exact API token counts: estimates never
-contribute to a monetary figure. When no exact input/output tokens are known,
-or the model has no configured tariff, the cost is ``None``.
+The billed cost is computed exclusively from exact API token counts: local
+estimates never contribute to a monetary figure. When no exact input/output
+tokens are known, or the model has no configured tariff, the cost is ``None``.
+
+``estimate_tokens_cost`` is the one deliberate exception: it is a pre-flight
+preview of an input-only payload used by the task context packet. It is an
+estimate, not billing, and is always shown to the user as approximate.
 """
 
 from __future__ import annotations
@@ -64,6 +68,28 @@ def is_peak_time(dt: datetime | None = None) -> bool:
     if dt.weekday() >= 5:  # Saturday/Sunday
         return False
     return (1 <= dt.hour < 4) or (6 <= dt.hour < 10)
+
+
+def estimate_tokens_cost(model: str, input_tokens, dt: datetime | None = None) -> float | None:
+    """Estimate the input-only cost of a payload at the cache-miss rate.
+
+    Pre-flight preview only, used by the ``Diagnostics / Task`` packet preview
+    (labelled "estimate, not billing"): no request is issued and no cache-hit
+    split is known, so the whole input is priced at the cache-miss rate of the
+    current peak/off-peak window. Returns ``None`` for a model without a tariff
+    or for a missing/negative token count.
+    """
+    tariff = _MODEL_TARIFFS.get(model)
+    if tariff is None or input_tokens is None:
+        return None
+    try:
+        tokens = int(input_tokens)
+    except (TypeError, ValueError):
+        return None
+    if tokens < 0:
+        return None
+    window = "peak" if is_peak_time(dt) else "off_peak"
+    return tokens * tariff["input_cache_miss"][window] / 1e6
 
 
 def estimate_cost(model: str, stats: TurnStats, dt: datetime | None = None) -> CostEstimate:
