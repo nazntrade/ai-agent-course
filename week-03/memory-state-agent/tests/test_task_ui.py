@@ -10,25 +10,34 @@ never depend on a fake provider script.
 
 import os
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 
 from streamlit.proto.RootContainer_pb2 import RootContainer as RootContainerProto
 from streamlit.testing.v1 import AppTest
 
+import task_runner
 from agent import AgentConfig
 from storage import ChatStore
 from task_orchestrator import TaskOrchestrator
 from task_storage import TaskRepository
 from task_ui import (
+    STEP_RUN_TOKEN_KEY,
     badge_label,
+    build_step_results,
     event_summary,
+    format_next_action,
+    format_plan,
     format_stage_indicator,
     format_task_compact,
     format_task_details,
+    running_step_label,
     shorten,
+    step_result_label,
 )
 from tasks import (
+    ARTIFACT_TASK_BRIEF,
     ARTIFACT_EXECUTION_RESULT,
     EVENT_API_ERROR,
     EVENT_BLOCK,
@@ -39,9 +48,15 @@ from tasks import (
     EVENT_PLAN_CREATED,
     EVENT_STEP_COMPLETED,
     EVENT_VALIDATION_PASSED,
+    EXPECTED_CONFIRM_PLAN,
+    EXPECTED_RUN_PLANNING,
+    EXPECTED_RUN_STEP,
+    EXPECTED_RUN_VALIDATION,
     STAGE_EXECUTION,
     apply_transition,
 )
+from tests.test_agent import FakeClient
+from tests.test_task_orchestrator import stream_step
 
 APP_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py"
@@ -81,6 +96,8 @@ TASK_LABELS = {
     "Workflow",
     "Context packet preview",
     "Task usage",
+    "Plan",
+    "Execution results",
 }
 
 
@@ -249,6 +266,254 @@ class FormatterTestCase(unittest.TestCase):
         self.assertIn("Expected action: Accept or reject the plan", details)
         self.assertIn("Last event: no events yet", details)
 
+    def test_format_plan_renders_summary_criteria_and_steps(self):
+        text = format_plan(PLAN_TWO_STEPS)
+
+        self.assertIn("**Summary:** Two step plan", text)
+        self.assertIn("**Acceptance criteria**", text)
+        self.assertIn("- First criterion", text)
+        self.assertIn("**1. Step one**", text)
+        self.assertIn("Do the first thing", text)
+        self.assertIn("**2. Step two**", text)
+        self.assertIn("Do the second thing", text)
+        self.assertNotIn("…", text)
+
+    def test_format_plan_handles_missing_or_malformed_values(self):
+        self.assertEqual(format_plan(None), "No plan yet.")
+        self.assertEqual(format_plan("not a plan"), "No plan yet.")
+        self.assertEqual(format_plan([1, 2]), "No plan yet.")
+
+        empty = format_plan({})
+        self.assertIn("**Summary:** —", empty)
+        self.assertIn("**Acceptance criteria:** —", empty)
+        self.assertIn("**Steps:** —", empty)
+
+        partial = format_plan({"summary": "Only a summary"})
+        self.assertIn("Only a summary", partial)
+        self.assertIn("**Acceptance criteria:** —", partial)
+        self.assertIn("**Steps:** —", partial)
+
+    def test_format_plan_lists_unknown_fields(self):
+        text = format_plan(
+            {
+                "summary": "Plan",
+                "acceptance_criteria": ["Hold"],
+                "steps": [{"index": 1, "title": "Do it"}],
+                "owner": "team",
+                "budget": 3,
+            }
+        )
+
+        self.assertIn("**Other fields**", text)
+        self.assertIn('- owner: "team"', text)
+        self.assertIn("- budget: 3", text)
+        # Known fields are not repeated in the technical list.
+        self.assertNotIn("- summary:", text)
+        self.assertNotIn("- steps:", text)
+
+    def test_format_plan_does_not_truncate_a_long_description(self):
+        description = "D" * 400
+        text = format_plan(
+            {
+                "summary": "S",
+                "acceptance_criteria": ["C"],
+                "steps": [{"index": 1, "title": "T", "description": description}],
+            }
+        )
+
+        self.assertIn(description, text)
+        self.assertNotIn("…", text)
+
+    def test_format_plan_skips_invalid_steps_without_raising(self):
+        text = format_plan(
+            {
+                "summary": "S",
+                "acceptance_criteria": ["C", "", None],
+                "steps": [
+                    "not a mapping",
+                    {"index": "one", "title": "Bad index"},
+                    {"index": 2, "title": ""},
+                    {"index": 3, "title": "Kept"},
+                ],
+            }
+        )
+
+        self.assertIn("- C", text)
+        self.assertIn("**3. Kept**", text)
+        self.assertNotIn("Bad index", text)
+
+    # --- Step results -----------------------------------------------------
+
+    def test_running_step_label_names_the_step_and_the_plan_size(self):
+        task = self.task(
+            stage="execution",
+            current_step="Step two",
+            current_step_index=2,
+            expected_action_type=EXPECTED_RUN_STEP,
+        )
+        self.assertEqual(
+            running_step_label(task, PLAN_TWO_STEPS),
+            "Running step 2 of 2: Step two",
+        )
+
+    def test_running_step_label_falls_back_without_a_plan_or_index(self):
+        self.assertEqual(
+            running_step_label(
+                self.task(current_step_index=None), PLAN_TWO_STEPS
+            ),
+            "Running the task step...",
+        )
+        self.assertEqual(
+            running_step_label(self.task(), None),
+            "Running the task step...",
+        )
+        self.assertEqual(
+            running_step_label(None, PLAN_TWO_STEPS),
+            "Running the task step...",
+        )
+
+    def _execution_artifact(self, artifact_id, revision, content):
+        return SimpleNamespace(
+            kind=ARTIFACT_EXECUTION_RESULT,
+            id=artifact_id,
+            revision=revision,
+            content=content,
+        )
+
+    def test_build_step_results_keeps_the_latest_revision_per_step(self):
+        artifacts = [
+            self._execution_artifact(
+                1, 1, {"step_index": 1, "round": 1, "text": "first"}
+            ),
+            self._execution_artifact(
+                2, 2, {"step_index": 2, "round": 1, "text": "second"}
+            ),
+            self._execution_artifact(
+                3, 3, {"step_index": 1, "round": 2, "text": "reworked"}
+            ),
+        ]
+
+        views = build_step_results(PLAN_TWO_STEPS, artifacts)
+
+        self.assertEqual([view["step_index"] for view in views], [1, 2])
+        self.assertEqual(views[0]["total"], 2)
+        self.assertEqual(views[0]["text"], "reworked")
+        self.assertEqual(views[0]["round"], 2)
+        self.assertEqual(views[1]["text"], "second")
+        self.assertEqual(views[1]["round"], 1)
+        # The most recent revision (step 1 rev 3) is the expanded one.
+        self.assertTrue(views[0]["is_latest"])
+        self.assertFalse(views[1]["is_latest"])
+
+    def test_build_step_results_skips_missing_results_and_empty_text(self):
+        empty = [
+            self._execution_artifact(
+                1, 1, {"step_index": 1, "round": 1, "text": "   "}
+            )
+        ]
+        self.assertEqual(build_step_results(PLAN_TWO_STEPS, empty), [])
+        self.assertEqual(build_step_results(PLAN_TWO_STEPS, []), [])
+        self.assertEqual(build_step_results(None, []), [])
+        self.assertEqual(build_step_results({}, []), [])
+
+    def test_build_step_results_uses_progress_round_when_absent(self):
+        artifacts = [
+            self._execution_artifact(
+                1, 1, {"step_index": 1, "text": "done"}
+            )
+        ]
+
+        views = build_step_results(PLAN_TWO_STEPS, artifacts)
+
+        self.assertEqual(views[0]["round"], 1)
+
+    def test_step_result_label_adds_revision_and_rework(self):
+        view = {
+            "step_index": 2,
+            "total": 3,
+            "title": "Step two",
+            "round": 1,
+            "awaiting_rework": False,
+        }
+        self.assertEqual(step_result_label(view), "Step 2 of 3: Step two")
+
+        view["round"] = 2
+        self.assertEqual(
+            step_result_label(view), "Step 2 of 3: Step two · revision 2"
+        )
+
+        view["awaiting_rework"] = True
+        self.assertEqual(
+            step_result_label(view),
+            "Step 2 of 3: Step two · revision 2 · awaiting rework",
+        )
+
+    def test_format_next_action_covers_the_task_states(self):
+        running = self.task(
+            stage="execution",
+            current_step="Step two",
+            current_step_index=2,
+            expected_action_type=EXPECTED_RUN_STEP,
+            expected_action_text="Run the current step",
+        )
+        self.assertEqual(
+            format_next_action(running, PLAN_TWO_STEPS),
+            "Next: Run step 2 of 2: Step two",
+        )
+
+        blocked = self.task(
+            status="blocked", expected_action_text="Upload the API spec"
+        )
+        self.assertEqual(
+            format_next_action(blocked, PLAN_TWO_STEPS),
+            "Expected from you: Upload the API spec",
+        )
+
+        paused = self.task(
+            status="paused", expected_action_text="Run the current step"
+        )
+        self.assertEqual(
+            format_next_action(paused, PLAN_TWO_STEPS),
+            "Paused. Next action: Run the current step",
+        )
+
+        validation = self.task(
+            stage="validation",
+            expected_action_type=EXPECTED_RUN_VALIDATION,
+            current_step_index=None,
+        )
+        self.assertEqual(
+            format_next_action(validation, PLAN_TWO_STEPS),
+            "Next: Run validation",
+        )
+
+        planning = self.task(
+            stage="planning",
+            expected_action_type=EXPECTED_RUN_PLANNING,
+            current_step_index=None,
+        )
+        self.assertEqual(
+            format_next_action(planning, PLAN_TWO_STEPS), "Next: Run planning"
+        )
+
+        confirm = self.task(expected_action_type=EXPECTED_CONFIRM_PLAN)
+        self.assertEqual(
+            format_next_action(confirm, PLAN_TWO_STEPS),
+            "Next: Accept or reject the plan",
+        )
+
+        done = self.task(stage="done", status="completed")
+        self.assertEqual(
+            format_next_action(done, PLAN_TWO_STEPS), "Task completed."
+        )
+
+        cancelled = self.task(status="cancelled")
+        self.assertEqual(
+            format_next_action(cancelled, PLAN_TWO_STEPS), "Task cancelled."
+        )
+
+        self.assertEqual(format_next_action(None, None), "No active task.")
+
 
 class TaskUiTestCase(unittest.TestCase):
     """A temporary database with one chat plus the UI helpers."""
@@ -263,6 +528,9 @@ class TaskUiTestCase(unittest.TestCase):
         self.orchestrator = TaskOrchestrator(
             self.store, repository=self.repo, client=object()
         )
+
+    def tearDown(self):
+        task_runner.get_registry().clear()
 
     # --- state builders ---------------------------------------------------
 
@@ -412,6 +680,28 @@ class TaskUiTestCase(unittest.TestCase):
             if children and any(child is target for child in children.values()):
                 return node
         raise AssertionError("the element has no parent block")
+
+    @staticmethod
+    def expander_with_label(app, label):
+        return next(item for item in app.expander if item.label == label)
+
+    @staticmethod
+    def block_markdown(block):
+        return [item.value for item in block.markdown]
+
+    def assert_no_nested_expanders(self, node, inside=False):
+        """Fail when any expander is nested inside another expander."""
+        is_expander = getattr(node, "type", None) == "expander"
+        if inside and is_expander:
+            self.fail("an expander is nested inside another expander")
+        for child in getattr(node, "children", {}).values():
+            self.assert_no_nested_expanders(child, inside or is_expander)
+
+    def assert_app_has_no_nested_expanders(self, app):
+        # The AppTest root keeps main, sidebar and event blocks: walk each one
+        # because the root itself does not expose its children directly.
+        for index in range(len(app)):
+            self.assert_no_nested_expanders(app[index])
 
     # --- Chat regression --------------------------------------------------
 
@@ -785,12 +1075,14 @@ class TaskUiTestCase(unittest.TestCase):
         task = self.execution_task()
         app = self.run_app()
 
-        # The bare object client cannot answer, so the action fails: the card
-        # reports the error, the placeholder is cleared by the app callback and
-        # the repository records only API_ERROR.
+        # The bare object client cannot answer, so the background run fails:
+        # the follower reports the error, the session token is released and the
+        # repository records only API_ERROR.
         self.button(app, "task_action_run_step").click().run(timeout=30)
         self.assert_no_exception(app)
 
+        self.assertNotIn(STEP_RUN_TOKEN_KEY, app.session_state)
+        self.assertFalse(task_runner.step_run_busy(task.id))
         self.assertEqual(self.repo.latest_event_type(task.id), EVENT_API_ERROR)
         self.assertEqual(
             self.repo.list_artifacts(task.id, kind=ARTIFACT_EXECUTION_RESULT), []
@@ -871,8 +1163,27 @@ class TaskUiTestCase(unittest.TestCase):
         for label in TASK_LABELS:
             with self.subTest(panel=label):
                 self.assertIn(label, labels)
-        self.assertIn("specification rev 1", labels)
-        self.assertIn("plan rev 1", labels)
+
+        markdown_values = [item.value for item in app.markdown]
+        self.assertTrue(
+            any("specification rev 1" in value for value in markdown_values)
+        )
+        self.assertTrue(
+            any("plan rev 1" in value for value in markdown_values)
+        )
+        # The artifact contents follow their headers as markdown JSON blocks
+        # instead of the previous nested expander + st.json pair.
+        self.assertTrue(
+            any("# Task specification" in value for value in markdown_values),
+            "the specification artifact content was not rendered",
+        )
+        self.assertTrue(
+            any('"acceptance_criteria"' in value for value in markdown_values),
+            "the plan artifact content was not rendered",
+        )
+        # No expander may sit inside another expander; st.json is not used.
+        self.assert_app_has_no_nested_expanders(app)
+        self.assertEqual(len(app.json), 0, "st.json must not be used anymore")
 
         # User profiles stay in Diagnostics / Memory, never in the task panel.
         self.assertNotIn("User profiles", labels)
@@ -918,6 +1229,142 @@ class TaskUiTestCase(unittest.TestCase):
             any("counted separately from the chat statistics" in text for text in captions)
         )
 
+    def test_diagnostics_plan_is_readable_and_raw_json_is_hidden(self):
+        task = self.confirm_plan_task()
+        app = self.run_app(mode=MODE_TASK)
+
+        plan_expander = self.expander_with_label(app, "Plan")
+        readable = "\n".join(self.block_markdown(plan_expander))
+        self.assertIn("Two step plan", readable)
+        self.assertIn("First criterion", readable)
+        self.assertIn("Step one", readable)
+        self.assertIn("Step two", readable)
+        # The formatted plan does not expose the raw JSON field names.
+        self.assertNotIn('"acceptance_criteria"', readable)
+
+        raw_key = f"task_plan_raw_{task.id}"
+        raw_checkbox = next(
+            item for item in app.checkbox if item.key == raw_key
+        )
+        self.assertFalse(raw_checkbox.value)
+        raw_checkbox.set_value(True).run(timeout=30)
+        self.assert_no_exception(app)
+
+        plan_expander = self.expander_with_label(app, "Plan")
+        readable = "\n".join(self.block_markdown(plan_expander))
+        self.assertIn('"acceptance_criteria"', readable)
+
+    def test_diagnostics_long_artifact_is_rendered_in_full(self):
+        task = self.confirm_plan_task()
+        marker = "END-OF-ARTIFACT-MARKER"
+        self.repo.add_artifact(
+            task.id,
+            "planning",
+            ARTIFACT_TASK_BRIEF,
+            {"text": ("A long artifact line. " * 400) + marker},
+        )
+
+        app = self.run_app(mode=MODE_TASK)
+
+        # The unique tail marker proves the artifact is rendered to its end.
+        self.assertTrue(
+            any(
+                marker in item.value and "A long artifact line." in item.value
+                for item in app.markdown
+            ),
+            "the full artifact content was not rendered",
+        )
+
+    def test_review_plan_dialog_accepts_the_plan(self):
+        task = self.confirm_plan_task()
+        app = self.run_app()
+        self.assertIn("task_review_plan", {item.key for item in app.button})
+
+        self.button(app, "task_review_plan").click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        buttons = {item.key for item in app.button}
+        self.assertIn("task_plan_dialog_accept", buttons)
+        self.assertIn("task_plan_dialog_reject", buttons)
+        dialog_text = "\n".join(item.value for item in app.markdown)
+        self.assertIn("Two step plan", dialog_text)
+        self.assertIn("**1. Step one**", dialog_text)
+
+        self.button(app, "task_plan_dialog_accept").click().run(timeout=30)
+        self.assert_no_exception(app)
+        self.assertEqual(self.repo.get_task(task.id).stage, STAGE_EXECUTION)
+
+    def test_review_plan_dialog_rejects_the_plan(self):
+        task = self.confirm_plan_task()
+        app = self.run_app()
+        self.button(app, "task_review_plan").click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        self.button(app, "task_plan_dialog_reject").click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        updated = self.repo.get_task(task.id)
+        self.assertEqual(updated.expected_action_type, EXPECTED_RUN_PLANNING)
+        self.assertIn("task_action_run_planning", self.action_keys(app))
+
+    def test_card_accept_plan_action_still_changes_the_state(self):
+        task = self.confirm_plan_task()
+        app = self.run_app()
+
+        self.button(app, "task_action_accept_plan").click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        self.assertEqual(self.repo.get_task(task.id).stage, STAGE_EXECUTION)
+
+    def test_planning_without_plan_shows_caption_without_review(self):
+        self.planning_task()
+        app = self.run_app(mode=MODE_TASK)
+
+        plan_expander = self.expander_with_label(app, "Plan")
+        captions = [item.value for item in plan_expander.caption]
+        self.assertIn("No plan yet.", captions)
+        # The no-plan placeholder must be shown exactly once, not twice.
+        texts = self.block_markdown(plan_expander) + captions
+        self.assertEqual(
+            sum(text.count("No plan yet.") for text in texts),
+            1,
+            "the no-plan placeholder must be shown exactly once",
+        )
+        self.assertFalse(
+            any(
+                item.key and item.key.startswith("task_plan_raw_")
+                for item in app.checkbox
+            )
+        )
+
+        app.radio(MODE_KEY).set_value(MODE_CHAT).run(timeout=30)
+        self.assert_no_exception(app)
+        self.assertNotIn("task_review_plan", {item.key for item in app.button})
+
+    def test_done_card_has_no_review_plan_button(self):
+        self.done_task()
+        app = self.run_app()
+        self.assertNotIn("task_review_plan", {item.key for item in app.button})
+
+    def test_review_plan_dialog_without_plan_shows_one_caption(self):
+        task = self.planning_task()
+        app = self.run_app()
+        app.session_state["task_plan_dialog_task"] = task.id
+        app.run(timeout=30)
+        self.assert_no_exception(app)
+
+        # The dialog shows the no-plan caption once and offers no actions.
+        placeholders = [
+            item.value for item in app.caption if item.value == "No plan yet."
+        ]
+        self.assertEqual(len(placeholders), 1)
+        self.assertNotIn(
+            "task_plan_dialog_accept", {item.key for item in app.button}
+        )
+        self.assertNotIn(
+            "task_plan_dialog_reject", {item.key for item in app.button}
+        )
+
     def test_diagnostics_memory_keeps_user_profiles_and_hides_tasks(self):
         app = self.run_app(mode=MODE_DIAGNOSTICS)
 
@@ -955,6 +1402,178 @@ class TaskUiTestCase(unittest.TestCase):
             item.value for item in app.caption
         ))
         self.assertIn("Planning", indicator.value)
+
+    # --- Execution results panel and background step runs ----------------
+
+    def test_execution_results_panel_shows_step_texts_in_chat(self):
+        self.finish_execution_task()
+        app = self.run_app()
+
+        self.assertIn(
+            "Execution results", [item.value for item in app.subheader]
+        )
+        labels = {item.label for item in app.expander}
+        self.assertIn("Step 1 of 2: Step one", labels)
+        self.assertIn("Step 2 of 2: Step two", labels)
+        texts = [item.value for item in app.markdown]
+        self.assertTrue(any("step one done" in text for text in texts))
+        self.assertTrue(any("step two done" in text for text in texts))
+
+    def test_execution_results_panel_survives_rerun_and_new_session(self):
+        self.finish_execution_task()
+        app = self.run_app()
+        self.assertIn(
+            "Execution results", [item.value for item in app.subheader]
+        )
+
+        app.run(timeout=30)
+        self.assert_no_exception(app)
+        self.assertIn(
+            "Execution results", [item.value for item in app.subheader]
+        )
+
+        # A new AppTest session on the same database reads the stored results.
+        other_session = self.run_app()
+        self.assertIn(
+            "Execution results",
+            [item.value for item in other_session.subheader],
+        )
+
+    def test_execution_results_panel_hidden_without_results(self):
+        self.execution_task()
+        app = self.run_app()
+
+        self.assertNotIn(
+            "Execution results", [item.value for item in app.subheader]
+        )
+        self.assertNotIn(
+            "Execution results", {item.label for item in app.expander}
+        )
+
+    def test_run_step_success_streams_and_stores_the_result(self):
+        task = self.execution_task()
+        # A real client streams one step; the background run must store the
+        # artifact and the card must show its text in the results panel.
+        client = FakeClient(script=[stream_step("Step one done")])
+        self.orchestrator = TaskOrchestrator(
+            self.store, repository=self.repo, client=client
+        )
+        app = self.run_app()
+
+        self.button(app, "task_action_run_step").click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        self.assertFalse(app.error)
+        self.assertNotIn(STEP_RUN_TOKEN_KEY, app.session_state)
+        self.assertFalse(task_runner.step_run_busy(task.id))
+        self.assertEqual(self.repo.latest_event_type(task.id), EVENT_STEP_COMPLETED)
+        results = self.repo.list_artifacts(task.id, kind=ARTIFACT_EXECUTION_RESULT)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].content["text"], "Step one done")
+        self.assertIn(
+            "Execution results", [item.value for item in app.subheader]
+        )
+        self.assertTrue(
+            any("Step one done" in item.value for item in app.markdown)
+        )
+        self.assertFalse(
+            self.button(app, "task_action_run_step").proto.disabled
+        )
+
+    def test_orphan_step_run_is_cleared_with_a_notice(self):
+        task = self.execution_task()
+        app = self.run_app()
+        token = "orphan-token"
+        record = task_runner.StepRunRecord(
+            token=token,
+            task_id=task.id,
+            chat_id=self.chat_id,
+            action="run_step",
+            status=task_runner.STEP_RUN_RUNNING,
+            thread=None,
+        )
+        task_runner.get_registry()._records[token] = record
+        task_runner.get_registry()._by_task[task.id] = token
+        app.session_state[STEP_RUN_TOKEN_KEY] = token
+
+        app.run(timeout=30)
+        self.assert_no_exception(app)
+
+        # The orphan is discarded, its token is released and the step button
+        # becomes available again with an explanatory message.
+        self.assertNotIn(STEP_RUN_TOKEN_KEY, app.session_state)
+        self.assertIsNone(task_runner.step_run_record(token))
+        self.assertTrue(
+            any(
+                "stopped unexpectedly" in item.value for item in app.error
+            )
+        )
+        self.assertFalse(
+            self.button(app, "task_action_run_step").proto.disabled
+        )
+
+    def test_foreign_live_run_keeps_the_button_disabled(self):
+        task = self.execution_task()
+        started = threading.Event()
+        release = threading.Event()
+
+        def worker(on_chunk):
+            started.set()
+            release.wait(10)
+
+        record = task_runner.get_registry().start(
+            task.id, self.chat_id, "run_step", worker
+        )
+        self.assertTrue(started.wait(5))
+        try:
+            # The token is deliberately not in this session: the app only sees
+            # the process-level record and must not block on someone else's run.
+            app = self.run_app()
+            self.assert_no_exception(app)
+            self.assertTrue(
+                self.button(app, "task_action_run_step").proto.disabled
+            )
+            self.assertTrue(
+                any("Running step" in item.value for item in app.caption)
+            )
+        finally:
+            release.set()
+            record.thread.join(10)
+            task_runner.discard_step_run(record.token)
+
+    def test_new_session_after_a_failed_run_step_has_no_busy_state(self):
+        task = self.execution_task()
+        app = self.run_app()
+        self.button(app, "task_action_run_step").click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        # A fresh session starts with empty session state and the process
+        # registry holds no live run for the task, so the button reaches the
+        # provider on the first click.
+        fresh = self.run_app()
+        self.assertNotIn(STEP_RUN_TOKEN_KEY, fresh.session_state)
+        self.assertFalse(task_runner.step_run_busy(task.id))
+
+        self.button(fresh, "task_action_run_step").click().run(timeout=30)
+        self.assert_no_exception(fresh)
+        self.assertEqual(self.repo.latest_event_type(task.id), EVENT_API_ERROR)
+        self.assertFalse(
+            any("already running" in item.value for item in fresh.error)
+        )
+
+    def test_diagnostics_task_shows_readable_execution_results(self):
+        self.finish_execution_task()
+        app = self.run_app(mode=MODE_TASK)
+
+        labels = {item.label for item in app.expander}
+        self.assertIn("Execution results", labels)
+        expander = self.expander_with_label(app, "Execution results")
+        texts = "\n".join(self.block_markdown(expander))
+        self.assertIn("Step 1 of 2: Step one", texts)
+        self.assertIn("step one done", texts)
+        self.assertIn("step two done", texts)
+        self.assertIn("Next: Finish execution", texts)
+        self.assert_app_has_no_nested_expanders(app)
 
     # --- Empty database ---------------------------------------------------
 

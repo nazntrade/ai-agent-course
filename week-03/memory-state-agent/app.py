@@ -1,3 +1,5 @@
+import time
+
 import streamlit as st
 
 from agent import (
@@ -37,16 +39,25 @@ from strategies import (
     strategy_label,
 )
 from task_orchestrator import TaskOrchestrator
+from task_runner import (
+    STEP_RUN_DONE,
+    STEP_RUN_ERROR,
+    STEP_RUN_RUNNING,
+    discard_step_run,
+    step_run_record,
+)
 from task_storage import TaskRepository
 from task_ui import (
     MODE_KEY,
     MODE_TASK,
     PENDING_MODE_KEY,
+    STEP_RUN_TOKEN_KEY,
     render_diagnostics_task,
     render_task_card,
+    render_task_results_panel,
     report_task_error,
+    running_step_label,
 )
-from tasks import ACTION_RETRY, ACTION_RUN_STEP
 from tokens import estimate_tokens
 
 # Three mutually exclusive UI modes. Chat is the default landing mode and keeps
@@ -95,6 +106,11 @@ if "task_orchestrator" not in st.session_state:
     )
 
 task_orchestrator = st.session_state.task_orchestrator
+
+# Polling step of the background-run follower. The provider call runs in a
+# worker thread of ``task_runner``; this function only reads its record and
+# redraws the placeholder, so a short pause keeps the thread join cheap.
+STEP_RUN_POLL_SECONDS = 0.3
 
 # A summary update failure is reported on the next render, after the rerun that
 # follows a successful turn; popping it here ensures it is shown exactly once.
@@ -688,49 +704,66 @@ _task_stream_placeholder = (
 )
 
 
-def _run_task_step(task_id, action=ACTION_RUN_STEP):
-    """Run ``run_step``/``retry`` with the stream shown in the main area.
+def _follow_step_run():
+    """Show the background step run of this session and settle its outcome.
 
-    The spinner is opened before the call, the first chunk replaces it with the
-    running text, and any error clears the placeholder entirely, so a partial
-    stream never looks like a stored artifact. Returns the orchestrator result
-    for the card to report.
+    The card starts the provider call in a worker thread of ``task_runner``;
+    this function only polls the record, so the call keeps going independently
+    of any Streamlit rerun and the script is never the owner of the request. A
+    run whose thread disappeared without a status is reported as stopped, while
+    a finished one is discarded before the rerun that reads its stored result.
     """
     global _task_stream_placeholder
+
+    token = st.session_state.get(STEP_RUN_TOKEN_KEY)
+    if token is None:
+        return
+
+    record = step_run_record(token)
+    if record is None:
+        st.session_state.pop(STEP_RUN_TOKEN_KEY, None)
+        return
+
+    task = task_orchestrator.current_task(chat_id)
+    if record.chat_id != chat_id or task is None or task.id != record.task_id:
+        # The run belongs to another chat or task: keep the token for its owner
+        # and do not draw its stream under the wrong card.
+        return
+
+    if record.status == STEP_RUN_RUNNING and not record.is_live():
+        st.session_state.pop(STEP_RUN_TOKEN_KEY, None)
+        discard_step_run(token)
+        report_task_error(
+            "The previous step run stopped unexpectedly. Run the step again."
+        )
+        st.rerun()
+
+    plan = task_orchestrator.repository.load_plan(task.id)
     placeholder = _task_stream_placeholder
     if placeholder is None:
         placeholder = st.empty()
         _task_stream_placeholder = placeholder
 
     indicator = WaitingIndicator(
-        placeholder.spinner("Running the task step..."), placeholder
+        placeholder.spinner(running_step_label(task, plan)), placeholder
     )
-    try:
-        if action == ACTION_RETRY:
-            result = task_orchestrator.retry(
-                task_id, on_chunk=indicator.show_chunk
-            )
-        else:
-            result = task_orchestrator.run_step(
-                task_id, on_chunk=indicator.show_chunk
-            )
-    except Exception as exc:
-        indicator.clear()
-        report_task_error(f"Error: {exc}")
-        return None
+    while record.status == STEP_RUN_RUNNING and record.is_live():
+        indicator.show_chunk(record.snapshot()["text"])
+        time.sleep(STEP_RUN_POLL_SECONDS)
 
-    if result.ok and result.stage_result is not None:
-        indicator.show_chunk(result.stage_result.text)
-    else:
+    st.session_state.pop(STEP_RUN_TOKEN_KEY, None)
+    discard_step_run(token)
+    if record.status == STEP_RUN_DONE:
+        indicator.show_chunk(record.text)
+    elif record.status == STEP_RUN_ERROR:
         indicator.clear()
-    return result
+        report_task_error(record.error)
+    st.rerun()
 
 
 def _render_task_card_in_sidebar(store, orchestrator, chat_id):
     """Render the compact task card above the chat settings (FR-38 fallback)."""
-    render_task_card(
-        store, orchestrator, chat_id, on_run_step=_run_task_step
-    )
+    render_task_card(store, orchestrator, chat_id)
 
 
 # Apply a mode switch requested by the task card or the result dialog. The
@@ -1688,6 +1721,9 @@ elif mode == MODE_DIAGNOSTICS:
 
 elif mode == MODE_CHAT:
     _render_chat_history(store, chat_id)
+    # Readable step results, read from the stored artifacts: they survive a
+    # rerun and an application restart and stay next to the conversation.
+    render_task_results_panel(task_orchestrator, chat_id)
 
     if TASK_CARD_LOCATION != "sidebar":
         # The placeholder sits between the history and the pinned bottom
@@ -1708,9 +1744,7 @@ elif mode == MODE_CHAT:
             # The task card is the first element of the bottom container: it
             # never wraps the profile row, which stays a direct child rendered
             # between the card and the message input (FR-33).
-            render_task_card(
-                store, task_orchestrator, chat_id, on_run_step=_run_task_step
-            )
+            render_task_card(store, task_orchestrator, chat_id)
 
         col_profile, col_manage = st.columns(
             [0.75, 0.25], vertical_alignment="bottom"
@@ -1725,6 +1759,10 @@ elif mode == MODE_CHAT:
             )
 
         prompt = st.chat_input("Enter a message")
+
+    # A background step run started by the card is followed here, before the
+    # chat prompt is handled: the click callback only launched the worker.
+    _follow_step_run()
 
     # The reply stays in the main area: rendering it inside st.bottom would
     # draw the streamed answer into the pinned container instead of the history.

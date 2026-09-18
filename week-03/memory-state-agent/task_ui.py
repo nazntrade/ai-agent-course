@@ -10,8 +10,10 @@ provider during rendering.
 The card is purely presentational: the set of actions it shows is exactly
 ``TaskOrchestrator.allowed_actions`` (the single source of truth from
 ``tasks.can_apply`` plus the UI-only actions), and every click delegates to the
-matching use case. The domain still rejects a disallowed action, so a stale card
-cannot change the stage directly.
+matching use case. ``Run step``/``Retry`` only start a process-level background
+run through ``task_runner``; ``app.py`` then follows that run while the provider
+call keeps going independently of the Streamlit reruns. The domain still rejects
+a disallowed action, so a stale card cannot change the stage directly.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import json
 import streamlit as st
 
 from task_orchestrator import STATUS_SUCCESS
+from task_runner import start_step_run, step_run_busy
 from task_storage import DEFAULT_WORKFLOW_NAME
 from tasks import (
     ACTION_ACCEPT_PLAN,
@@ -39,14 +42,24 @@ from tasks import (
     ACTION_RUN_STEP,
     ACTION_RUN_VALIDATION,
     ACTION_UNBLOCK,
+    ARTIFACT_EXECUTION_RESULT,
     ARTIFACT_FINAL_RESULT,
+    EXPECTED_CONFIRM_PLAN,
+    EXPECTED_FINISH_EXECUTION,
+    EXPECTED_RUN_PLANNING,
+    EXPECTED_RUN_STEP,
+    EXPECTED_RUN_VALIDATION,
     STAGE_DONE,
     STAGE_EXECUTION,
     STAGE_PLANNING,
     STAGE_STEP_LABELS,
     STAGE_VALIDATION,
     STATUS_BLOCKED,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_PAUSED,
     badge_for,
+    compute_step_progress,
     plan_steps,
 )
 
@@ -81,9 +94,15 @@ _STAGE_MARKERS = {"passed": "✓", "current": "●", "upcoming": "○"}
 DIALOG_CREATE_KEY = "task_create_dialog_open"
 DIALOG_RESULT_KEY = "task_result_dialog_open"
 DIALOG_DETAILS_KEY = "task_details_dialog_task"
+DIALOG_PLAN_KEY = "task_plan_dialog_task"
 BLOCK_FORM_KEY = "task_block_form_open"
 CANCEL_CONFIRM_KEY = "task_cancel_confirm_task"
 TASK_ERROR_KEY = "task_action_error"
+
+# Session handle on the process-level step run started by ``Run step``/``Retry``.
+# The call itself lives in ``task_runner`` and survives every rerun; this plain
+# key only lets ``app.py`` follow the run this session started.
+STEP_RUN_TOKEN_KEY = "task_step_run_token"
 
 ACTION_LABELS = {
     ACTION_RUN_PLANNING: "Run planning",
@@ -180,6 +199,232 @@ def format_task_details(task, last_event=None) -> str:
         lines.append(f"Expected action: {task.expected_action_text or '—'}")
     lines.append(f"Last event: {event_summary(last_event)}")
     return "  \n".join(lines)
+
+
+def _plan_summary_line(plan) -> str:
+    return f"**Summary:** {plan.get('summary') or '—'}"
+
+
+def _plan_criteria_block(criteria) -> str:
+    """Render the acceptance criteria, or a placeholder when there are none."""
+    cleaned = []
+    if isinstance(criteria, list):
+        for criterion in criteria:
+            text = str(criterion).strip() if criterion is not None else ""
+            if text:
+                cleaned.append(text)
+    if not cleaned:
+        return "**Acceptance criteria:** —"
+    lines = ["**Acceptance criteria**"]
+    lines.extend(f"- {criterion}" for criterion in cleaned)
+    return "\n".join(lines)
+
+
+def _plan_steps_block(plan) -> str:
+    """Render the normalized plan steps, or a placeholder when there are none."""
+    steps = plan_steps(plan)
+    if not steps:
+        return "**Steps:** —"
+    lines = []
+    for position, step in enumerate(steps):
+        if position:
+            lines.append("")
+        lines.append(f"**{step['index']}. {step['title']}**")
+        description = str(step.get("description") or "").strip()
+        if description:
+            lines.append(description)
+    return "\n".join(lines)
+
+
+def _json_text(value) -> str:
+    """Serialize ``value`` to compact JSON, falling back to ``str``."""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def format_plan(plan) -> str:
+    """Return the full, readable plan text (FR: plan review).
+
+    Every known field is rendered as readable markdown; unknown fields are
+    appended as a JSON list so no information of a future plan shape is lost.
+    The function is pure and never raises: anything that is not a mapping is
+    treated as "no plan yet", and malformed plans degrade to placeholders.
+    """
+    if not isinstance(plan, dict):
+        return "No plan yet."
+
+    blocks = [
+        _plan_summary_line(plan),
+        _plan_criteria_block(plan.get("acceptance_criteria")),
+        _plan_steps_block(plan),
+    ]
+
+    known = ("summary", "acceptance_criteria", "steps")
+    extra = [
+        (key, value) for key, value in plan.items() if key not in known
+    ]
+    if extra:
+        lines = ["**Other fields**"]
+        lines.extend(f"- {key}: {_json_text(value)}" for key, value in extra)
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+# --- Step results ---------------------------------------------------------
+
+
+def running_step_label(task, plan) -> str:
+    """Spinner text "Running step N of M: <title>", or a generic fallback."""
+    if task is None:
+        return "Running the task step..."
+    index = task.current_step_index
+    title = str(task.current_step or "").strip()
+    steps = plan_steps(plan)
+    if isinstance(index, int) and not isinstance(index, bool) and steps and title:
+        return f"Running step {index} of {len(steps)}: {title}"
+    return "Running the task step..."
+
+
+def _result_order(artifact) -> tuple:
+    """Sort key ``(revision, id)`` of a stored artifact.
+
+    A non-integer revision contributes 0, so an artifact with a missing or
+    malformed revision sorts before the stored revisions and never wins as the
+    latest view by accident.
+    """
+    revision = getattr(artifact, "revision", None)
+    artifact_id = getattr(artifact, "id", None)
+    return (
+        revision if isinstance(revision, int) and not isinstance(revision, bool) else 0,
+        artifact_id if isinstance(artifact_id, int) and not isinstance(artifact_id, bool) else 0,
+    )
+
+
+def build_step_results(plan, artifacts) -> list:
+    """Merge plan steps, progress and the latest result artifact per step.
+
+    Only steps that have a non-empty stored result are returned. ``is_latest``
+    marks the view of the most recent artifact, so the panel can expand exactly
+    the last completed step. The view shape is stable for the UI and the tests.
+    """
+    steps = plan_steps(plan)
+    if not steps:
+        return []
+    progress = {
+        item.step_index: item for item in compute_step_progress(plan, artifacts)
+    }
+    latest_by_step: dict = {}
+    for artifact in artifacts or []:
+        if getattr(artifact, "kind", None) != ARTIFACT_EXECUTION_RESULT:
+            continue
+        content = getattr(artifact, "content", None)
+        if not isinstance(content, dict):
+            continue
+        index = content.get("step_index")
+        if not isinstance(index, int) or isinstance(index, bool):
+            continue
+        current = latest_by_step.get(index)
+        if current is None or _result_order(artifact) > _result_order(current):
+            latest_by_step[index] = artifact
+
+    views = []
+    latest_position = None
+    latest_order = None
+    for step in steps:
+        index = step["index"]
+        artifact = latest_by_step.get(index)
+        if artifact is None:
+            continue
+        text = str((artifact.content or {}).get("text") or "").strip()
+        if not text:
+            continue
+        step_progress = progress.get(index)
+        round_value = (artifact.content or {}).get("round")
+        if not isinstance(round_value, int) or isinstance(round_value, bool):
+            round_value = step_progress.round if step_progress is not None else 0
+        views.append(
+            {
+                "step_index": index,
+                "total": len(steps),
+                "title": (
+                    step_progress.title
+                    if step_progress is not None and step_progress.title
+                    else step["title"]
+                ),
+                "round": round_value,
+                "text": text,
+                "awaiting_rework": bool(
+                    step_progress.awaiting_rework
+                ) if step_progress is not None else False,
+                "defects": list(step_progress.defects) if step_progress is not None else [],
+                "is_latest": False,
+            }
+        )
+        order = _result_order(artifact)
+        if latest_order is None or order > latest_order:
+            latest_order = order
+            latest_position = len(views) - 1
+    if latest_position is not None:
+        views[latest_position]["is_latest"] = True
+    return views
+
+
+def step_result_label(view) -> str:
+    """One-line expander label of a stored step result."""
+    label = f"Step {view['step_index']} of {view['total']}: {view['title']}"
+    if view.get("round", 0) > 1:
+        label += f" · revision {view['round']}"
+    if view.get("awaiting_rework"):
+        label += " · awaiting rework"
+    return label
+
+
+def format_next_action(task, plan) -> str:
+    """Readable "what happens next" line for the results panel and diagnostics."""
+    if task is None:
+        return "No active task."
+    if task.status == STATUS_CANCELLED:
+        return "Task cancelled."
+    if task.stage == STAGE_DONE or task.status == STATUS_COMPLETED:
+        return "Task completed."
+    if task.status == STATUS_BLOCKED:
+        return f"Expected from you: {task.expected_action_text or '—'}"
+    if task.status == STATUS_PAUSED:
+        return f"Paused. Next action: {task.expected_action_text or '—'}"
+
+    expected = task.expected_action_type
+    if expected == EXPECTED_RUN_STEP:
+        steps = plan_steps(plan)
+        index = task.current_step_index
+        title = str(task.current_step or "").strip()
+        if isinstance(index, int) and not isinstance(index, bool) and steps and title:
+            return f"Next: Run step {index} of {len(steps)}: {title}"
+        return "Next: Run the current step"
+    if expected == EXPECTED_RUN_VALIDATION:
+        return "Next: Run validation"
+    if expected == EXPECTED_CONFIRM_PLAN:
+        return "Next: Accept or reject the plan"
+    if expected == EXPECTED_RUN_PLANNING:
+        return "Next: Run planning"
+    if expected == EXPECTED_FINISH_EXECUTION:
+        return "Next: Finish execution"
+    text = str(task.expected_action_text or "").strip()
+    return f"Next: {text}" if text else ""
+
+
+def _json_block(content) -> str:
+    """Return ``content`` as a fenced JSON code block.
+
+    Used instead of ``st.json`` so long artifacts stay in the normal document
+    flow and can be scrolled to the end inside the page.
+    """
+    try:
+        body = json.dumps(content, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        body = str(content)
+    return f"```json\n{body}\n```"
 
 
 def _stage_state(position, current) -> str:
@@ -325,6 +570,10 @@ def _dismiss_details_dialog():
     st.session_state.pop(DIALOG_DETAILS_KEY, None)
 
 
+def _dismiss_plan_dialog():
+    st.session_state.pop(DIALOG_PLAN_KEY, None)
+
+
 def render_create_task_form(
     orchestrator, chat_id, *, key_prefix, dialog_key=None
 ):
@@ -399,6 +648,36 @@ def render_task_details_dialog(orchestrator, task):
     st.markdown(format_task_details(task, events[-1] if events else None))
 
 
+@st.dialog("Review plan", on_dismiss=_dismiss_plan_dialog)
+def render_plan_dialog(orchestrator, task, plan):
+    """Modal plan review with the accept/reject actions on one spot.
+
+    The dialog keys are deliberately distinct from the card's ``task_action_*``
+    keys: both the card and the dialog are rendered in the same run, and a
+    duplicate key would make the Streamlit widget state ambiguous.
+    """
+    if not isinstance(plan, dict):
+        st.caption("No plan yet.")
+        return
+
+    st.markdown(format_plan(plan))
+    col_accept, col_reject = st.columns(2)
+    if col_accept.button("Accept plan", key="task_plan_dialog_accept"):
+        result = _dispatch_action(orchestrator, task, ACTION_ACCEPT_PLAN)
+        if result is not None and result.ok:
+            st.session_state.pop(DIALOG_PLAN_KEY, None)
+            st.rerun()
+        message = getattr(result, "error_message", None)
+        st.error(message or "The plan could not be accepted.")
+    if col_reject.button("Reject plan", key="task_plan_dialog_reject"):
+        result = _dispatch_action(orchestrator, task, ACTION_REJECT_PLAN)
+        if result is not None and result.ok:
+            st.session_state.pop(DIALOG_PLAN_KEY, None)
+            st.rerun()
+        message = getattr(result, "error_message", None)
+        st.error(message or "The plan could not be rejected.")
+
+
 # --- Chat card ------------------------------------------------------------
 
 
@@ -420,13 +699,24 @@ def _render_pending_dialogs(orchestrator, chat_id):
             return
 
     details_task_id = st.session_state.get(DIALOG_DETAILS_KEY)
-    if details_task_id is None:
+    if details_task_id is not None:
+        task = orchestrator.repository.get_task(details_task_id)
+        if task is None:
+            st.session_state.pop(DIALOG_DETAILS_KEY, None)
+        else:
+            render_task_details_dialog(orchestrator, task)
+            return
+
+    plan_task_id = st.session_state.get(DIALOG_PLAN_KEY)
+    if plan_task_id is None:
         return
-    task = orchestrator.repository.get_task(details_task_id)
+    task = orchestrator.repository.get_task(plan_task_id)
     if task is None:
-        st.session_state.pop(DIALOG_DETAILS_KEY, None)
+        st.session_state.pop(DIALOG_PLAN_KEY, None)
         return
-    render_task_details_dialog(orchestrator, task)
+    render_plan_dialog(
+        orchestrator, task, orchestrator.repository.load_plan(task.id)
+    )
 
 
 def _render_invitation(orchestrator, chat_id):
@@ -477,12 +767,8 @@ def _render_block_form(orchestrator, task):
         st.rerun()
 
 
-def _dispatch_action(orchestrator, task, action, on_run_step):
+def _dispatch_action(orchestrator, task, action):
     """Run one card action and return its result (``None`` when handled here)."""
-    if action in (ACTION_RUN_STEP, ACTION_RETRY):
-        # The streamed text belongs to the main chat area, not to the pinned
-        # bottom container, so the app owns the placeholder through the callback.
-        return on_run_step(task.id, action)
     if action == ACTION_RUN_PLANNING:
         with st.spinner("Running planning..."):
             return orchestrator.run_planning(task.id)
@@ -506,7 +792,7 @@ def _dispatch_action(orchestrator, task, action, on_run_step):
     return None
 
 
-def _render_action_button(orchestrator, task, action, on_run_step):
+def _render_action_button(orchestrator, task, action):
     label = ACTION_LABELS.get(action, action)
     key = f"task_action_{action}"
 
@@ -536,9 +822,26 @@ def _render_action_button(orchestrator, task, action, on_run_step):
             st.rerun()
         return
 
+    if action in (ACTION_RUN_STEP, ACTION_RETRY):
+        # The click starts a process-level background run and returns at once;
+        # while that run is live the button stays disabled, so a second click
+        # can neither restart nor cancel the first provider call.
+        def _start_run():
+            record = start_step_run(orchestrator, task.id, task.chat_id, action)
+            if record is not None:
+                st.session_state[STEP_RUN_TOKEN_KEY] = record.token
+
+        st.button(
+            label,
+            key=key,
+            disabled=step_run_busy(task.id),
+            on_click=_start_run,
+        )
+        return
+
     if not st.button(label, key=key):
         return
-    result = _dispatch_action(orchestrator, task, action, on_run_step)
+    result = _dispatch_action(orchestrator, task, action)
     if result is None or result.ok:
         st.rerun()
     # A failed action reruns the card with the message, so the fresh action set
@@ -549,17 +852,17 @@ def _render_action_button(orchestrator, task, action, on_run_step):
     st.rerun()
 
 
-def _render_actions(orchestrator, task, allowed, on_run_step):
+def _render_actions(orchestrator, task, allowed):
     actions = [action for action in allowed if action in ACTION_LABELS]
     if not actions:
         return
     columns = st.columns(len(actions))
     for column, action in zip(columns, actions):
         with column:
-            _render_action_button(orchestrator, task, action, on_run_step)
+            _render_action_button(orchestrator, task, action)
 
 
-def _render_active_card(orchestrator, task, on_run_step):
+def _render_active_card(orchestrator, task):
     st.markdown(format_stage_indicator(task), unsafe_allow_html=True)
 
     # The card shortens long values to fit its height budget; the full text is
@@ -574,15 +877,30 @@ def _render_active_card(orchestrator, task, on_run_step):
     else:
         st.caption(_task_details_line(task))
 
+    # The provider call runs in a background thread; the card only reports that
+    # it is in flight. The disabled step button above stays unavailable until the
+    # run finishes, so no second call can start from a repeated click.
+    if step_run_busy(task.id):
+        st.caption(
+            running_step_label(task, orchestrator.repository.load_plan(task.id))
+        )
+
     if st.session_state.get(CANCEL_CONFIRM_KEY) == task.id:
         _render_cancel_confirmation(orchestrator, task)
         return
+
+    # The plan is the decision this state asks for, so the review dialog is
+    # offered right above the action row; accepting or rejecting stays on the
+    # same spot inside the dialog.
+    if task.expected_action_type == EXPECTED_CONFIRM_PLAN:
+        if st.button("Review plan", key="task_review_plan"):
+            st.session_state[DIALOG_PLAN_KEY] = task.id
+            st.rerun()
 
     _render_actions(
         orchestrator,
         task,
         orchestrator.allowed_actions(task.id),
-        on_run_step,
     )
 
     if st.session_state.get(BLOCK_FORM_KEY) == task.id:
@@ -592,19 +910,18 @@ def _render_active_card(orchestrator, task, on_run_step):
 def report_task_error(message) -> None:
     """Store an action error for the next card render to show.
 
-    The app's run-step callback uses this for an unexpected exception, so the
-    message survives the rerun that refreshes the action set.
+    ``app.py`` uses this for the error of a background step run, so the message
+    survives the rerun that refreshes the action set.
     """
     st.session_state[TASK_ERROR_KEY] = str(message or "The action failed.")
 
 
-def render_task_card(store, orchestrator, chat_id, *, on_run_step) -> None:
+def render_task_card(store, orchestrator, chat_id) -> None:
     """Render the compact task card in the chat bottom container (FR-33).
 
-    ``on_run_step`` is called as ``on_run_step(task_id, action)`` for the model
-    actions that may stream (``run_step`` and ``retry``); it must draw the
-    spinner/placeholder in the main chat area and return the
-    ``TaskActionResult``. Rendering itself never calls the provider.
+    The card is purely presentational: ``run_step``/``retry`` start a
+    process-level background run through their button callback, and ``app.py``
+    follows that run while it streams. Rendering itself never calls the provider.
     """
     if chat_id is None or store is None:
         return
@@ -619,9 +936,43 @@ def render_task_card(store, orchestrator, chat_id, *, on_run_step) -> None:
     if task is None:
         _render_invitation(orchestrator, chat_id)
     else:
-        _render_active_card(orchestrator, task, on_run_step)
+        _render_active_card(orchestrator, task)
 
     _render_pending_dialogs(orchestrator, chat_id)
+
+
+def render_task_results_panel(orchestrator, chat_id) -> None:
+    """Readable step results on the main Chat screen.
+
+    The raw JSON stays available in ``Diagnostics / Artifacts``; this panel is
+    the human-readable counterpart. It reads only stored artifacts, so the
+    results survive a rerun and an application restart. The panel renders
+    nothing when the chat has no task, the task has no plan, or no step has a
+    stored result yet.
+    """
+    if orchestrator is None:
+        return
+    task = orchestrator.current_task(chat_id)
+    if task is None:
+        return
+    plan = orchestrator.repository.load_plan(task.id)
+    if not isinstance(plan, dict):
+        return
+    views = build_step_results(
+        plan, orchestrator.repository.list_artifacts(task.id)
+    )
+    if not views:
+        return
+
+    st.subheader("Execution results")
+    for view in views:
+        with st.expander(step_result_label(view), expanded=view["is_latest"]):
+            st.markdown(view["text"])
+            if view["awaiting_rework"] and view["defects"]:
+                st.markdown("Defects to fix:")
+                for defect in view["defects"]:
+                    st.markdown(f"- {defect}")
+    st.markdown(format_next_action(task, plan))
 
 
 # --- Diagnostics / Task ---------------------------------------------------
@@ -704,9 +1055,29 @@ def _render_artifacts(orchestrator, task_id):
         if not artifacts:
             st.caption("No artifacts yet.")
             return
+        # One level of expanders only: a nested expander or ``st.json`` inside
+        # the page would keep a long artifact from scrolling to its end.
         for artifact in artifacts:
-            with st.expander(f"{artifact.kind} rev {artifact.revision}", expanded=False):
-                st.json(artifact.content or {})
+            st.markdown(f"**{artifact.kind} rev {artifact.revision}**")
+            st.markdown(_json_block(artifact.content or {}))
+
+
+def _render_plan(orchestrator, task):
+    """Render the readable plan above the raw JSON of ``Diagnostics / Task``.
+
+    The plan is read through the repository and rendered without any provider
+    call. The raw JSON stays a collapsed-by-default technical option, so the
+    whole plan is visible before the user accepts or rejects it.
+    """
+    plan = orchestrator.repository.load_plan(task.id)
+    expanded = task.expected_action_type == EXPECTED_CONFIRM_PLAN
+    with st.expander("Plan", expanded=expanded):
+        if not isinstance(plan, dict):
+            st.caption("No plan yet.")
+            return
+        st.markdown(format_plan(plan))
+        if st.checkbox("Show raw JSON", key=f"task_plan_raw_{task.id}"):
+            st.markdown(_json_block(plan))
 
 
 def _render_workflow(orchestrator, task):
@@ -772,6 +1143,31 @@ def _render_task_usage(orchestrator, task_id):
         )
 
 
+def _render_results(orchestrator, task):
+    """Readable ``Execution results`` section of ``Diagnostics / Task``.
+
+    A single expander keeps the technical panel free of nested expanders: the
+    stored step texts and the next-action line are rendered as markdown, and the
+    raw JSON stays in the ``Artifacts`` expander.
+    """
+    plan = orchestrator.repository.load_plan(task.id)
+    views = build_step_results(
+        plan, orchestrator.repository.list_artifacts(task.id)
+    )
+    with st.expander("Execution results", expanded=False):
+        if not views:
+            st.caption("No step results yet.")
+            return
+        for view in views:
+            st.markdown(f"**{step_result_label(view)}**")
+            st.markdown(view["text"])
+            if view["awaiting_rework"] and view["defects"]:
+                st.markdown("Defects to fix:")
+                for defect in view["defects"]:
+                    st.markdown(f"- {defect}")
+        st.markdown(format_next_action(task, plan))
+
+
 def render_diagnostics_task(store, orchestrator, chat_id) -> None:
     """Render the ``Diagnostics / Task`` panel (FR-37)."""
     st.subheader("Task state")
@@ -795,6 +1191,8 @@ def render_diagnostics_task(store, orchestrator, chat_id) -> None:
 
     st.markdown(format_stage_indicator(task), unsafe_allow_html=True)
     _render_task_fields(task)
+    _render_plan(orchestrator, task)
+    _render_results(orchestrator, task)
     _render_timeline(orchestrator, task.id)
     _render_artifacts(orchestrator, task.id)
     _render_workflow(orchestrator, task)
