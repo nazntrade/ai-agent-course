@@ -23,6 +23,8 @@ import json
 
 import streamlit as st
 
+from invariant_ui import format_active_restrictions, invariant_event_rows
+from invariant_ui import render_invariants_section
 from task_orchestrator import STATUS_SUCCESS
 from task_runner import start_step_run, step_run_busy
 from task_storage import DEFAULT_WORKFLOW_NAME
@@ -877,6 +879,14 @@ def _render_active_card(orchestrator, task):
     else:
         st.caption(_task_details_line(task))
 
+    # Compact visibility of the hard/advisory rules that apply to this task.
+    # A task without restrictions keeps exactly the pre-Day-14 card.
+    applicable = getattr(orchestrator, "applicable_invariants", None)
+    if applicable is not None:
+        restrictions = format_active_restrictions(applicable(task.id))
+        if restrictions:
+            st.caption(restrictions)
+
     # The provider call runs in a background thread; the card only reports that
     # it is in flight. The disabled step button above stays unavailable until the
     # run finishes, so no second call can start from a repeated click.
@@ -1032,21 +1042,42 @@ def _render_timeline(orchestrator, task_id):
         events = orchestrator.repository.list_events(task_id)
         if not events:
             st.caption("No events yet.")
-            return
-        st.dataframe(
-            [
-                {
-                    "id": event.id,
-                    "event": event.event_type,
-                    "from stage": event.from_stage or "",
-                    "to stage": event.to_stage or "",
-                    "from status": event.from_status or "",
-                    "to status": event.to_status or "",
-                    "created": event.created_at or "no data",
-                }
-                for event in events
-            ]
-        )
+        else:
+            st.dataframe(
+                [
+                    {
+                        "id": event.id,
+                        "event": event.event_type,
+                        "from stage": event.from_stage or "",
+                        "to stage": event.to_stage or "",
+                        "from status": event.from_status or "",
+                        "to status": event.to_status or "",
+                        "created": event.created_at or "no data",
+                    }
+                    for event in events
+                ]
+            )
+        _render_invariant_events(orchestrator, task_id)
+
+
+def _render_invariant_events(orchestrator, task_id):
+    """Append the invariant journal next to the task journal.
+
+    The column names deliberately avoid ``event`` and the other task-journal
+    columns, so a consumer that looks for the task timeline never confuses the
+    two tables.
+    """
+    repository = getattr(orchestrator, "invariants", None)
+    if repository is None:
+        return
+    list_events = getattr(repository, "list_events", None)
+    if list_events is None:
+        return
+    invariant_events = list_events(task_id=task_id)
+    if not invariant_events:
+        return
+    st.markdown("Invariant events")
+    st.dataframe(invariant_event_rows(invariant_events))
 
 
 def _render_artifacts(orchestrator, task_id):
@@ -1168,7 +1199,9 @@ def _render_results(orchestrator, task):
         st.markdown(format_next_action(task, plan))
 
 
-def render_diagnostics_task(store, orchestrator, chat_id) -> None:
+def render_diagnostics_task(
+    store, orchestrator, chat_id, invariant_repository=None
+) -> None:
     """Render the ``Diagnostics / Task`` panel (FR-37)."""
     st.subheader("Task state")
     chat = next(
@@ -1196,5 +1229,8 @@ def render_diagnostics_task(store, orchestrator, chat_id) -> None:
     _render_timeline(orchestrator, task.id)
     _render_artifacts(orchestrator, task.id)
     _render_workflow(orchestrator, task)
+    render_invariants_section(
+        invariant_repository, task=task, chat_id=chat_id
+    )
     _render_packet_preview(orchestrator, task.id)
     _render_task_usage(orchestrator, task.id)

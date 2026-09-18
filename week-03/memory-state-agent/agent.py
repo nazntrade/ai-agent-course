@@ -34,6 +34,11 @@ from facts import (
     build_facts_extraction_messages,
     parse_facts_response,
 )
+from invariants import (
+    InvariantConflictError,
+    find_request_conflict,
+    format_structural_invariants_block,
+)
 from memory import (
     MEMORY_SCOPE_LONG_TERM,
     MEMORY_SCOPE_WORKING,
@@ -229,10 +234,21 @@ class ChatAgent:
     When ``store`` is None the agent keeps a pure in-memory history.
     """
 
-    def __init__(self, client, store=None, chat_id=None, config=None):
+    def __init__(
+        self,
+        client,
+        store=None,
+        chat_id=None,
+        config=None,
+        *,
+        invariants=None,
+        task_lookup=None,
+    ):
         self._client = client
         self._store = store
         self._chat_id = chat_id
+        self._invariants = invariants
+        self._task_lookup = task_lookup
         if config is None and store is not None:
             config = AgentConfig(**store.load_config(chat_id))
         self._config = config if config is not None else AgentConfig()
@@ -289,6 +305,61 @@ class ChatAgent:
     def reload_profile(self) -> None:
         """Public counterpart of ``_reload_profile`` used by the UI after edits."""
         self._reload_profile()
+
+    def _active_task_id(self):
+        """Return the id of the chat's current task, or ``None``.
+
+        The lookup is duck-typed and defensive: without a ``task_lookup`` the
+        agent is chat-only, and a lookup failure never breaks a turn.
+        """
+        if self._task_lookup is None or self._chat_id is None:
+            return None
+        try:
+            task = self._task_lookup(self._chat_id)
+        except Exception:
+            return None
+        return getattr(task, "id", None)
+
+    def _applicable_invariants(self):
+        """Return the active structural invariants that apply to this chat.
+
+        The repository is duck-typed: without one (older call sites and the
+        byte-identical Day 10-13 chat payload tests) the list stays empty.
+        """
+        if self._invariants is None:
+            return []
+        lister = getattr(self._invariants, "list_applicable", None)
+        if lister is None:
+            return []
+        try:
+            return list(lister(self._active_task_id()))
+        except Exception:
+            return []
+
+    def _record_invariant_conflict(self, conflict, request) -> None:
+        """Append a refusal to the invariant journal; never break the turn."""
+        recorder = (
+            getattr(self._invariants, "record_conflict", None)
+            if self._invariants is not None
+            else None
+        )
+        if recorder is None:
+            return
+        try:
+            recorder(
+                chat_id=self._chat_id,
+                task_id=self._active_task_id(),
+                invariant_id=conflict.invariant.id,
+                code=conflict.invariant.code,
+                phase=conflict.phase,
+                request=request,
+                trigger=conflict.trigger,
+                action=conflict.action,
+                event=conflict.event_type,
+                alternative=conflict.invariant.alternative,
+            )
+        except Exception:
+            pass
 
     def _reload_memory(self) -> None:
         """Load working and long-term memory for the active line without API calls.
@@ -414,6 +485,15 @@ class ChatAgent:
         """
         if not user_message.strip():
             raise ValueError("Message must not be empty")
+
+        # Structural invariants are checked before the payload, the provider
+        # call and any history/statistics write, so a refusal changes nothing.
+        conflict = find_request_conflict(
+            self._applicable_invariants(), user_message
+        )
+        if conflict is not None:
+            self._record_invariant_conflict(conflict, user_message)
+            raise InvariantConflictError(conflict)
 
         strategy = self._config.context_strategy
         summary_error = None
@@ -681,8 +761,8 @@ class ChatAgent:
 
         The profile block is only added when ``format_profile_block`` returns a
         block, so No profile never contributes an empty system message. The
-        order is profile, invariants, working, long-term; with no blocks the
-        original payload is returned unchanged.
+        order is profile, invariants, structural invariants, working,
+        long-term; with no blocks the original payload is returned unchanged.
         """
         blocks = []
         profile_block = format_profile_block(self._active_profile)
@@ -691,6 +771,11 @@ class ChatAgent:
         invariants_block = format_invariants_block(self._config.invariants)
         if invariants_block is not None:
             blocks.append(invariants_block)
+        structural_block = format_structural_invariants_block(
+            self._applicable_invariants()
+        )
+        if structural_block is not None:
+            blocks.append(structural_block)
         blocks.extend(
             build_memory_blocks(self._working_memory, self._long_term_memory)
         )

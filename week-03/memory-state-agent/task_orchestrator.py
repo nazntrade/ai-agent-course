@@ -34,6 +34,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent import ChatAgent
+from invariants import (
+    PHASE_ACTION,
+    PHASE_COMMIT,
+    find_action_conflict,
+    find_transition_conflict,
+    format_conflict_message,
+)
 from stats import TurnStats, aggregate_stats
 from task_context import StageContextBuilder, latest_executions
 from task_stage import StageExecutionResult, StageExecutor
@@ -96,6 +103,9 @@ from tasks import (
 STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
 STATUS_NOOP = "noop"
+# ``refused`` means a hard invariant forbade the action or the transition; no
+# provider call happened and nothing was written.
+STATUS_REFUSED = "refused"
 
 # Action names used by this layer; the domain actions keep their FSM names.
 ACTION_CREATE_TASK = "create_task"
@@ -108,6 +118,7 @@ ERROR_NOT_FOUND = "not_found"
 ERROR_VERSION_CONFLICT = "version_conflict"
 ERROR_DUPLICATE_EVENT = "duplicate_event"
 ERROR_STORAGE = "storage_error"
+ERROR_INVARIANT_CONFLICT = "invariant_conflict"
 
 # Preview target of every expected action: the packet the next model call would
 # use. ``confirm_plan`` previews planning (re-planning is its model call) and
@@ -174,6 +185,7 @@ class TaskOrchestrator:
         completer=None,
         builder=None,
         executor=None,
+        invariants=None,
     ):
         self._store = store
         self._repository = (
@@ -183,11 +195,33 @@ class TaskOrchestrator:
         self._completer = completer
         self._builder = builder if builder is not None else StageContextBuilder()
         self._executor = executor
+        self._invariants = invariants
 
     @property
     def repository(self):
         """The task repository this orchestrator commits through."""
         return self._repository
+
+    @property
+    def invariants(self):
+        """The structural-invariant repository, or ``None`` when not injected."""
+        return self._invariants
+
+    def applicable_invariants(self, task_id=None) -> list:
+        """Return the active invariants that apply to ``task_id``.
+
+        Duck-typed and defensive: without a repository (all pre-Day-14 call
+        sites) the list is empty and every packet stays byte-identical.
+        """
+        if self._invariants is None:
+            return []
+        lister = getattr(self._invariants, "list_applicable", None)
+        if lister is None:
+            return []
+        try:
+            return list(lister(task_id))
+        except Exception:
+            return []
 
     # --- Task selection ----------------------------------------------------
 
@@ -410,6 +444,13 @@ class TaskOrchestrator:
                 f"Nothing to retry for stage={task.stage}, "
                 f"expected_action={task.expected_action_type}",
             )
+        conflict = find_action_conflict(
+            self.applicable_invariants(task_id), target
+        )
+        if conflict is not None:
+            # The repeated action is forbidden: no RETRY event is written.
+            self._record_conflict(task, conflict, PHASE_ACTION)
+            return self._refused(task, ACTION_RETRY, conflict)
         try:
             self._repository.append_event(task_id, EVENT_RETRY, payload={})
         except (TaskNotFoundError, InvalidTransitionError) as exc:
@@ -507,6 +548,7 @@ class TaskOrchestrator:
             progress=self._repository.step_progress(task.id),
             system_prompt=config.system_prompt,
             invariants=config.invariants,
+            structural_invariants=self.applicable_invariants(task.id),
             profile_block=agent.active_profile,
             working_items=agent.working_memory,
             long_term_items=agent.long_term_memory,
@@ -569,6 +611,12 @@ class TaskOrchestrator:
                 f"{action} is not allowed in stage={task.stage}, "
                 f"status={task.status}, expected_action={task.expected_action_type}",
             )
+        conflict = find_action_conflict(
+            self.applicable_invariants(task.id), action
+        )
+        if conflict is not None:
+            self._record_conflict(task, conflict, PHASE_ACTION)
+            return task, self._refused(task, action, conflict)
         return task, None
 
     def _simple(self, task_id, action, event_type, payload=None) -> TaskActionResult:
@@ -621,6 +669,21 @@ class TaskOrchestrator:
     def _commit(
         self, task, action, event_type, payload, progress
     ) -> TaskActionResult:
+        conflict = find_transition_conflict(
+            self.applicable_invariants(task.id),
+            event_type,
+            context={
+                "action": action,
+                "event_type": event_type,
+                "payload": payload,
+                "task": task,
+            },
+        )
+        if conflict is not None:
+            # A hard invariant refused the transition: nothing is written to
+            # tasks, task_artifacts or task_events.
+            self._record_conflict(task, conflict, PHASE_COMMIT)
+            return self._refused(task, action, conflict)
         last_event = self._repository.latest_event_type(task.id)
         try:
             transition = apply_transition(
@@ -693,6 +756,40 @@ class TaskOrchestrator:
             error_kind=ERROR_INVALID_TRANSITION,
             error_message=message,
         )
+
+    def _refused(self, task, action, conflict) -> TaskActionResult:
+        """A hard invariant refused the action; nothing was done."""
+        return TaskActionResult(
+            task=task,
+            action=action,
+            status=STATUS_REFUSED,
+            error_kind=ERROR_INVARIANT_CONFLICT,
+            error_message=format_conflict_message(conflict),
+        )
+
+    def _record_conflict(self, task, conflict, phase) -> None:
+        """Append the refusal to the invariant journal; never break the action."""
+        recorder = (
+            getattr(self._invariants, "record_conflict", None)
+            if self._invariants is not None
+            else None
+        )
+        if recorder is None:
+            return
+        try:
+            recorder(
+                chat_id=getattr(task, "chat_id", None),
+                task_id=getattr(task, "id", None),
+                invariant_id=conflict.invariant.id,
+                code=conflict.invariant.code,
+                phase=phase,
+                trigger=conflict.trigger,
+                action=conflict.action,
+                event=conflict.event_type,
+                alternative=conflict.invariant.alternative,
+            )
+        except Exception:
+            pass
 
     def _not_found(self, task_id, action) -> TaskActionResult:
         return TaskActionResult(

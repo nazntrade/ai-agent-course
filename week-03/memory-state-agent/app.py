@@ -11,6 +11,8 @@ from agent import (
 )
 from app_logic import WaitingIndicator, configs_equal, messages_tokens_est
 from context import build_payload
+from invariant_storage import InvariantRepository
+from invariants import InvariantConflictError, format_conflict_message
 from memory import (
     LONG_TERM_MEMORY_BLOCK_TITLE,
     MEMORY_SCOPE_LONG_TERM,
@@ -98,11 +100,20 @@ store = st.session_state.store
 if "task_repository" not in st.session_state:
     st.session_state.task_repository = TaskRepository(store.db_path)
 
+# Structural invariants (Day 14) share the same database file. The repository is
+# created lazily so an injected session_state entry wins; the seeded defaults
+# live in SQLite and survive a full restart.
+if "invariant_repository" not in st.session_state:
+    st.session_state.invariant_repository = InvariantRepository(store.db_path)
+
+invariant_repository = st.session_state.invariant_repository
+
 if "task_orchestrator" not in st.session_state:
     st.session_state.task_orchestrator = TaskOrchestrator(
         store,
         repository=st.session_state.task_repository,
         client=client,
+        invariants=invariant_repository,
     )
 
 task_orchestrator = st.session_state.task_orchestrator
@@ -135,6 +146,23 @@ def _open_profile_create_form():
 
 def chat_exists(chat_id):
     return any(chat.id == chat_id for chat in store.list_chats())
+
+
+def _build_agent(chat_id):
+    """Build a chat agent bound to the structural-invariant repository.
+
+    The task lookup lets the agent select the task-scoped invariants of the
+    chat and record a refusal against the right task. Every call site that used
+    to construct ``ChatAgent`` directly goes through here, so the wiring stays
+    in one place.
+    """
+    return ChatAgent(
+        client,
+        store,
+        chat_id,
+        invariants=invariant_repository,
+        task_lookup=task_orchestrator.current_task,
+    )
 
 
 def _fmt_num(value):
@@ -685,7 +713,7 @@ elif (
     or st.session_state.get("agent_chat_id") != current_id
 ):
     st.session_state.chat_id = current_id
-    st.session_state.agent = ChatAgent(client, store, current_id)
+    st.session_state.agent = _build_agent(current_id)
     st.session_state.agent_chat_id = current_id
     store.set_last_selected(current_id)
 
@@ -1199,6 +1227,10 @@ elif mode == MODE_DIAGNOSTICS:
         st.code(system_prompt)
         st.markdown(f"Invariants · ≈ {estimate_tokens(invariants)} tokens")
         st.code(invariants)
+        st.caption(
+            "Structural invariants are separate hard/advisory rules stored in "
+            "SQLite; see Diagnostics / Task → Invariants."
+        )
 
     with st.expander("User profiles", expanded=False):
         st.caption(
@@ -1373,7 +1405,7 @@ elif mode == MODE_DIAGNOSTICS:
                 key=f"branch_main_{chat_id}",
             ):
                 store.set_active_branch(chat_id, None)
-                st.session_state.agent = ChatAgent(client, store, chat_id)
+                st.session_state.agent = _build_agent(chat_id)
                 st.session_state.agent_chat_id = chat_id
                 st.session_state.pending_branch_delete_id = None
                 st.rerun()
@@ -1399,7 +1431,7 @@ elif mode == MODE_DIAGNOSTICS:
                     label, key=f"branch_{branch.id}", use_container_width=True
                 ):
                     store.set_active_branch(chat_id, branch.id)
-                    st.session_state.agent = ChatAgent(client, store, chat_id)
+                    st.session_state.agent = _build_agent(chat_id)
                     st.session_state.agent_chat_id = chat_id
                     st.session_state.pending_branch_delete_id = None
                     st.rerun()
@@ -1477,9 +1509,7 @@ elif mode == MODE_DIAGNOSTICS:
                                 f"The branch was not deleted."
                             )
                         else:
-                            st.session_state.agent = ChatAgent(
-                                client, store, chat_id
-                            )
+                            st.session_state.agent = _build_agent(chat_id)
                             st.session_state.agent_chat_id = chat_id
                         st.session_state.pending_branch_delete_id = None
                         st.rerun()
@@ -1595,9 +1625,7 @@ elif mode == MODE_DIAGNOSTICS:
                             store.set_active_branch(
                                 chat_id, new_branch_id
                             )
-                            st.session_state.agent = ChatAgent(
-                                client, store, chat_id
-                            )
+                            st.session_state.agent = _build_agent(chat_id)
                             st.session_state.agent_chat_id = chat_id
                             st.session_state[
                                 f"branch_name_nonce_{chat_id}"
@@ -1794,6 +1822,12 @@ elif mode == MODE_CHAT:
                     except ContextLimitError as exc:
                         indicator.clear()
                         st.warning(str(exc))
+                    except InvariantConflictError as exc:
+                        # No provider call happened and nothing was saved: show
+                        # the refusal in place, without a rerun and without a
+                        # fabricated assistant answer.
+                        indicator.clear()
+                        st.error(format_conflict_message(exc.conflict))
                     except ApiContextOverflowError as exc:
                         indicator.clear()
                         st.error(str(exc))
@@ -1827,6 +1861,9 @@ elif mode == MODE_CHAT:
                         st.rerun()
                     except ContextLimitError as exc:
                         st.warning(str(exc))
+                    except InvariantConflictError as exc:
+                        # The refusal is shown in place; nothing was saved.
+                        st.error(format_conflict_message(exc.conflict))
                     except ApiContextOverflowError as exc:
                         st.error(str(exc))
                         st.caption(
@@ -1840,4 +1877,6 @@ else:
     # Day 13 task diagnostics. User profiles stay in Diagnostics / Memory: this
     # mode only shows the task state, its journal, artifacts, workflow, packet
     # preview and usage. Rendering here never calls the provider.
-    render_diagnostics_task(store, task_orchestrator, chat_id)
+    render_diagnostics_task(
+        store, task_orchestrator, chat_id, invariant_repository
+    )

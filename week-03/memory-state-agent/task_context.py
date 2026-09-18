@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from context import build_facts_payload, build_payload, build_sliding_payload
+from invariants import format_structural_invariants_block
 from memory import (
     LONG_TERM_MEMORY_BLOCK_TITLE,
     WORKING_MEMORY_BLOCK_TITLE,
@@ -79,6 +80,7 @@ from tokens import estimate_tokens
 # Block names, in the packet order of FR-27.
 BLOCK_SYSTEM_PROMPT = "system_prompt"
 BLOCK_INVARIANTS = "invariants"
+BLOCK_STRUCTURAL_INVARIANTS = "structural_invariants"
 BLOCK_PROFILE = "profile"
 BLOCK_WORKFLOW = "workflow"
 BLOCK_TASK_SNAPSHOT = "task_snapshot"
@@ -97,6 +99,7 @@ BLOCK_ACTION = "action"
 BLOCK_ORDER = (
     BLOCK_SYSTEM_PROMPT,
     BLOCK_INVARIANTS,
+    BLOCK_STRUCTURAL_INVARIANTS,
     BLOCK_PROFILE,
     BLOCK_WORKFLOW,
     BLOCK_TASK_SNAPSHOT,
@@ -508,6 +511,7 @@ class StageContextBuilder:
         progress=(),
         system_prompt="",
         invariants="",
+        structural_invariants=(),
         profile_block=None,
         working_items=(),
         long_term_items=(),
@@ -543,12 +547,18 @@ class StageContextBuilder:
             )
             messages.append({"role": role, "content": text})
 
-        # 1) base system prompt, 2) invariants, 3) active profile.
+        # 1) base system prompt, 2) invariants, 3) structural invariants,
+        # 4) active profile.
         add(BLOCK_SYSTEM_PROMPT, "system", system_prompt)
         add(BLOCK_INVARIANTS, "system", format_invariants_block(invariants))
+        add(
+            BLOCK_STRUCTURAL_INVARIANTS,
+            "system",
+            format_structural_invariants_block(structural_invariants),
+        )
         add(BLOCK_PROFILE, "system", _profile_text(profile_block))
 
-        # 4) workflow and stage instructions, taken from the same contract the
+        # 5) workflow and stage instructions, taken from the same contract the
         # stage call uses, so the packet prompt never drifts from task_prompts.
         add(
             BLOCK_WORKFLOW,
@@ -556,20 +566,20 @@ class StageContextBuilder:
             _join(_workflow_instruction(workflow, stage, action), _stage_instruction(stage)),
         )
 
-        # 5) task snapshot.
+        # 6) task snapshot.
         add(BLOCK_TASK_SNAPSHOT, "system", format_snapshot_block(task) if task is not None else "")
 
-        # 6) required artifacts of the earlier stages.
+        # 7) required artifacts of the earlier stages.
         for name, content in self.select_artifacts(
             stage, task=task, plan=plan, artifacts=artifacts, progress=progress
         ):
             add(name, "system", content)
 
-        # 7) memory items, working first.
+        # 8) memory items, working first.
         add(BLOCK_WORKING_MEMORY, "system", format_memory_block(working_items, WORKING_MEMORY_BLOCK_TITLE))
         add(BLOCK_LONG_TERM_MEMORY, "system", format_memory_block(long_term_items, LONG_TERM_MEMORY_BLOCK_TITLE))
 
-        # 8) the strategy-selected history slice: several messages, not one
+        # 9) the strategy-selected history slice: several messages, not one
         # system block, because the strategy decides their roles.
         selected = select_history(
             history_messages,
@@ -593,7 +603,7 @@ class StageContextBuilder:
             )
             messages.extend(selected)
 
-        # 9) the current action.
+        # 10) the current action.
         text = action_message
         if text is None:
             text = self.build_action_message(
