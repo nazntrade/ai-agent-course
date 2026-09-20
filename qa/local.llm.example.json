@@ -1,0 +1,9 @@
+{
+  "_comment": "Anonymized example. Copy this file to qa/local.llm.local.json and fill in your own values; the real file is git-ignored (qa/*.local.json). AUTO/LOCAL may also discover the launcher on this machine and create the ignored local file themselves once the local model answers; the values below stay placeholders. Nothing here is a secret, and the real path/command must never be committed.",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "model": "<your-local-model-id>",
+  "launch_command": "<command that starts your loopback OpenAI-compatible server>",
+  "launch_cwd": "<optional working directory of the launch command>",
+  "api_key": "local-e2e",
+  "readiness_timeout_seconds": 90
+}

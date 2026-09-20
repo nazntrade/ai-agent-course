@@ -38,6 +38,7 @@ from task_context import (
     BLOCK_SPECIFICATION,
     BLOCK_SYSTEM_PROMPT,
     BLOCK_TASK_BRIEF,
+    BLOCK_TASK_FACTS,
     BLOCK_TASK_SNAPSHOT,
     BLOCK_WORKING_MEMORY,
     BLOCK_WORKFLOW,
@@ -59,6 +60,9 @@ from tasks import (
     ARTIFACT_SPECIFICATION,
     ARTIFACT_TASK_BRIEF,
     ARTIFACT_VALIDATION_RESULT,
+    EVENT_PLAN_ACCEPTED,
+    EVENT_STEP_COMPLETED,
+    EVENT_TASK_CREATED,
     EXPECTED_RUN_STEP,
     STAGE_EXECUTION,
     STAGE_PLANNING,
@@ -66,6 +70,7 @@ from tasks import (
     STATUS_ACTIVE,
     Task,
     TaskArtifact,
+    TaskEvent,
     WorkflowProfile,
     compute_step_progress,
 )
@@ -417,6 +422,70 @@ class ArtifactSelectionTest(unittest.TestCase):
             progress=execution_progress(artifacts),
         )
         self.assertNotIn(BLOCK_DEFECTS, block_names(packet))
+
+    def test_execution_packet_attaches_real_step_facts(self):
+        events = [
+            TaskEvent(
+                id=1,
+                task_id=1,
+                event_type=EVENT_TASK_CREATED,
+                created_at="2026-09-17 12:00:00",
+            ),
+            TaskEvent(
+                id=2,
+                task_id=1,
+                event_type=EVENT_PLAN_ACCEPTED,
+                created_at="2026-09-17 12:01:00",
+            ),
+            TaskEvent(
+                id=3,
+                task_id=1,
+                event_type=EVENT_STEP_COMPLETED,
+                created_at="2026-09-17 12:02:00",
+            ),
+        ]
+        artifacts = execution_artifacts(with_rework=False)
+        packet = packet_for(
+            STAGE_EXECUTION,
+            ACTION_RUN_STEP,
+            task=make_task(
+                stage=STAGE_EXECUTION,
+                current_step="Collect data",
+                current_step_index=1,
+                expected_action_type=EXPECTED_RUN_STEP,
+            ),
+            plan=PLAN,
+            artifacts=artifacts,
+            progress=execution_progress(artifacts),
+            events=events,
+        )
+
+        names = block_names(packet)
+        self.assertIn(BLOCK_TASK_FACTS, names)
+        self.assertLess(
+            names.index(BLOCK_TASK_SNAPSHOT), names.index(BLOCK_TASK_FACTS)
+        )
+        self.assertLess(
+            names.index(BLOCK_TASK_FACTS), names.index(BLOCK_SPECIFICATION)
+        )
+        content = packet.block(BLOCK_TASK_FACTS).content
+        self.assertIn("id 3", content)
+        self.assertIn(EVENT_STEP_COMPLETED, content)
+        self.assertIn("execution", content)
+        self.assertIsNotNone(packet.step_facts)
+        self.assertEqual(packet.step_facts.stage, STAGE_EXECUTION)
+        self.assertEqual(
+            [event.id for event in packet.step_facts.events], [1, 2, 3]
+        )
+
+    def test_only_the_execution_packet_carries_step_facts(self):
+        planning = packet_for(
+            STAGE_PLANNING,
+            ACTION_RUN_PLANNING,
+            artifacts=planning_artifacts(),
+        )
+        self.assertIsNone(planning.step_facts)
+        self.assertNotIn(BLOCK_TASK_FACTS, block_names(planning))
 
     def test_validation_packet_uses_the_latest_revision_of_every_artifact(self):
         artifacts = validation_artifacts()

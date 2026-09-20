@@ -33,6 +33,7 @@ from tasks import (
     ACTION_BLOCK,
     ACTION_CANCEL,
     ACTION_FINISH_EXECUTION,
+    ACTION_LABELS,
     ACTION_NEW_TASK,
     ACTION_OPEN_DIAGNOSTICS,
     ACTION_OPEN_RESULT,
@@ -46,6 +47,7 @@ from tasks import (
     ACTION_UNBLOCK,
     ARTIFACT_EXECUTION_RESULT,
     ARTIFACT_FINAL_RESULT,
+    EVENT_STEP_COMPLETED,
     EXPECTED_CONFIRM_PLAN,
     EXPECTED_FINISH_EXECUTION,
     EXPECTED_RUN_PLANNING,
@@ -62,6 +64,7 @@ from tasks import (
     STATUS_PAUSED,
     badge_for,
     compute_step_progress,
+    format_allowed_actions,
     plan_steps,
 )
 
@@ -101,28 +104,20 @@ BLOCK_FORM_KEY = "task_block_form_open"
 CANCEL_CONFIRM_KEY = "task_cancel_confirm_task"
 TASK_ERROR_KEY = "task_action_error"
 
+# Plain (non-widget) key holding the last guard-probe result of this session as
+# ``(task_id, TransitionProbeResult)``. The probe button stores and reruns, so
+# the result survives the rerun and is rendered only for its own task.
+GUARD_PROBE_KEY = "task_guard_probe_result"
+
 # Session handle on the process-level step run started by ``Run step``/``Retry``.
 # The call itself lives in ``task_runner`` and survives every rerun; this plain
 # key only lets ``app.py`` follow the run this session started.
 STEP_RUN_TOKEN_KEY = "task_step_run_token"
 
-ACTION_LABELS = {
-    ACTION_RUN_PLANNING: "Run planning",
-    ACTION_ACCEPT_PLAN: "Accept plan",
-    ACTION_REJECT_PLAN: "Reject plan",
-    ACTION_RUN_STEP: "Run step",
-    ACTION_FINISH_EXECUTION: "Finish execution",
-    ACTION_RUN_VALIDATION: "Run validation",
-    ACTION_PAUSE: "Pause",
-    ACTION_RESUME: "Resume",
-    ACTION_BLOCK: "Block",
-    ACTION_UNBLOCK: "Unblock",
-    ACTION_CANCEL: "Cancel",
-    ACTION_RETRY: "Retry",
-    ACTION_OPEN_RESULT: "Open full result",
-    ACTION_NEW_TASK: "New task",
-    ACTION_OPEN_DIAGNOSTICS: "Open diagnostics",
-}
+# Green used to highlight the recommended card action. The selector pins the
+# exact widget key class (``class~=``), so ``run_step`` never matches a longer
+# key such as ``run_step_extra``.
+RECOMMENDED_ACTION_COLOR = "#2e7d32"
 
 
 # --- Pure formatters ------------------------------------------------------
@@ -304,12 +299,15 @@ def _result_order(artifact) -> tuple:
     )
 
 
-def build_step_results(plan, artifacts) -> list:
+def build_step_results(plan, artifacts, events=()) -> list:
     """Merge plan steps, progress and the latest result artifact per step.
 
     Only steps that have a non-empty stored result are returned. ``is_latest``
     marks the view of the most recent artifact, so the panel can expand exactly
-    the last completed step. The view shape is stable for the UI and the tests.
+    the last completed step. Every view also carries ``journal``: the stored
+    ``STEP_COMPLETED`` event of that step revision, so the result panel shows a
+    code-rendered identifier instead of the model's text. The view shape is
+    stable for the UI and the tests.
     """
     steps = plan_steps(plan)
     if not steps:
@@ -331,6 +329,7 @@ def build_step_results(plan, artifacts) -> list:
         if current is None or _result_order(artifact) > _result_order(current):
             latest_by_step[index] = artifact
 
+    journal = _journal_events_by_step(events)
     views = []
     latest_position = None
     latest_order = None
@@ -361,6 +360,7 @@ def build_step_results(plan, artifacts) -> list:
                     step_progress.awaiting_rework
                 ) if step_progress is not None else False,
                 "defects": list(step_progress.defects) if step_progress is not None else [],
+                "journal": journal.get((index, round_value)),
                 "is_latest": False,
             }
         )
@@ -371,6 +371,47 @@ def build_step_results(plan, artifacts) -> list:
     if latest_position is not None:
         views[latest_position]["is_latest"] = True
     return views
+
+
+def _journal_events_by_step(events) -> dict:
+    """Map ``(step_index, round)`` to its stored ``STEP_COMPLETED`` event."""
+    journal: dict = {}
+    for event in events or ():
+        if getattr(event, "event_type", None) != EVENT_STEP_COMPLETED:
+            continue
+        payload = getattr(event, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        index = payload.get("step_index")
+        round_value = payload.get("round")
+        if not isinstance(index, int) or isinstance(index, bool):
+            continue
+        if not isinstance(round_value, int) or isinstance(round_value, bool):
+            continue
+        journal[(index, round_value)] = event
+    return journal
+
+
+def format_result_journal_line(event) -> str:
+    """Render the stored journal event of a step result as a single line.
+
+    The identifier, event type, timestamp and stage transition are taken from
+    the stored event only, so the line can never inherit an invented reference
+    from the model's step text. Without an event the line is empty.
+    """
+    if event is None:
+        return ""
+    parts = [
+        f"#{getattr(event, 'id', None)}",
+        str(getattr(event, "event_type", "") or ""),
+    ]
+    created = getattr(event, "created_at", None)
+    if created:
+        parts.append(str(created))
+    from_stage = getattr(event, "from_stage", None) or "—"
+    to_stage = getattr(event, "to_stage", None) or "—"
+    parts.append(f"{from_stage}→{to_stage}")
+    return "Journal: " + " · ".join(part for part in parts if part)
 
 
 def step_result_label(view) -> str:
@@ -414,6 +455,122 @@ def format_next_action(task, plan) -> str:
         return "Next: Finish execution"
     text = str(task.expected_action_text or "").strip()
     return f"Next: {text}" if text else ""
+
+
+# --- Transition guard formatters (Day 15) ---------------------------------
+
+# The expected action of each FSM state maps to the single action the card
+# should suggest. A missing or terminal expectation yields no recommendation.
+_RECOMMENDED_ACTIONS = {
+    EXPECTED_CONFIRM_PLAN: ACTION_ACCEPT_PLAN,
+    EXPECTED_RUN_PLANNING: ACTION_RUN_PLANNING,
+    EXPECTED_RUN_STEP: ACTION_RUN_STEP,
+    EXPECTED_FINISH_EXECUTION: ACTION_FINISH_EXECUTION,
+    EXPECTED_RUN_VALIDATION: ACTION_RUN_VALIDATION,
+}
+
+
+def recommended_action(task) -> str | None:
+    """Return the action the current state suggests, or ``None``."""
+    if task is None:
+        return None
+    return _RECOMMENDED_ACTIONS.get(task.expected_action_type)
+
+
+def is_review_plan_recommended(task) -> bool:
+    """Whether the plan review is the decision the state asks for."""
+    return task is not None and task.expected_action_type == EXPECTED_CONFIRM_PLAN
+
+
+def recommended_action_css(task) -> str:
+    """Return the CSS that highlights the recommended button, or an empty string.
+
+    The selector matches the exact Streamlit key class (``class~=``) of the
+    recommended card action and of the plan review button, so a key prefix
+    cannot highlight an unrelated widget.
+    """
+    selectors = []
+    action = recommended_action(task)
+    if action:
+        selectors.append(f'div[class~="st-key-task_action_{action}"] button')
+    if is_review_plan_recommended(task):
+        selectors.append('div[class~="st-key-task_review_plan"] button')
+    if not selectors:
+        return ""
+    joined = ",\n".join(selectors)
+    return (
+        "<style>\n"
+        f"{joined} {{\n"
+        f"    background-color: {RECOMMENDED_ACTION_COLOR} !important;\n"
+        "    color: #ffffff !important;\n"
+        f"    border-color: {RECOMMENDED_ACTION_COLOR} !important;\n"
+        "}\n"
+        "</style>"
+    )
+
+
+def guard_decision_rows(decisions) -> list:
+    """Dataframe rows explaining whether every domain action is allowed."""
+    rows = []
+    for decision in decisions or ():
+        rows.append(
+            {
+                "Action": ACTION_LABELS.get(decision.action, decision.action),
+                "Allowed": "yes" if decision.allowed else "no",
+                "Reason": decision.reason,
+            }
+        )
+    return rows
+
+
+def transition_attempt_rows(attempts) -> list:
+    """Dataframe rows of the refusal audit.
+
+    The column names deliberately avoid ``event`` and ``invariant_event``, so a
+    consumer that looks for the task timeline or the invariant journal never
+    confuses them with the Day 15 refusal audit.
+    """
+    rows = []
+    for attempt in attempts or ():
+        rows.append(
+            {
+                "attempt": attempt.id,
+                "action": ACTION_LABELS.get(attempt.action, attempt.action),
+                "from state": (
+                    f"{attempt.from_stage or '—'}/{attempt.from_status or '—'}"
+                ),
+                "reason": attempt.reason,
+                "allowed then": format_allowed_actions(attempt.allowed_actions),
+                "created": attempt.created_at or "no data",
+            }
+        )
+    return rows
+
+
+def format_guard_probe_line(probe) -> str:
+    """Render one guard-probe result from the stored probe fact only.
+
+    A soft refusal shows the append-only audit id and the reason read back from
+    ``task_transition_attempts``; a hard invariant refusal or a missing audit
+    row keeps an honest message without inventing an id, and an allowed action
+    says that nothing was written.
+    """
+    if probe is None:
+        return ""
+    action = str(getattr(probe, "action", "") or "")
+    if getattr(probe, "allowed", False):
+        return f"{action}: allowed now; nothing was written."
+    error = str(getattr(probe, "error", "") or "")
+    if error:
+        return f"{action}: {error}"
+    reason = str(getattr(probe, "reason", "") or "")
+    audit_id = getattr(probe, "audit_id", None)
+    if audit_id is not None:
+        return f"Refusal audit #{audit_id}: {action} — {reason}"
+    message = str(getattr(probe, "message", "") or "")
+    if message:
+        return f"{action}: {message}"
+    return f"{action}: refused ({reason})." if reason else f"{action}: refused."
 
 
 def _json_block(content) -> str:
@@ -899,6 +1056,12 @@ def _render_active_card(orchestrator, task):
         _render_cancel_confirmation(orchestrator, task)
         return
 
+    # Highlight the single action the state suggests. The card still shows
+    # exactly the allowed action set; only the recommended button is styled.
+    highlight = recommended_action_css(task)
+    if highlight:
+        st.markdown(highlight, unsafe_allow_html=True)
+
     # The plan is the decision this state asks for, so the review dialog is
     # offered right above the action row; accepting or rejecting stays on the
     # same spot inside the dialog.
@@ -969,7 +1132,9 @@ def render_task_results_panel(orchestrator, chat_id) -> None:
     if not isinstance(plan, dict):
         return
     views = build_step_results(
-        plan, orchestrator.repository.list_artifacts(task.id)
+        plan,
+        orchestrator.repository.list_artifacts(task.id),
+        orchestrator.repository.list_events(task.id),
     )
     if not views:
         return
@@ -978,6 +1143,9 @@ def render_task_results_panel(orchestrator, chat_id) -> None:
     for view in views:
         with st.expander(step_result_label(view), expanded=view["is_latest"]):
             st.markdown(view["text"])
+            journal_line = format_result_journal_line(view.get("journal"))
+            if journal_line:
+                st.caption(journal_line)
             if view["awaiting_rework"] and view["defects"]:
                 st.markdown("Defects to fix:")
                 for defect in view["defects"]:
@@ -1093,6 +1261,73 @@ def _render_artifacts(orchestrator, task_id):
             st.markdown(_json_block(artifact.content or {}))
 
 
+def _render_guard_probe(orchestrator, report, task):
+    """Render the explicit, safe "Test Finish execution" guard probe.
+
+    When the FSM refuses ``finish_execution`` the panel offers one button that
+    runs the production guard through
+    :meth:`TaskOrchestrator.probe_refused_transition`. The click is the only
+    action of the whole panel that writes: one append-only refusal-audit row,
+    with no change to the task. When the action is allowed there is no button,
+    because the probe would execute nothing and write no audit.
+    """
+    probe_key = f"task_guard_probe_finish_execution_{task.id}"
+    if ACTION_FINISH_EXECUTION not in report.allowed:
+        if st.button("Test Finish execution", key=probe_key):
+            probe = orchestrator.probe_refused_transition(task.id)
+            st.session_state[GUARD_PROBE_KEY] = (task.id, probe)
+            st.rerun()
+    else:
+        st.caption(
+            "Finish execution is currently allowed; the test executes nothing "
+            "and writes no audit."
+        )
+    stored = st.session_state.get(GUARD_PROBE_KEY)
+    if (
+        isinstance(stored, tuple)
+        and len(stored) == 2
+        and stored[0] == task.id
+    ):
+        line = format_guard_probe_line(stored[1])
+        if line:
+            st.caption(line)
+
+
+def _render_transition_guard(orchestrator, task):
+    """``Transition guard`` panel of ``Diagnostics / Task`` (Day 15).
+
+    It explains the allowed actions and lists recent refusals from the separate
+    append-only audit. Rendering never calls the provider, never changes the
+    task and draws no transition button or form: the only widget is the explicit
+    ``Test Finish execution`` probe, whose single click may append one
+    append-only refusal-audit row through the production guard.
+    """
+    report = orchestrator.transition_guard_report(task.id)
+    with st.expander("Transition guard", expanded=False):
+        st.caption(
+            "Read-only diagnostics of the task state machine: it never changes "
+            "the task and never calls the provider."
+        )
+        current = report.task if report.task is not None else task
+        st.markdown(
+            f"Current state: `{current.stage}` / `{current.status}` · "
+            f"expected action: `{current.expected_action_type or 'none'}`"
+        )
+        st.markdown(f"Allowed now: {format_allowed_actions(report.allowed)}")
+        st.markdown("Action decisions")
+        st.dataframe(guard_decision_rows(report.decisions))
+        _render_guard_probe(orchestrator, report, task)
+        st.markdown("Recent refusals")
+        if report.refusals:
+            st.dataframe(transition_attempt_rows(report.refusals))
+        else:
+            st.caption("No refusals recorded for this task yet.")
+        st.caption(
+            "Refusals are stored in a separate append-only audit and are not "
+            "task events: they never change the task state or its version."
+        )
+
+
 def _render_plan(orchestrator, task):
     """Render the readable plan above the raw JSON of ``Diagnostics / Task``.
 
@@ -1183,7 +1418,9 @@ def _render_results(orchestrator, task):
     """
     plan = orchestrator.repository.load_plan(task.id)
     views = build_step_results(
-        plan, orchestrator.repository.list_artifacts(task.id)
+        plan,
+        orchestrator.repository.list_artifacts(task.id),
+        orchestrator.repository.list_events(task.id),
     )
     with st.expander("Execution results", expanded=False):
         if not views:
@@ -1192,6 +1429,9 @@ def _render_results(orchestrator, task):
         for view in views:
             st.markdown(f"**{step_result_label(view)}**")
             st.markdown(view["text"])
+            journal_line = format_result_journal_line(view.get("journal"))
+            if journal_line:
+                st.caption(journal_line)
             if view["awaiting_rework"] and view["defects"]:
                 st.markdown("Defects to fix:")
                 for defect in view["defects"]:
@@ -1224,6 +1464,7 @@ def render_diagnostics_task(
 
     st.markdown(format_stage_indicator(task), unsafe_allow_html=True)
     _render_task_fields(task)
+    _render_transition_guard(orchestrator, task)
     _render_plan(orchestrator, task)
     _render_results(orchestrator, task)
     _render_timeline(orchestrator, task.id)

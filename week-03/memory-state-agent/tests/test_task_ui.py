@@ -20,23 +20,36 @@ from streamlit.testing.v1 import AppTest
 import task_runner
 from agent import AgentConfig
 from storage import ChatStore
-from task_orchestrator import TaskOrchestrator
-from task_storage import TaskRepository
+from task_orchestrator import (
+    STATUS_NOOP,
+    TaskOrchestrator,
+    TransitionProbeResult,
+)
+from task_storage import TaskRepository, TransitionAttempt
 from task_ui import (
     STEP_RUN_TOKEN_KEY,
     badge_label,
     build_step_results,
     event_summary,
+    format_guard_probe_line,
     format_next_action,
     format_plan,
+    format_result_journal_line,
     format_stage_indicator,
     format_task_compact,
     format_task_details,
+    guard_decision_rows,
+    recommended_action,
+    recommended_action_css,
     running_step_label,
     shorten,
     step_result_label,
+    transition_attempt_rows,
 )
 from tasks import (
+    ACTION_FINISH_EXECUTION,
+    ACTION_RUN_PLANNING,
+    ACTION_RUN_STEP,
     ARTIFACT_TASK_BRIEF,
     ARTIFACT_EXECUTION_RESULT,
     EVENT_API_ERROR,
@@ -49,10 +62,14 @@ from tasks import (
     EVENT_STEP_COMPLETED,
     EVENT_VALIDATION_PASSED,
     EXPECTED_CONFIRM_PLAN,
+    EXPECTED_FINISH_EXECUTION,
     EXPECTED_RUN_PLANNING,
     EXPECTED_RUN_STEP,
     EXPECTED_RUN_VALIDATION,
+    REASON_EXPECTED_ACTION_MISMATCH,
+    REASON_PROGRESS_INCOMPLETE,
     STAGE_EXECUTION,
+    TransitionDecision,
     apply_transition,
 )
 from tests.test_agent import FakeClient
@@ -98,6 +115,7 @@ TASK_LABELS = {
     "Task usage",
     "Plan",
     "Execution results",
+    "Transition guard",
 }
 
 
@@ -427,6 +445,35 @@ class FormatterTestCase(unittest.TestCase):
 
         self.assertEqual(views[0]["round"], 1)
 
+    def test_build_step_results_attaches_the_stored_journal_event(self):
+        events = [
+            SimpleNamespace(
+                id=11,
+                event_type=EVENT_STEP_COMPLETED,
+                from_stage=STAGE_EXECUTION,
+                to_stage=STAGE_EXECUTION,
+                from_status="active",
+                to_status="active",
+                created_at="2026-09-17 12:03:00",
+                payload={"step_index": 1, "round": 1},
+            )
+        ]
+        artifacts = [
+            self._execution_artifact(
+                1, 1, {"step_index": 1, "round": 1, "text": "done"}
+            )
+        ]
+
+        views = build_step_results(PLAN_TWO_STEPS, artifacts, events)
+
+        self.assertEqual(views[0]["journal"].id, 11)
+        line = format_result_journal_line(views[0]["journal"])
+        self.assertIn("#11", line)
+        self.assertIn(EVENT_STEP_COMPLETED, line)
+        self.assertIn("2026-09-17 12:03:00", line)
+        self.assertIn("execution→execution", line)
+        self.assertEqual(format_result_journal_line(None), "")
+
     def test_step_result_label_adds_revision_and_rework(self):
         view = {
             "step_index": 2,
@@ -513,6 +560,183 @@ class FormatterTestCase(unittest.TestCase):
         )
 
         self.assertEqual(format_next_action(None, None), "No active task.")
+
+    # --- Transition guard formatters (Day 15) -----------------------------
+
+    def test_recommended_action_maps_the_expected_action(self):
+        cases = (
+            (EXPECTED_CONFIRM_PLAN, "accept_plan"),
+            (EXPECTED_RUN_PLANNING, "run_planning"),
+            (EXPECTED_RUN_STEP, "run_step"),
+            (EXPECTED_FINISH_EXECUTION, "finish_execution"),
+            (EXPECTED_RUN_VALIDATION, "run_validation"),
+        )
+        for expected, action in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    recommended_action(self.task(expected_action_type=expected)),
+                    action,
+                )
+        self.assertIsNone(recommended_action(None))
+        self.assertIsNone(
+            recommended_action(self.task(expected_action_type="user_action"))
+        )
+        self.assertIsNone(
+            recommended_action(
+                self.task(
+                    stage="done",
+                    status="completed",
+                    expected_action_type="review_result",
+                )
+            )
+        )
+
+    def test_recommended_action_css_uses_the_exact_key_selector(self):
+        css = recommended_action_css(
+            self.task(expected_action_type=EXPECTED_RUN_STEP)
+        )
+        self.assertIn('div[class~="st-key-task_action_run_step"] button', css)
+        self.assertIn("#2e7d32", css)
+        self.assertNotIn("[class*=", css)
+
+    def test_recommended_action_css_highlights_review_plan(self):
+        css = recommended_action_css(
+            self.task(expected_action_type=EXPECTED_CONFIRM_PLAN)
+        )
+        self.assertIn('div[class~="st-key-task_review_plan"] button', css)
+        self.assertIn('div[class~="st-key-task_action_accept_plan"] button', css)
+
+    def test_recommended_action_css_is_empty_without_a_recommendation(self):
+        self.assertEqual(recommended_action_css(None), "")
+        self.assertEqual(
+            recommended_action_css(
+                self.task(expected_action_type="user_action")
+            ),
+            "",
+        )
+
+    def test_guard_decision_rows(self):
+        decisions = [
+            TransitionDecision(
+                action=ACTION_RUN_STEP,
+                allowed=False,
+                reason=REASON_EXPECTED_ACTION_MISMATCH,
+                allowed_actions=(ACTION_RUN_PLANNING,),
+            ),
+            TransitionDecision(
+                action=ACTION_RUN_PLANNING,
+                allowed=True,
+                allowed_actions=(ACTION_RUN_PLANNING,),
+            ),
+        ]
+        rows = guard_decision_rows(decisions)
+        self.assertEqual(set(rows[0]), {"Action", "Allowed", "Reason"})
+        self.assertEqual(rows[0]["Action"], "Run step")
+        self.assertEqual(rows[0]["Allowed"], "no")
+        self.assertEqual(rows[0]["Reason"], REASON_EXPECTED_ACTION_MISMATCH)
+        self.assertEqual(rows[1]["Allowed"], "yes")
+        self.assertEqual(guard_decision_rows([]), [])
+
+    def test_transition_attempt_rows_avoid_the_event_columns(self):
+        attempt = TransitionAttempt(
+            id=3,
+            task_id=1,
+            action=ACTION_RUN_STEP,
+            from_stage="planning",
+            from_status="active",
+            expected_action_type="run_planning",
+            reason=REASON_EXPECTED_ACTION_MISMATCH,
+            allowed_actions=(ACTION_RUN_PLANNING,),
+            created_at="2026-09-19 10:00:00",
+        )
+        rows = transition_attempt_rows([attempt])
+
+        self.assertEqual(
+            set(rows[0]),
+            {
+                "attempt",
+                "action",
+                "from state",
+                "reason",
+                "allowed then",
+                "created",
+            },
+        )
+        self.assertNotIn("event", rows[0])
+        self.assertNotIn("invariant_event", rows[0])
+        self.assertEqual(rows[0]["attempt"], 3)
+        self.assertEqual(rows[0]["action"], "Run step")
+        self.assertEqual(rows[0]["from state"], "planning/active")
+        self.assertEqual(rows[0]["reason"], REASON_EXPECTED_ACTION_MISMATCH)
+        self.assertEqual(rows[0]["allowed then"], "Run planning")
+        self.assertEqual(rows[0]["created"], "2026-09-19 10:00:00")
+        self.assertEqual(transition_attempt_rows([]), [])
+
+    def test_format_guard_probe_line_covers_every_branch(self):
+        refusal = TransitionProbeResult(
+            task=None,
+            action=ACTION_FINISH_EXECUTION,
+            allowed=False,
+            reason=REASON_PROGRESS_INCOMPLETE,
+            audit_id=5,
+        )
+        self.assertEqual(
+            format_guard_probe_line(refusal),
+            "Refusal audit #5: finish_execution — progress_incomplete",
+        )
+
+        allowed = TransitionProbeResult(
+            task=None, action=ACTION_FINISH_EXECUTION, allowed=True
+        )
+        self.assertEqual(
+            format_guard_probe_line(allowed),
+            "finish_execution: allowed now; nothing was written.",
+        )
+
+        error = TransitionProbeResult(
+            task=None,
+            action=ACTION_FINISH_EXECUTION,
+            allowed=False,
+            error="not_found: no task",
+        )
+        self.assertEqual(
+            format_guard_probe_line(error),
+            "finish_execution: not_found: no task",
+        )
+
+        hard_refusal = TransitionProbeResult(
+            task=None,
+            action=ACTION_FINISH_EXECUTION,
+            allowed=False,
+            reason="invariant_conflict",
+            message="Finish execution is forbidden here.",
+        )
+        self.assertEqual(
+            format_guard_probe_line(hard_refusal),
+            "finish_execution: Finish execution is forbidden here.",
+        )
+
+        no_detail = TransitionProbeResult(
+            task=None, action=ACTION_FINISH_EXECUTION, allowed=False
+        )
+        self.assertEqual(
+            format_guard_probe_line(no_detail), "finish_execution: refused."
+        )
+        self.assertEqual(format_guard_probe_line(None), "")
+
+    def test_format_guard_probe_line_reason_without_message(self):
+        # A refusal with a stored reason but no audit id/message keeps the
+        # honest reason-only line instead of inventing an audit reference.
+        reason_only = TransitionProbeResult(
+            task=None,
+            action=ACTION_FINISH_EXECUTION,
+            allowed=False,
+            reason=REASON_PROGRESS_INCOMPLETE,
+        )
+        self.assertEqual(
+            format_guard_probe_line(reason_only),
+            "finish_execution: refused (progress_incomplete).",
+        )
 
 
 class TaskUiTestCase(unittest.TestCase):
@@ -1419,6 +1643,21 @@ class TaskUiTestCase(unittest.TestCase):
         self.assertTrue(any("step one done" in text for text in texts))
         self.assertTrue(any("step two done" in text for text in texts))
 
+    def test_execution_result_shows_the_code_rendered_journal_line(self):
+        self.finish_execution_task()
+        app = self.run_app()
+
+        expander = self.expander_with_label(app, "Step 1 of 2: Step one")
+        captions = [item.value for item in expander.caption]
+        self.assertTrue(
+            any(
+                value.startswith("Journal:") and EVENT_STEP_COMPLETED in value
+                for value in captions
+            ),
+            captions,
+        )
+        self.assert_app_has_no_nested_expanders(app)
+
     def test_execution_results_panel_survives_rerun_and_new_session(self):
         self.finish_execution_task()
         app = self.run_app()
@@ -1574,6 +1813,185 @@ class TaskUiTestCase(unittest.TestCase):
         self.assertIn("step two done", texts)
         self.assertIn("Next: Finish execution", texts)
         self.assert_app_has_no_nested_expanders(app)
+
+    def test_diagnostics_execution_results_show_the_journal_line(self):
+        self.finish_execution_task()
+        app = self.run_app(mode=MODE_TASK)
+
+        expander = self.expander_with_label(app, "Execution results")
+        captions = [item.value for item in expander.caption]
+        self.assertTrue(
+            any(
+                value.startswith("Journal:") and EVENT_STEP_COMPLETED in value
+                for value in captions
+            ),
+            captions,
+        )
+        self.assert_app_has_no_nested_expanders(app)
+
+    # --- Transition guard (Day 15) ----------------------------------------
+
+    def test_diagnostics_transition_guard_writes_only_on_an_explicit_click(self):
+        task = self.execution_task()
+        refused = self.orchestrator.run_validation(task.id)
+        self.assertEqual(refused.status, STATUS_NOOP)
+
+        app = self.run_app(mode=MODE_TASK)
+
+        labels = {item.label for item in app.expander}
+        self.assertIn("Transition guard", labels)
+        guard = self.expander_with_label(app, "Transition guard")
+
+        # The panel renders exactly one safe probe button and no other widget.
+        self.assertEqual(len(guard.button), 1)
+        self.assertTrue(
+            guard.button[0].key.startswith("task_guard_probe_")
+        )
+        self.assertFalse(
+            any(
+                item.key and item.key.startswith("task_transition")
+                for item in app.button
+            )
+        )
+
+        text = "\n".join(self.block_markdown(guard))
+        self.assertIn("Run step", text)
+        captions = [item.value for item in guard.caption]
+        self.assertTrue(any("append-only" in value for value in captions))
+
+        decisions = next(
+            df.value
+            for df in app.dataframe
+            if set(df.value.columns) == {"Action", "Allowed", "Reason"}
+        )
+        row = decisions[decisions["Action"] == "Run validation"].iloc[0]
+        self.assertEqual(row["Allowed"], "no")
+        self.assertEqual(row["Reason"], REASON_EXPECTED_ACTION_MISMATCH)
+
+        attempts = next(
+            df.value
+            for df in app.dataframe
+            if "allowed then" in df.value.columns
+        )
+        self.assertGreaterEqual(len(attempts), 1)
+        self.assertEqual(
+            attempts.iloc[-1]["reason"], REASON_EXPECTED_ACTION_MISMATCH
+        )
+
+        # Rendering itself wrote nothing.
+        before = self.repo.get_task(task.id)
+        events_before = [
+            event.event_type for event in self.repo.list_events(task.id)
+        ]
+        artifacts_before = self.repo.list_artifacts(task.id)
+        attempts_before = self.repo.list_transition_attempts(task.id)
+
+        self.button(
+            app, guard.button[0].key
+        ).click().run(timeout=30)
+        self.assert_no_exception(app)
+
+        # Only the append-only audit grows; the task and its journal do not.
+        after = self.repo.get_task(task.id)
+        self.assertEqual(after.stage, before.stage)
+        self.assertEqual(after.status, before.status)
+        self.assertEqual(after.version, before.version)
+        self.assertEqual(after.current_step, before.current_step)
+        self.assertEqual(after.current_step_index, before.current_step_index)
+        self.assertEqual(
+            [event.event_type for event in self.repo.list_events(task.id)],
+            events_before,
+        )
+        self.assertEqual(self.repo.list_artifacts(task.id), artifacts_before)
+
+        attempts = self.repo.list_transition_attempts(task.id)
+        self.assertEqual(len(attempts), len(attempts_before) + 1)
+        newest = attempts[-1]
+        self.assertEqual(newest.action, ACTION_FINISH_EXECUTION)
+        self.assertEqual(newest.reason, REASON_PROGRESS_INCOMPLETE)
+
+        guard = self.expander_with_label(app, "Transition guard")
+        self.assertEqual(len(guard.button), 1)
+        captions = [item.value for item in guard.caption]
+        self.assertTrue(
+            any(
+                f"#{newest.id}" in value
+                and REASON_PROGRESS_INCOMPLETE in value
+                for value in captions
+            ),
+            captions,
+        )
+
+        self.assert_app_has_no_nested_expanders(app)
+        self.assertEqual(len(app.json), 0)
+
+    def test_transition_guard_allowed_finish_shows_a_caption_not_a_button(self):
+        task = self.finish_execution_task()
+        attempts_before = self.repo.list_transition_attempts(task.id)
+        app = self.run_app(mode=MODE_TASK)
+
+        guard = self.expander_with_label(app, "Transition guard")
+        # An allowed probe would execute nothing, so the panel offers no button
+        # and just explains that nothing is written.
+        self.assertEqual(len(guard.button), 0)
+        captions = [item.value for item in guard.caption]
+        self.assertTrue(
+            any(
+                "Finish execution is currently allowed" in value
+                and "writes no audit" in value
+                for value in captions
+            ),
+            captions,
+        )
+        self.assertEqual(
+            self.repo.list_transition_attempts(task.id), attempts_before
+        )
+
+    def test_transition_guard_probe_is_not_rendered_in_chat(self):
+        self.execution_task()
+        app = self.run_app()
+
+        self.assertFalse(
+            any(
+                item.key and item.key.startswith("task_guard_probe_")
+                for item in app.button
+            )
+        )
+
+    def test_transition_guard_shows_no_refusals_for_a_fresh_task(self):
+        self.execution_task()
+        app = self.run_app(mode=MODE_TASK)
+
+        guard = self.expander_with_label(app, "Transition guard")
+        captions = [item.value for item in guard.caption]
+        self.assertTrue(
+            any("No refusals recorded" in value for value in captions)
+        )
+
+    def test_card_highlights_the_recommended_action_only(self):
+        self.planning_task()
+        app = self.run_app()
+
+        markup = "\n".join(item.value for item in app.markdown)
+        self.assertIn(
+            'div[class~="st-key-task_action_run_planning"] button', markup
+        )
+        self.assertNotIn(
+            'div[class~="st-key-task_action_run_step"] button', markup
+        )
+        self.assertNotIn("task_action_run_step", self.action_keys(app))
+        self.assertNotIn("task_action_run_validation", self.action_keys(app))
+
+    def test_card_highlights_review_plan_when_the_plan_is_the_decision(self):
+        self.confirm_plan_task()
+        app = self.run_app()
+
+        markup = "\n".join(item.value for item in app.markdown)
+        self.assertIn('div[class~="st-key-task_review_plan"] button', markup)
+        self.assertIn(
+            'div[class~="st-key-task_action_accept_plan"] button', markup
+        )
+        self.assertIn("task_review_plan", {item.key for item in app.button})
 
     # --- Empty database ---------------------------------------------------
 

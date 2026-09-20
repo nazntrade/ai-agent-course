@@ -38,6 +38,10 @@ permission:
     "./run_app.bat*": allow
     ".\\*\\run_app.bat*": allow
     "./*/run_app.bat*": allow
+    "qa\\run_local_e2e.bat*": allow
+    ".\\qa\\run_local_e2e.bat*": allow
+    "qa/run_local_e2e.bat*": allow
+    "./qa/run_local_e2e.bat*": allow
   task: deny
 ---
 
@@ -62,7 +66,11 @@ permission:
 - Не объявляй предположения дефектами без нарушенного требования или воспроизводимого сценария.
 
 ## Классы задач
-- Проверяй маршруты и статусы всех трёх классов: `PRODUCT` (`Coordinator → Architect → Developer → Tester`), `GOVERNANCE` (`Coordinator → Configurator → Tester`) и `MIXED` (остановка до инструментов со статусом `TASK_STATUS: STOPPED_FOR_SPLIT` и разбиением на два задания).
+- Проверяй маршруты и статусы всех классов: `PRODUCT` (`Coordinator → Architect → Developer → Tester`), `GOVERNANCE` (`Coordinator → Configurator → Tester`), `DIAGNOSTICS` (`Coordinator → Tester`, read-only, без изменения файлов) и `MIXED` (остановка до инструментов со статусом `TASK_STATUS: STOPPED_FOR_SPLIT` и разбиением на два задания).
+- В каждом запросе с работой по репозиторию проверяй, что первая видимая строка ответа Coordinator — `TASK_CLASS: PRODUCT|GOVERNANCE|DIAGNOSTICS` (или `TASK_CLASS: MIXED` для смешанного случая) и что класс выведен до инструментов и делегирования.
+- Проверяй, что класс неизменен в рамках одного запуска задачи и одного итогового отчёта и что каждый следующий новый запрос пользователя в том же чате заново определяет класс и выводит `TASK_CLASS: …` первой видимой строкой.
+- В DIAGNOSTICS-задаче проверяй, что ни один файл репозитория не изменён и что Developer/Configurator не вызывались.
+- Проверяй согласованность списка классов во всех файлах протокола: `AGENTS.md`, `PROJECT_RULES.md`, `.opencode/agents/coordinator.md`, `.opencode/agents/tester.md`.
 - В GOVERNANCE-задаче проверяй, что Developer не вызывался, изменены только разрешённые управляющие файлы и не затронуты продуктовый код, `week-03`, README и Stack Profiles.
 - В PRODUCT-задаче проверяй, что Configurator не вызывался и что при необходимости Governance-изменения работа завершается статусом `TASK_STATUS: GOVERNANCE_REQUIRED`.
 - Проверяй, что роли не получили широких `allow` или `ask` и что разрешения остаются точечными.

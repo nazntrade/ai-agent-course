@@ -55,6 +55,9 @@ from task_prompts import (
     TASK_EXECUTION_SYSTEM_PROMPT,
     TASK_PLANNING_SYSTEM_PROMPT,
     TASK_VALIDATION_SYSTEM_PROMPT,
+    StepEventFact,
+    StepFacts,
+    StepRefusalFact,
     build_plan_messages,
     build_step_messages,
     build_validation_messages,
@@ -84,6 +87,7 @@ BLOCK_STRUCTURAL_INVARIANTS = "structural_invariants"
 BLOCK_PROFILE = "profile"
 BLOCK_WORKFLOW = "workflow"
 BLOCK_TASK_SNAPSHOT = "task_snapshot"
+BLOCK_TASK_FACTS = "task_facts"
 BLOCK_TASK_BRIEF = "task_brief"
 BLOCK_SPECIFICATION = "specification"
 BLOCK_PLAN = "plan"
@@ -103,6 +107,7 @@ BLOCK_ORDER = (
     BLOCK_PROFILE,
     BLOCK_WORKFLOW,
     BLOCK_TASK_SNAPSHOT,
+    BLOCK_TASK_FACTS,
     BLOCK_TASK_BRIEF,
     BLOCK_SPECIFICATION,
     BLOCK_PLAN,
@@ -153,6 +158,7 @@ class ContextPacket:
     total_cost_usd: float | None = None
     stage: str = ""
     action: str = ""
+    step_facts: StepFacts | None = None
 
     def block(self, name):
         """Return the block with ``name``, or ``None`` when it is absent."""
@@ -326,6 +332,87 @@ def format_task_brief_block(artifact) -> str:
         return ""
     text = str(_content_of(artifact).get("text") or "").strip()
     return f"Бриф задачи:\n{text}" if text else ""
+
+
+def build_step_facts(task, *, events=(), refusals=()) -> StepFacts:
+    """Capture the storage snapshot attached to an execution call.
+
+    The task fields and the journal/refusal rows are copied read-only, so the
+    model only ever sees facts the code already read from the repository, and
+    the same snapshot later validates its reply.
+    """
+    event_records = tuple(
+        StepEventFact(
+            id=getattr(event, "id", None),
+            event_type=str(getattr(event, "event_type", "") or ""),
+            created_at=getattr(event, "created_at", None),
+        )
+        for event in (events or ())
+    )
+    refusal_records = tuple(
+        StepRefusalFact(
+            id=getattr(refusal, "id", None),
+            action=str(getattr(refusal, "action", "") or ""),
+            reason=str(getattr(refusal, "reason", "") or ""),
+            created_at=getattr(refusal, "created_at", None),
+        )
+        for refusal in (refusals or ())
+    )
+    return StepFacts(
+        stage=str(getattr(task, "stage", "") or ""),
+        status=str(getattr(task, "status", "") or ""),
+        current_step=str(getattr(task, "current_step", "") or ""),
+        current_step_index=getattr(task, "current_step_index", None),
+        expected_action_type=str(getattr(task, "expected_action_type", "") or ""),
+        expected_action_text=str(getattr(task, "expected_action_text", "") or ""),
+        version=getattr(task, "version", None),
+        events=event_records,
+        refusals=refusal_records,
+    )
+
+
+def format_step_facts_block(facts) -> str:
+    """Render the storage snapshot as the ``task_facts`` prompt block."""
+    if facts is None:
+        return ""
+    lines = [
+        "Фактическое состояние задачи (снимок storage; источник истины — код):",
+        f"- stage: {facts.stage or '—'}",
+        f"- status: {facts.status or '—'}",
+    ]
+    step = facts.current_step or "—"
+    if isinstance(facts.current_step_index, int) and not isinstance(
+        facts.current_step_index, bool
+    ):
+        step = f"{step} (step {facts.current_step_index})"
+    lines.append(f"- current_step: {step}")
+    expected = facts.expected_action_type or "—"
+    if facts.expected_action_text:
+        expected = f"{expected} ({facts.expected_action_text})"
+    lines.append(f"- expected_action: {expected}")
+    lines.append(f"- version: {facts.version if facts.version is not None else '—'}")
+    if facts.events:
+        lines.extend(["", "Записанные события журнала (только они существуют):"])
+        for event in facts.events:
+            lines.append(
+                f"- id {event.id}: {event.event_type} "
+                f"({event.created_at or 'no data'})"
+            )
+    if facts.refusals:
+        lines.extend(["", "Аудит отказов (отдельно от журнала событий):"])
+        for refusal in facts.refusals:
+            lines.append(
+                f"- id {refusal.id}: {refusal.action} — {refusal.reason} "
+                f"({refusal.created_at or 'no data'})"
+            )
+    lines.extend(
+        [
+            "",
+            "Не выдумывай идентификаторы и события журнала: используй только "
+            "перечисленные выше факты и верни только содержимое шага.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _profile_text(profile_block) -> str:
@@ -522,6 +609,8 @@ class StageContextBuilder:
         sliding_window_messages=DEFAULT_SLIDING_WINDOW,
         facts_window_messages=DEFAULT_FACTS_WINDOW,
         facts=(),
+        events=(),
+        refusals=(),
         model=DEFAULT_MODEL,
         action_message=None,
         dt=None,
@@ -568,6 +657,14 @@ class StageContextBuilder:
 
         # 6) task snapshot.
         add(BLOCK_TASK_SNAPSHOT, "system", format_snapshot_block(task) if task is not None else "")
+
+        # 6b) execution only: the storage facts the code attaches and later uses
+        # to validate the free-text step result. Other stages carry no snapshot
+        # because they do not produce free text that could invent journal data.
+        step_facts = None
+        if stage == STAGE_EXECUTION and task is not None:
+            step_facts = build_step_facts(task, events=events, refusals=refusals)
+            add(BLOCK_TASK_FACTS, "system", format_step_facts_block(step_facts))
 
         # 7) required artifacts of the earlier stages.
         for name, content in self.select_artifacts(
@@ -626,6 +723,7 @@ class StageContextBuilder:
             total_cost_usd=total_cost,
             stage=stage,
             action=action,
+            step_facts=step_facts,
         )
 
 

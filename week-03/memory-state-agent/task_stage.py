@@ -40,9 +40,13 @@ from task_prompts import (
     TASK_VALIDATION_MAX_TOKENS,
     TASK_VALIDATION_RETRY_MAX_TOKENS,
     TASK_VALIDATION_TEMPERATURE,
+    StepFactsViolationError,
     is_truncated,
     parse_plan_response,
     parse_validation_response,
+    plan_retry_feedback,
+    step_retry_feedback,
+    validate_step_text,
 )
 from tasks import (
     API_ERROR_CONTEXT_OVERFLOW,
@@ -134,7 +138,9 @@ class StageExecutor:
         """Produce and strictly parse the plan (planning is never streamed).
 
         ``on_chunk`` is accepted for a uniform stage API and deliberately not
-        forwarded: the plan is JSON and must be received in one piece.
+        forwarded: the plan is JSON and must be received in one piece. A plan
+        rejected as execution-incompatible is retried once with corrective
+        feedback appended to the messages.
         """
         return self._run_structured(
             messages,
@@ -145,6 +151,7 @@ class StageExecutor:
             streaming=False,
             on_chunk=None,
             result_field="plan",
+            retry_feedback=plan_retry_feedback,
         )
 
     def run_validation(self, messages, *, steps_count) -> StageExecutionResult:
@@ -168,7 +175,7 @@ class StageExecutor:
             result_field="validation",
         )
 
-    def run_step(self, messages, *, stream=False, on_chunk=None) -> StageExecutionResult:
+    def run_step(self, messages, *, stream=False, on_chunk=None, facts=None) -> StageExecutionResult:
         """Produce the text of one execution step.
 
         Streaming happens only when ``stream`` is true *and* an ``on_chunk``
@@ -177,15 +184,25 @@ class StageExecutor:
         is reported as ``truncated`` and its partial text is dropped. An empty
         step text is reported as ``invalid_response``, because the domain
         rejects an empty ``execution_result``.
+
+        When ``facts`` is provided, the non-empty reply is validated against the
+        attached storage snapshot. A reply that invents journal identifiers or
+        contradicts the snapshot is retried once with corrective feedback and
+        the larger budget; a second violation is reported as
+        ``invalid_response``. The retried reply replaces the rejected one, so
+        the partial stream of a failed attempt is never persisted. With
+        ``facts=None`` the behavior is unchanged.
         """
         streaming = bool(stream) and on_chunk is not None
         attempts: list = []
         last_reason = None
+        last_error = None
+        retry_messages = messages
 
         for budget in (TASK_STEP_MAX_TOKENS, TASK_STEP_RETRY_MAX_TOKENS):
             try:
                 text, stats = self._call(
-                    messages,
+                    retry_messages,
                     max_tokens=budget,
                     temperature=TASK_STEP_TEMPERATURE,
                     streaming=streaming,
@@ -197,6 +214,11 @@ class StageExecutor:
             attempts.append(stats)
             last_reason = stats.finish_reason
             if is_truncated(last_reason):
+                last_error = (
+                    "model response was truncated "
+                    f"(finish_reason={last_reason})"
+                )
+                retry_messages = messages
                 continue
             if not str(text or "").strip():
                 return StageExecutionResult(
@@ -205,17 +227,31 @@ class StageExecutor:
                     error="The step result is empty",
                     error_kind=API_ERROR_INVALID_RESPONSE,
                 )
+            if facts is not None:
+                try:
+                    validate_step_text(text, facts)
+                except StepFactsViolationError as exc:
+                    last_error = str(exc)
+                    retry_messages = list(messages) + list(
+                        step_retry_feedback(exc)
+                    )
+                    continue
             return StageExecutionResult(
                 text=text,
                 attempts=list(attempts),
                 stats=aggregate_stats(attempts),
             )
 
+        kind = (
+            API_ERROR_TRUNCATED
+            if is_truncated(last_reason)
+            else API_ERROR_INVALID_RESPONSE
+        )
         return StageExecutionResult(
             attempts=list(attempts),
             stats=aggregate_stats(attempts),
-            error=f"model response was truncated (finish_reason={last_reason})",
-            error_kind=API_ERROR_TRUNCATED,
+            error=last_error or "The step result could not be validated",
+            error_kind=kind,
         )
 
     def _run_structured(
@@ -229,6 +265,7 @@ class StageExecutor:
         streaming,
         on_chunk,
         result_field,
+        retry_feedback=None,
     ) -> StageExecutionResult:
         """Call, parse and, on truncation or invalid JSON, retry once.
 
@@ -236,15 +273,22 @@ class StageExecutor:
         one retry with the larger budget, and only a second failure becomes an
         ``API_ERROR`` (``truncated`` when the last reply hit the output limit,
         ``invalid_response`` otherwise).
+
+        ``retry_feedback`` is an optional callable that receives the parser
+        error and returns extra messages for the retry. It is applied only after
+        a parser ``ValueError`` (planning uses it to correct an
+        execution-incompatible plan); a truncated reply is always retried with
+        the original messages.
         """
         attempts: list = []
         last_reason = None
         last_error = None
+        retry_messages = messages
 
-        for budget_for_attempt in (budget, retry_budget):
+        for attempt_number, budget_for_attempt in enumerate((budget, retry_budget)):
             try:
                 text, stats = self._call(
-                    messages,
+                    retry_messages,
                     max_tokens=budget_for_attempt,
                     temperature=temperature,
                     streaming=streaming,
@@ -260,11 +304,17 @@ class StageExecutor:
                     "model response was truncated "
                     f"(finish_reason={last_reason})"
                 )
+                retry_messages = messages
                 continue
             try:
                 parsed = parser(text)
             except ValueError as exc:
                 last_error = str(exc)
+                retry_messages = messages
+                if retry_feedback is not None and attempt_number == 0:
+                    feedback = retry_feedback(exc)
+                    if feedback:
+                        retry_messages = list(messages) + list(feedback)
                 continue
             return StageExecutionResult(
                 text=text,

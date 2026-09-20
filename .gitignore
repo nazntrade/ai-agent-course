@@ -10,3 +10,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 
+# Isolated local E2E runtime (qa/)
+qa/.runs/
+qa/*.local.json
+

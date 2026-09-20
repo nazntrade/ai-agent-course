@@ -15,7 +15,6 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, replace
-from pathlib import Path
 
 from invariants import (
     CHECK_NONE,
@@ -33,7 +32,7 @@ from invariants import (
     select_applicable,
     normalize_invariant,
 )
-from storage import DEFAULT_DB_PATH
+from storage import resolve_db_path
 
 DEFAULT_INVARIANTS_SEED_MARKER = "default_invariants_seeded"
 
@@ -232,9 +231,7 @@ class InvariantRepository:
     """SQLite store for structural invariants and their journal."""
 
     def __init__(self, db_path=None, *, seed_defaults=True):
-        self._db_path = (
-            Path(db_path) if db_path is not None else Path(DEFAULT_DB_PATH)
-        )
+        self._db_path = resolve_db_path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._seed_defaults = bool(seed_defaults)
         self._init_db()

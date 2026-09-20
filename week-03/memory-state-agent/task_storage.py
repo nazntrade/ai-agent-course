@@ -17,10 +17,9 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from pathlib import Path
 
 from stats import sum_optional
-from storage import DEFAULT_DB_PATH
+from storage import resolve_db_path
 from tasks import (
     ARTIFACT_KINDS,
     ARTIFACT_PLAN,
@@ -112,6 +111,28 @@ CREATE TRIGGER IF NOT EXISTS trg_task_events_no_update
     END;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_idempotency
     ON task_events(task_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- Day 15: every refused transition attempt is appended here, separately from
+-- ``task_events``. The audit never changes the task: it only records what was
+-- asked, from which state, why it was refused and what was allowed instead.
+CREATE TABLE IF NOT EXISTS task_transition_attempts (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id              INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    action               TEXT    NOT NULL,
+    from_stage           TEXT,
+    from_status          TEXT,
+    expected_action_type TEXT,
+    reason               TEXT    NOT NULL DEFAULT '',
+    allowed_actions_json TEXT    NOT NULL DEFAULT '[]',
+    created_at           TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_transition_attempts_task
+    ON task_transition_attempts(task_id, id);
+CREATE TRIGGER IF NOT EXISTS trg_task_transition_attempts_no_update
+    BEFORE UPDATE ON task_transition_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'task_transition_attempts is append-only');
+    END;
 """
 
 # Columns that may be added after the Day 13 schema; the migration adds
@@ -186,6 +207,21 @@ class TaskUsage:
     models: tuple = ()
 
 
+@dataclass
+class TransitionAttempt:
+    """One append-only audit row of a refused or rejected transition attempt."""
+
+    id: int | None = None
+    task_id: int | None = None
+    action: str = ""
+    from_stage: str | None = None
+    from_status: str | None = None
+    expected_action_type: str | None = None
+    reason: str = ""
+    allowed_actions: tuple = ()
+    created_at: str | None = None
+
+
 def _load_json(raw, default):
     """Parse a JSON column; a corrupt value falls back instead of raising."""
     if raw is None:
@@ -210,7 +246,7 @@ class TaskRepository:
     """SQLite store for tasks, artifacts, events and workflow profiles."""
 
     def __init__(self, db_path=None):
-        self._db_path = Path(db_path) if db_path is not None else Path(DEFAULT_DB_PATH)
+        self._db_path = resolve_db_path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -708,6 +744,91 @@ class TaskRepository:
                 (event_id,),
             ).fetchone()
         return self._event_from_row(row) if row is not None else None
+
+    # --- Transition attempts (Day 15) -------------------------------------
+
+    _ATTEMPT_SELECT = (
+        "SELECT id, task_id, action, from_stage, from_status, "
+        "expected_action_type, reason, allowed_actions_json, created_at "
+        "FROM task_transition_attempts"
+    )
+
+    @staticmethod
+    def _attempt_from_row(row) -> TransitionAttempt:
+        raw_allowed = _load_json(row[7], [])
+        if not isinstance(raw_allowed, (list, tuple)):
+            raw_allowed = []
+        return TransitionAttempt(
+            id=row[0],
+            task_id=row[1],
+            action=row[2],
+            from_stage=row[3],
+            from_status=row[4],
+            expected_action_type=row[5],
+            reason=row[6],
+            allowed_actions=tuple(raw_allowed),
+            created_at=row[8],
+        )
+
+    def record_transition_attempt(
+        self,
+        task_id,
+        action,
+        *,
+        reason,
+        allowed_actions=(),
+        from_stage=None,
+        from_status=None,
+        expected_action_type=None,
+    ) -> int:
+        """Append one refusal to the audit; the task itself is not touched.
+
+        The table is append-only (the trigger rejects UPDATE), so a repeated
+        refusal is a new row and the history is never rewritten. A task that no
+        longer exists is rejected before anything is written.
+        """
+        if self.get_task(task_id) is None:
+            raise TaskNotFoundError(f"task {task_id} not found")
+        with closing(self._connect()) as conn:
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO task_transition_attempts (task_id, action, "
+                    "from_stage, from_status, expected_action_type, reason, "
+                    "allowed_actions_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        task_id,
+                        str(action or ""),
+                        from_stage,
+                        from_status,
+                        expected_action_type,
+                        str(reason or ""),
+                        _dump_json(list(allowed_actions or ())),
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return cursor.lastrowid
+
+    def list_transition_attempts(self, task_id, limit=None) -> list:
+        """Return the refusals chronologically; ``limit`` keeps the newest N.
+
+        A limited read still returns the newest rows in ascending id order, so
+        the UI shows the most recent refusals in the order they happened.
+        """
+        query = self._ATTEMPT_SELECT + " WHERE task_id = ?"
+        params: list = [task_id]
+        if limit is not None:
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(int(limit))
+        else:
+            query += " ORDER BY id"
+        with closing(self._connect()) as conn:
+            rows = conn.execute(query, params).fetchall()
+        if limit is not None:
+            rows = list(reversed(rows))
+        return [self._attempt_from_row(row) for row in rows]
 
     # --- Selected task -----------------------------------------------------
 

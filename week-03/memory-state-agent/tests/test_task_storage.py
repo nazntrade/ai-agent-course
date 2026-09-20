@@ -21,6 +21,7 @@ from task_storage import (
     TaskRepository,
     TaskUsage,
     TaskVersionConflictError,
+    TransitionAttempt,
 )
 from tasks import (
     ARTIFACT_EXECUTION_RESULT,
@@ -870,6 +871,118 @@ class TaskUsageTest(RepoTestCase):
         self.assertIsNone(usage.cost_usd)
         self.assertEqual(usage.finish_reasons, ())
         self.assertEqual(usage.models, ())
+
+
+class TransitionAttemptStorageTest(RepoTestCase):
+    """Integration coverage of the Day 15 append-only refusal audit."""
+
+    def test_table_is_created_and_reopening_is_idempotent(self):
+        task = self.create_task()
+        self.repo.record_transition_attempt(
+            task.id,
+            "run_step",
+            reason="action_not_allowed",
+            allowed_actions=("run_planning",),
+        )
+
+        for _ in range(2):
+            reopened = TaskRepository(self.path)
+            self.assertEqual(raw_count(self.path, "task_transition_attempts"), 1)
+            attempts = reopened.list_transition_attempts(task.id)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0].allowed_actions, ("run_planning",))
+
+    def test_round_trip_record_and_list(self):
+        task = self.create_task()
+        first_id = self.repo.record_transition_attempt(
+            task.id,
+            "run_step",
+            reason="expected_action_mismatch",
+            allowed_actions=("run_planning", "pause"),
+            from_stage="planning",
+            from_status="active",
+            expected_action_type="run_planning",
+        )
+        second_id = self.repo.record_transition_attempt(
+            task.id, "accept_plan", reason="action_not_allowed"
+        )
+
+        attempts = self.repo.list_transition_attempts(task.id)
+        self.assertEqual([item.id for item in attempts], [first_id, second_id])
+        self.assertIsInstance(attempts[0], TransitionAttempt)
+        self.assertEqual(attempts[0].task_id, task.id)
+        self.assertEqual(attempts[0].action, "run_step")
+        self.assertEqual(attempts[0].from_stage, "planning")
+        self.assertEqual(attempts[0].from_status, "active")
+        self.assertEqual(attempts[0].expected_action_type, "run_planning")
+        self.assertEqual(attempts[0].reason, "expected_action_mismatch")
+        self.assertEqual(
+            attempts[0].allowed_actions, ("run_planning", "pause")
+        )
+        self.assertIsNotNone(attempts[0].created_at)
+        self.assertEqual(attempts[1].allowed_actions, ())
+
+    def test_limit_returns_the_newest_rows_in_chronological_order(self):
+        task = self.create_task()
+        for index in range(5):
+            self.repo.record_transition_attempt(
+                task.id, "run_step", reason=f"reason_{index}"
+            )
+
+        limited = self.repo.list_transition_attempts(task.id, limit=2)
+        self.assertEqual([item.reason for item in limited], ["reason_3", "reason_4"])
+
+    def test_update_is_rejected_by_the_trigger(self):
+        task = self.create_task()
+        attempt_id = self.repo.record_transition_attempt(
+            task.id, "run_step", reason="first"
+        )
+        with closing(sqlite3.connect(self.path)) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE task_transition_attempts SET reason = 'tampered' "
+                    "WHERE id = ?",
+                    (attempt_id,),
+                )
+            conn.rollback()
+        self.assertEqual(
+            self.repo.list_transition_attempts(task.id)[0].reason, "first"
+        )
+
+    def test_refusals_are_not_task_events_and_do_not_bump_the_version(self):
+        task = self.create_task()
+        events_before = self.repo.list_events(task.id)
+        version_before = self.repo.get_task(task.id).version
+        artifacts_before = self.repo.list_artifacts(task.id)
+
+        self.repo.record_transition_attempt(
+            task.id,
+            "run_validation",
+            reason="expected_action_mismatch",
+            allowed_actions=("run_planning",),
+        )
+
+        self.assertEqual(self.repo.list_events(task.id), events_before)
+        self.assertEqual(self.repo.get_task(task.id).version, version_before)
+        self.assertEqual(self.repo.list_artifacts(task.id), artifacts_before)
+        self.assertEqual(raw_count(self.path, "task_events"), 1)
+
+    def test_record_unknown_task_raises(self):
+        with self.assertRaises(TaskNotFoundError):
+            self.repo.record_transition_attempt(
+                99999, "run_step", reason="action_not_allowed"
+            )
+
+    def test_deleting_a_chat_cascades_transition_attempts(self):
+        task = self.create_task()
+        self.repo.record_transition_attempt(
+            task.id, "run_step", reason="action_not_allowed"
+        )
+        self.assertEqual(raw_count(self.path, "task_transition_attempts"), 1)
+
+        self.store.delete_chat(self.chat_id)
+
+        self.assertEqual(raw_count(self.path, "task_transition_attempts"), 0)
 
 
 if __name__ == "__main__":

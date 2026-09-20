@@ -146,6 +146,90 @@ ACTION_NEW_TASK = "new_task"
 ACTION_OPEN_DIAGNOSTICS = "open_diagnostics"
 UI_ACTIONS = (ACTION_OPEN_RESULT, ACTION_NEW_TASK, ACTION_OPEN_DIAGNOSTICS)
 
+# The single source of the human action labels. The UI imports this mapping
+# instead of keeping its own copy, so a new domain action cannot be rendered
+# under a stale or missing label.
+ACTION_LABELS = {
+    ACTION_RUN_PLANNING: "Run planning",
+    ACTION_ACCEPT_PLAN: "Accept plan",
+    ACTION_REJECT_PLAN: "Reject plan",
+    ACTION_RUN_STEP: "Run step",
+    ACTION_FINISH_EXECUTION: "Finish execution",
+    ACTION_RUN_VALIDATION: "Run validation",
+    ACTION_PAUSE: "Pause",
+    ACTION_RESUME: "Resume",
+    ACTION_BLOCK: "Block",
+    ACTION_UNBLOCK: "Unblock",
+    ACTION_CANCEL: "Cancel",
+    ACTION_RETRY: "Retry",
+    ACTION_OPEN_RESULT: "Open full result",
+    ACTION_NEW_TASK: "New task",
+    ACTION_OPEN_DIAGNOSTICS: "Open diagnostics",
+}
+
+# --- Refusal reasons -------------------------------------------------------
+
+# Stable machine-readable codes explaining why an action is not allowed. The
+# empty code means the action is allowed; every other code belongs to a refusal
+# and is both shown next to the action and stored in the append-only audit.
+REASON_ALLOWED = ""
+REASON_TASK_NOT_FOUND = "task_not_found"
+REASON_TERMINAL = "task_is_terminal"
+REASON_PAUSED = "status_paused"
+REASON_BLOCKED = "status_blocked"
+REASON_EXPECTED_ACTION_MISMATCH = "expected_action_mismatch"
+REASON_PROGRESS_INCOMPLETE = "progress_incomplete"
+REASON_RETRY_REQUIRES_API_ERROR = "retry_requires_api_error"
+REASON_CONFIRMATION_REQUIRED = "confirmation_required"
+REASON_NOT_ALLOWED = "action_not_allowed"
+REASON_INVALID_TRANSITION = "invalid_transition"
+REASON_INVALID_PAYLOAD = "invalid_payload"
+
+REFUSAL_REASONS = (
+    REASON_TASK_NOT_FOUND,
+    REASON_TERMINAL,
+    REASON_PAUSED,
+    REASON_BLOCKED,
+    REASON_EXPECTED_ACTION_MISMATCH,
+    REASON_PROGRESS_INCOMPLETE,
+    REASON_RETRY_REQUIRES_API_ERROR,
+    REASON_CONFIRMATION_REQUIRED,
+    REASON_NOT_ALLOWED,
+    REASON_INVALID_TRANSITION,
+    REASON_INVALID_PAYLOAD,
+)
+
+# English explanations shown to the user. They describe the state, never the
+# internals of the implementation, and never contain secrets.
+REASON_TEXTS = {
+    REASON_ALLOWED: "",
+    REASON_TASK_NOT_FOUND: "the task does not exist",
+    REASON_TERMINAL: "the task is already finished or cancelled",
+    REASON_PAUSED: "the task is paused; resume it first",
+    REASON_BLOCKED: "the task is blocked; unblock it first",
+    REASON_EXPECTED_ACTION_MISMATCH: "the task currently expects a different action",
+    REASON_PROGRESS_INCOMPLETE: "not all plan steps are completed yet",
+    REASON_RETRY_REQUIRES_API_ERROR: (
+        "retry is only available right after a provider error"
+    ),
+    REASON_CONFIRMATION_REQUIRED: "this action requires explicit confirmation",
+    REASON_NOT_ALLOWED: "the action is not allowed in the current state",
+    REASON_INVALID_TRANSITION: "the transition is invalid for the current state",
+    REASON_INVALID_PAYLOAD: "the transition payload is invalid",
+}
+
+# Stage-bound actions are allowed only while the task expects exactly that
+# action; when one of them is refused the mismatch (not a generic "not allowed")
+# is the useful explanation.
+_STAGE_BOUND_ACTIONS = (
+    ACTION_RUN_PLANNING,
+    ACTION_ACCEPT_PLAN,
+    ACTION_REJECT_PLAN,
+    ACTION_RUN_STEP,
+    ACTION_FINISH_EXECUTION,
+    ACTION_RUN_VALIDATION,
+)
+
 # The domain action that produces a state-changing event. It names the
 # idempotency key, so a resubmitted form never writes a second event.
 EVENT_ACTIONS = {
@@ -349,6 +433,23 @@ class TransitionResult:
     event: TaskEvent | None = None
     artifacts: list = field(default_factory=list)
     idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
+class TransitionDecision:
+    """Whether one action is allowed right now, and why not when refused.
+
+    ``allowed_actions`` is the exact set the current state permits, so the UI and
+    the audit can explain a refusal without re-deriving the FSM rules.
+    ``message`` is the ready-to-show English sentence built by
+    :func:`format_refusal`.
+    """
+
+    action: str
+    allowed: bool
+    reason: str = REASON_ALLOWED
+    allowed_actions: tuple = ()
+    message: str = ""
 
 
 def _now() -> str:
@@ -1352,6 +1453,86 @@ def ui_actions(task) -> tuple:
     if task.status == STATUS_CANCELLED:
         return (ACTION_NEW_TASK,)
     return (ACTION_NEW_TASK, ACTION_OPEN_DIAGNOSTICS)
+
+
+def _refusal_reason(task, action, last_event_type, progress) -> str:
+    """Return the most specific reason an action is not allowed (see FR-10)."""
+    if task is None:
+        return REASON_TASK_NOT_FOUND
+    if _is_terminal(task):
+        return REASON_TERMINAL
+    if task.status == STATUS_PAUSED:
+        return REASON_PAUSED
+    if task.status == STATUS_BLOCKED:
+        return REASON_BLOCKED
+    if (
+        action == ACTION_FINISH_EXECUTION
+        and task.stage == STAGE_EXECUTION
+        and progress
+        and not all(step.completed for step in progress)
+    ):
+        return REASON_PROGRESS_INCOMPLETE
+    if action == ACTION_RETRY and last_event_type != EVENT_API_ERROR:
+        return REASON_RETRY_REQUIRES_API_ERROR
+    if action in _STAGE_BOUND_ACTIONS:
+        return REASON_EXPECTED_ACTION_MISMATCH
+    return REASON_NOT_ALLOWED
+
+
+def explain_transition(
+    task, action, *, last_event_type=None, progress=None
+) -> TransitionDecision:
+    """Explain whether ``action`` is allowed for the task's current state.
+
+    The allowed set comes from :func:`can_apply` (the single source of truth),
+    so the decision can never drift from the FSM. Only a refused action gets a
+    specific reason; an allowed one keeps :data:`REASON_ALLOWED`.
+    """
+    allowed_actions = can_apply(
+        task, last_event_type=last_event_type, progress=progress
+    )
+    allowed = action in allowed_actions
+    reason = REASON_ALLOWED if allowed else _refusal_reason(
+        task, action, last_event_type, progress
+    )
+    decision = TransitionDecision(
+        action=action,
+        allowed=allowed,
+        reason=reason,
+        allowed_actions=tuple(allowed_actions),
+    )
+    return replace(decision, message=format_refusal(decision))
+
+
+def format_allowed_actions(actions) -> str:
+    """Render a set of actions as comma-separated labels, ``none`` when empty."""
+    labels = [ACTION_LABELS.get(action, action) for action in (actions or ())]
+    return ", ".join(labels) if labels else "none"
+
+
+def format_refusal(decision) -> str:
+    """Build the human refusal sentence of a decision.
+
+    The positive sentence is used only when the decision is allowed *and* has no
+    reason. An allowed action can still carry a non-empty reason: the
+    orchestrator overrides the reason when a caller-specific precondition fails
+    (for example a cancel that needs explicit confirmation while ``cancel`` is in
+    the allowed set). That case is a refusal, so it is rendered with the reason
+    and, when known, the actions that are allowed right now.
+    """
+    label = ACTION_LABELS.get(decision.action, decision.action)
+    if decision.allowed and not decision.reason:
+        return f"{label} is allowed in the current state."
+    reason = REASON_TEXTS.get(decision.reason, decision.reason)
+    if decision.allowed_actions:
+        return (
+            f"{label} is not allowed: {reason}. "
+            f"Allowed now: {format_allowed_actions(decision.allowed_actions)}."
+        )
+    return (
+        f"{label} is not allowed: {reason}. "
+        "No action is allowed in the current state."
+    )
 
 
 def badge_for(task) -> str:

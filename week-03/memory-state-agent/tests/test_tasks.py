@@ -8,13 +8,21 @@ import json
 import unittest
 from types import SimpleNamespace
 
+from task_demo import (
+    CORRECTED_PLAN_EXAMPLE,
+    REPORTED_LOOPBACK_PLAN,
+    REPORTED_LIVE_PLAN,
+)
 from task_prompts import (
+    REASON_NONEXISTENT_TRANSITION,
     TASK_PLAN_MAX_TOKENS,
     TASK_PLAN_RETRY_MAX_TOKENS,
     TASK_STEP_MAX_TOKENS,
     TASK_STEP_RETRY_MAX_TOKENS,
     TASK_VALIDATION_MAX_TOKENS,
     TASK_VALIDATION_RETRY_MAX_TOKENS,
+    ExecutionIncompatiblePlanError,
+    PlanStepViolation,
     build_plan_messages,
     build_step_messages,
     build_validation_messages,
@@ -23,12 +31,16 @@ from task_prompts import (
     is_truncated,
     parse_plan_response,
     parse_validation_response,
+    plan_retry_feedback,
+    plan_step_violations,
+    plan_violations,
 )
 from tasks import (
     ACTION_ACCEPT_PLAN,
     ACTION_BLOCK,
     ACTION_CANCEL,
     ACTION_FINISH_EXECUTION,
+    ACTION_LABELS,
     ACTION_NEW_TASK,
     ACTION_OPEN_DIAGNOSTICS,
     ACTION_OPEN_RESULT,
@@ -51,6 +63,7 @@ from tasks import (
     BADGE_COMPLETED,
     BADGE_PAUSED,
     BADGE_RUNNING,
+    DOMAIN_ACTIONS,
     ERROR_MESSAGE_MAX_LENGTH,
     EVENT_API_ERROR,
     EVENT_BLOCK,
@@ -76,6 +89,18 @@ from tasks import (
     EXPECTED_RUN_VALIDATION,
     EXPECTED_USER_ACTION,
     InvalidTransitionError,
+    REFUSAL_REASONS,
+    REASON_ALLOWED,
+    REASON_BLOCKED,
+    REASON_CONFIRMATION_REQUIRED,
+    REASON_EXPECTED_ACTION_MISMATCH,
+    REASON_NOT_ALLOWED,
+    REASON_PAUSED,
+    REASON_PROGRESS_INCOMPLETE,
+    REASON_RETRY_REQUIRES_API_ERROR,
+    REASON_TASK_NOT_FOUND,
+    REASON_TEXTS,
+    REASON_TERMINAL,
     STAGE_DONE,
     STAGE_EXECUTION,
     STAGE_PLANNING,
@@ -89,13 +114,18 @@ from tasks import (
     Task,
     TaskArtifact,
     TaskStateMachine,
+    TransitionDecision,
     TransitionPayloadError,
+    UI_ACTIONS,
     apply_transition,
     badge_for,
     can_apply,
     compute_step_progress,
     creation_transition,
+    explain_transition,
+    format_allowed_actions,
     format_defects_block,
+    format_refusal,
     format_snapshot_block,
     format_task_usage_line,
     normalize_verdict,
@@ -1473,6 +1503,127 @@ class PromptParserTest(unittest.TestCase):
             parse_plan_response("{}")
         self.assertIn("step", str(context.exception).lower())
 
+    def test_parse_plan_response_rejects_the_reported_live_plan(self):
+        with self.assertRaises(ExecutionIncompatiblePlanError) as context:
+            parse_plan_response(json.dumps(REPORTED_LIVE_PLAN))
+        violations = context.exception.violations
+        self.assertEqual(
+            [
+                (violation.location, violation.index)
+                for violation in violations
+            ],
+            [("step", 3), ("step", 4), ("step", 5), ("criterion", 3)],
+        )
+        self.assertIsInstance(context.exception, ValueError)
+
+    def test_parse_plan_response_rejects_the_reported_loopback_plan(self):
+        with self.assertRaises(ExecutionIncompatiblePlanError) as context:
+            parse_plan_response(json.dumps(REPORTED_LOOPBACK_PLAN))
+        violations = context.exception.violations
+        self.assertEqual(
+            {violation.location for violation in violations},
+            {"step", "criterion"},
+        )
+        self.assertEqual(
+            [violation.index for violation in violations if violation.location == "step"],
+            [3, 4, 5],
+        )
+        self.assertEqual(
+            [
+                violation.reason
+                for violation in violations
+                if violation.location == "criterion"
+            ],
+            ["requires_other_stage", "requires_other_stage"],
+        )
+        self.assertEqual(
+            violations[0].reason, REASON_NONEXISTENT_TRANSITION
+        )
+        message = str(context.exception)
+        self.assertIn("step 3", message)
+        self.assertIn("criterion 1", message)
+        self.assertLessEqual(len(message), ERROR_MESSAGE_MAX_LENGTH)
+        for title in ("Вернуть задачу в planning", "VALIDATION_PASSED", "Задача завершена"):
+            with self.subTest(title=title):
+                self.assertNotIn(title, message)
+
+    def test_plan_retry_feedback_names_steps_and_criteria(self):
+        with self.assertRaises(ExecutionIncompatiblePlanError) as context:
+            parse_plan_response(json.dumps(REPORTED_LOOPBACK_PLAN))
+        content = plan_retry_feedback(context.exception)[0]["content"]
+        self.assertIn("невыполнимые в стадии execution", content)
+        self.assertIn("Недопустимые шаги", content)
+        self.assertIn("Недопустимые критерии приёмки", content)
+        self.assertIn("шаг 3", content)
+        self.assertIn("критерий 1", content)
+        self.assertIn("Transition guard", content)
+
+    def test_parse_plan_response_accepts_the_corrected_plan(self):
+        parsed = parse_plan_response(json.dumps(CORRECTED_PLAN_EXAMPLE))
+        self.assertEqual([step["index"] for step in parsed["steps"]], [1, 2, 3])
+        self.assertEqual(plan_step_violations(parsed), ())
+        self.assertEqual(plan_violations(parsed), ())
+
+    def test_parse_plan_response_error_message_stays_compact(self):
+        with self.assertRaises(ExecutionIncompatiblePlanError) as context:
+            parse_plan_response(json.dumps(REPORTED_LIVE_PLAN))
+        message = str(context.exception)
+        self.assertNotIn("Выполнить и проверить validation", message)
+        self.assertNotIn("тестовой копии", message)
+        self.assertIn("step 3", message)
+        self.assertLessEqual(len(message), ERROR_MESSAGE_MAX_LENGTH)
+
+    def test_plan_retry_feedback_keeps_the_impossible_step_wording(self):
+        exc = ExecutionIncompatiblePlanError(
+            [
+                PlanStepViolation(
+                    index=3, title="Finish the task", reason="requires_other_stage"
+                ),
+                PlanStepViolation(
+                    index=5, title="Test copy", reason="missing_entity"
+                ),
+            ]
+        )
+        message = plan_retry_feedback(exc)[0]
+        self.assertEqual(message["role"], "user")
+        self.assertIn("невыполнимые в стадии execution", message["content"])
+        self.assertIn("Недопустимые шаги", message["content"])
+        self.assertIn("шаг 3", message["content"])
+        self.assertIn("шаг 5", message["content"])
+
+    def test_plan_retry_feedback_describes_a_structural_error_as_a_format_issue(self):
+        message = plan_retry_feedback(
+            ValueError("Plan must contain at least one step")
+        )[0]
+        self.assertEqual(message["role"], "user")
+        # A syntax/structural error is not an execution-incompatible step list.
+        self.assertNotIn("невыполнимые в стадии execution", message["content"])
+        self.assertNotIn("Недопустимые шаги", message["content"])
+        self.assertIn("формат", message["content"])
+        self.assertIn("Верни исправленный план", message["content"])
+
+    def test_parse_plan_response_accepts_a_neutral_validation_task(self):
+        neutral = {
+            "summary": "Реализовать функцию валидации.",
+            "acceptance_criteria": ["Валидация отклоняет мусор"],
+            "steps": [
+                {
+                    "index": 1,
+                    "title": "Реализовать проверку обхода validation",
+                    "description": "Добавить проверку, обходящую validation.",
+                },
+                {
+                    "index": 2,
+                    "title": "Написать тесты для планировщика",
+                    "description": "Покрыть тестами модуль планировщика.",
+                },
+            ],
+        }
+        parsed = parse_plan_response(json.dumps(neutral))
+        self.assertEqual(len(parsed["steps"]), 2)
+        self.assertEqual(plan_step_violations(neutral), ())
+        self.assertEqual(plan_violations(neutral), ())
+
     def test_parse_validation_response_passed(self):
         verdict = parse_validation_response(
             json.dumps({"passed": True, "defects": [], "notes": "ok"}), steps_count=2
@@ -1729,6 +1880,243 @@ class LifecycleIntegrationTest(unittest.TestCase):
         self.assertEqual(resumed.task.expected_action_type, EXPECTED_RUN_STEP)
         self.assertEqual(resumed.task.pause_reason, "")
         self.assertEqual(resumed.task.version, 6)
+
+
+class TransitionExplanationTest(unittest.TestCase):
+    """Unit coverage of the Day 15 refusal explanation (FR-10, FR-11)."""
+
+    STATES = (
+        dict(
+            stage=STAGE_PLANNING,
+            status=STATUS_ACTIVE,
+            expected_action_type=EXPECTED_RUN_PLANNING,
+        ),
+        dict(
+            stage=STAGE_PLANNING,
+            status=STATUS_ACTIVE,
+            expected_action_type=EXPECTED_CONFIRM_PLAN,
+        ),
+        dict(
+            stage=STAGE_EXECUTION,
+            status=STATUS_ACTIVE,
+            expected_action_type=EXPECTED_RUN_STEP,
+        ),
+        dict(
+            stage=STAGE_EXECUTION,
+            status=STATUS_ACTIVE,
+            expected_action_type=EXPECTED_FINISH_EXECUTION,
+        ),
+        dict(
+            stage=STAGE_VALIDATION,
+            status=STATUS_ACTIVE,
+            expected_action_type=EXPECTED_RUN_VALIDATION,
+        ),
+        dict(
+            stage=STAGE_EXECUTION,
+            status=STATUS_PAUSED,
+            expected_action_type=EXPECTED_RUN_STEP,
+        ),
+        dict(
+            stage=STAGE_EXECUTION,
+            status=STATUS_BLOCKED,
+            expected_action_type=EXPECTED_USER_ACTION,
+        ),
+        dict(
+            stage=STAGE_DONE,
+            status=STATUS_COMPLETED,
+            expected_action_type=EXPECTED_REVIEW_RESULT,
+        ),
+        dict(
+            stage=STAGE_VALIDATION,
+            status=STATUS_CANCELLED,
+            expected_action_type=EXPECTED_NONE,
+        ),
+    )
+
+    def test_explain_transition_never_drifts_from_can_apply(self):
+        for state in self.STATES:
+            task = make_task(**state)
+            for last_event in (None, EVENT_API_ERROR, EVENT_PAUSE):
+                allowed = tuple(can_apply(task, last_event_type=last_event))
+                for action in DOMAIN_ACTIONS:
+                    with self.subTest(
+                        state=state, last_event=last_event, action=action
+                    ):
+                        decision = explain_transition(
+                            task, action, last_event_type=last_event
+                        )
+                        self.assertEqual(decision.action, action)
+                        self.assertEqual(decision.allowed, action in allowed)
+                        self.assertEqual(decision.allowed_actions, allowed)
+
+    def test_allowed_action_keeps_the_empty_reason(self):
+        decision = explain_transition(make_task(), ACTION_RUN_PLANNING)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, REASON_ALLOWED)
+        self.assertIn("Run planning", decision.message)
+
+    def test_allowed_action_with_empty_reason_keeps_the_positive_message(self):
+        decision = explain_transition(make_task(), ACTION_RUN_PLANNING)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, REASON_ALLOWED)
+        self.assertEqual(
+            format_refusal(decision),
+            "Run planning is allowed in the current state.",
+        )
+
+    def test_allowed_action_with_a_reason_is_rendered_as_a_refusal(self):
+        # The orchestrator can allow an action while overriding its reason: the
+        # cancel of an unconfirmed request is refused by the caller, even though
+        # ACTION_CANCEL is in the allowed set.
+        decision = TransitionDecision(
+            action=ACTION_CANCEL,
+            allowed=True,
+            reason=REASON_CONFIRMATION_REQUIRED,
+            allowed_actions=(
+                ACTION_RUN_PLANNING,
+                ACTION_PAUSE,
+                ACTION_BLOCK,
+                ACTION_CANCEL,
+            ),
+        )
+
+        message = format_refusal(decision)
+
+        self.assertNotIn("is allowed in the current state", message)
+        self.assertIn(REASON_TEXTS[REASON_CONFIRMATION_REQUIRED], message)
+        self.assertIn("Cancel", message)
+        self.assertIn("Allowed now:", message)
+        self.assertIn("Run planning", message)
+
+    def test_missing_task_reason(self):
+        decision = explain_transition(None, ACTION_RUN_PLANNING)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, REASON_TASK_NOT_FOUND)
+        self.assertEqual(decision.allowed_actions, ())
+
+    def test_terminal_reason_for_done_and_cancelled(self):
+        for task in (
+            make_task(
+                stage=STAGE_DONE,
+                status=STATUS_COMPLETED,
+                expected_action_type=EXPECTED_REVIEW_RESULT,
+            ),
+            make_task(
+                status=STATUS_CANCELLED, expected_action_type=EXPECTED_NONE
+            ),
+        ):
+            for action in (ACTION_CANCEL, ACTION_RUN_STEP, ACTION_PAUSE):
+                with self.subTest(status=task.status, action=action):
+                    decision = explain_transition(task, action)
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual(decision.reason, REASON_TERMINAL)
+
+    def test_paused_and_blocked_reasons(self):
+        paused = make_task(status=STATUS_PAUSED)
+        blocked = make_task(
+            status=STATUS_BLOCKED, expected_action_type=EXPECTED_USER_ACTION
+        )
+        self.assertEqual(
+            explain_transition(paused, ACTION_RUN_PLANNING).reason, REASON_PAUSED
+        )
+        self.assertEqual(
+            explain_transition(blocked, ACTION_RUN_STEP).reason, REASON_BLOCKED
+        )
+
+    def test_stage_bound_actions_before_approval_are_a_mismatch(self):
+        task = make_task()
+        for action in (ACTION_RUN_STEP, ACTION_RUN_VALIDATION, ACTION_ACCEPT_PLAN):
+            with self.subTest(action=action):
+                decision = explain_transition(task, action)
+                self.assertFalse(decision.allowed)
+                self.assertEqual(
+                    decision.reason, REASON_EXPECTED_ACTION_MISMATCH
+                )
+
+    def test_status_only_action_is_not_allowed(self):
+        task = make_task()
+        for action in (ACTION_UNBLOCK, ACTION_RESUME):
+            with self.subTest(action=action):
+                decision = explain_transition(task, action)
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, REASON_NOT_ALLOWED)
+
+    def test_finish_execution_with_incomplete_steps(self):
+        task = make_task(
+            stage=STAGE_EXECUTION,
+            status=STATUS_ACTIVE,
+            current_step_index=1,
+            expected_action_type=EXPECTED_RUN_STEP,
+        )
+        progress = [StepProgress(1, "Step 1"), StepProgress(2, "Step 2")]
+        decision = explain_transition(task, ACTION_FINISH_EXECUTION, progress=progress)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, REASON_PROGRESS_INCOMPLETE)
+
+    def test_finish_execution_with_complete_progress_but_wrong_expectation(self):
+        task = make_task(
+            stage=STAGE_EXECUTION,
+            status=STATUS_ACTIVE,
+            current_step_index=1,
+            expected_action_type=EXPECTED_RUN_STEP,
+        )
+        progress = [StepProgress(1, "Step 1", completed=True)]
+        decision = explain_transition(task, ACTION_FINISH_EXECUTION, progress=progress)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, REASON_EXPECTED_ACTION_MISMATCH)
+
+    def test_retry_requires_an_api_error(self):
+        task = make_task()
+        refused = explain_transition(task, ACTION_RETRY, last_event_type=EVENT_RETRY)
+        self.assertFalse(refused.allowed)
+        self.assertEqual(refused.reason, REASON_RETRY_REQUIRES_API_ERROR)
+
+        allowed = explain_transition(
+            task, ACTION_RETRY, last_event_type=EVENT_API_ERROR
+        )
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(allowed.reason, REASON_ALLOWED)
+
+    def test_format_refusal_names_the_action_and_the_reason(self):
+        done = make_task(
+            stage=STAGE_DONE,
+            status=STATUS_COMPLETED,
+            expected_action_type=EXPECTED_REVIEW_RESULT,
+        )
+        message = format_refusal(explain_transition(done, ACTION_PAUSE))
+        self.assertIn("Pause", message)
+        self.assertIn(REASON_TEXTS[REASON_TERMINAL], message)
+        self.assertIn("No action is allowed", message)
+
+    def test_format_refusal_lists_the_allowed_actions(self):
+        message = format_refusal(explain_transition(make_task(), ACTION_RUN_STEP))
+        self.assertIn(REASON_TEXTS[REASON_EXPECTED_ACTION_MISMATCH], message)
+        self.assertIn("Allowed now:", message)
+        self.assertIn("Run planning", message)
+
+    def test_format_allowed_actions(self):
+        self.assertEqual(format_allowed_actions(()), "none")
+        self.assertEqual(
+            format_allowed_actions((ACTION_RUN_PLANNING,)), "Run planning"
+        )
+        rendered = format_allowed_actions((ACTION_RUN_PLANNING, ACTION_PAUSE))
+        self.assertIn("Run planning", rendered)
+        self.assertIn("Pause", rendered)
+
+    def test_action_labels_cover_every_domain_and_ui_action(self):
+        for action in tuple(DOMAIN_ACTIONS) + tuple(UI_ACTIONS):
+            with self.subTest(action=action):
+                self.assertIn(action, ACTION_LABELS)
+                self.assertTrue(ACTION_LABELS[action])
+
+    def test_refusal_reasons_are_documented_and_exclude_allowed(self):
+        for code in REFUSAL_REASONS:
+            with self.subTest(code=code):
+                self.assertIn(code, REASON_TEXTS)
+                self.assertNotEqual(code, REASON_ALLOWED)
+        self.assertNotIn(REASON_ALLOWED, REFUSAL_REASONS)
+        self.assertEqual(REASON_TEXTS[REASON_ALLOWED], "")
 
 
 if __name__ == "__main__":

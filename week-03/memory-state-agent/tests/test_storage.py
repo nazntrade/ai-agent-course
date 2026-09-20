@@ -3,15 +3,21 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from pathlib import Path
 
 from agent import AgentConfig
+from invariant_storage import InvariantRepository
 from stats import TurnStats
 from storage import (
+    DB_PATH_ENV,
     DEFAULT_CHAT_TITLE,
+    DEFAULT_DB_PATH,
     BranchHasChildrenError,
     ChatStore,
     DuplicateBranchNameError,
+    resolve_db_path,
 )
+from task_storage import TaskRepository
 from tokens import estimate_tokens
 
 # The Day 7 schema: no ``turns`` table and no demo_context_limit /
@@ -1772,6 +1778,84 @@ class DbPathPropertyTest(unittest.TestCase):
             store = ChatStore(os.path.join(tmp, "test.db"))
             with self.assertRaises(AttributeError):
                 store.db_path = os.path.join(tmp, "other.db")
+
+
+class ResolveDbPathTest(unittest.TestCase):
+    """The ``MEMORY_AGENT_DB_PATH`` override used by the isolated runtime.
+
+    The override order is explicit argument → environment → default, so an
+    existing call site that passes a path is never affected by the environment.
+    """
+
+    def setUp(self):
+        self._saved = os.environ.pop(DB_PATH_ENV, None)
+
+    def tearDown(self):
+        os.environ.pop(DB_PATH_ENV, None)
+        if self._saved is not None:
+            os.environ[DB_PATH_ENV] = self._saved
+
+    def test_default_is_the_project_database(self):
+        self.assertEqual(resolve_db_path(), DEFAULT_DB_PATH)
+
+    def test_env_override_beats_the_default(self):
+        os.environ[DB_PATH_ENV] = os.path.join("tmp", "isolated.db")
+        self.assertEqual(
+            resolve_db_path(), Path(os.path.join("tmp", "isolated.db"))
+        )
+
+    def test_explicit_argument_beats_the_env_override(self):
+        os.environ[DB_PATH_ENV] = os.path.join("tmp", "isolated.db")
+        self.assertEqual(
+            resolve_db_path(os.path.join("tmp", "explicit.db")),
+            Path(os.path.join("tmp", "explicit.db")),
+        )
+
+    def test_store_uses_the_env_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "from_env.db")
+            os.environ[DB_PATH_ENV] = path
+            store = ChatStore()
+            self.assertEqual(str(store.db_path), path)
+            self.assertTrue(os.path.exists(path))
+
+    def test_store_uses_an_explicit_argument_over_the_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ[DB_PATH_ENV] = os.path.join(tmp, "from_env.db")
+            explicit = os.path.join(tmp, "explicit.db")
+            store = ChatStore(explicit)
+            self.assertEqual(str(store.db_path), explicit)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "from_env.db")))
+
+    def test_task_repository_falls_back_to_the_env_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "tasks.db")
+            os.environ[DB_PATH_ENV] = path
+            repository = TaskRepository()
+            self.assertEqual(str(repository.db_path), path)
+            self.assertTrue(os.path.exists(path))
+
+    def test_task_repository_explicit_argument_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ[DB_PATH_ENV] = os.path.join(tmp, "from_env.db")
+            explicit = os.path.join(tmp, "tasks.db")
+            repository = TaskRepository(explicit)
+            self.assertEqual(str(repository.db_path), explicit)
+
+    def test_invariant_repository_falls_back_to_the_env_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "invariants.db")
+            os.environ[DB_PATH_ENV] = path
+            repository = InvariantRepository()
+            self.assertEqual(str(repository.db_path), path)
+            self.assertTrue(os.path.exists(path))
+
+    def test_invariant_repository_explicit_argument_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ[DB_PATH_ENV] = os.path.join(tmp, "from_env.db")
+            explicit = os.path.join(tmp, "invariants.db")
+            repository = InvariantRepository(explicit)
+            self.assertEqual(str(repository.db_path), explicit)
 
 
 if __name__ == "__main__":

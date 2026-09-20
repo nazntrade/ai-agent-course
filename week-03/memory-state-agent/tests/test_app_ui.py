@@ -1511,6 +1511,31 @@ class ModeAppUiTest(unittest.TestCase):
         open_diagnostics(branch_app)
         self.assertIn("Branches", [item.label for item in branch_app.expander])
 
+    def test_active_chat_button_has_no_marker_and_is_highlighted(self):
+        other_id = self.store.create_chat(AgentConfig())
+        app = self._run(chat_id=self.chat_id)
+
+        active = self._button(app, f"chat_{self.chat_id}")
+        inactive = self._button(app, f"chat_{other_id}")
+        self.assertNotIn("▶", active.label)
+        self.assertNotIn("▶", inactive.label)
+        expected_title = next(
+            chat.title
+            for chat in self.store.list_chats()
+            if chat.id == self.chat_id
+        )
+        self.assertEqual(active.label, expected_title)
+
+        markup = "\n".join(item.value for item in app.markdown)
+        self.assertIn(
+            f'div[class~="st-key-chat_{self.chat_id}"] button', markup
+        )
+        self.assertIn("rgba(46,125,50,0.18)", markup)
+        self.assertIn("rgba(46,125,50,0.75)", markup)
+        # The exact selector must not fall back to a prefix match, otherwise
+        # chat_4 would also style chat_42.
+        self.assertNotIn(f'div[class*="st-key-chat_{self.chat_id}"]', markup)
+
 
 if __name__ == "__main__":
     unittest.main()

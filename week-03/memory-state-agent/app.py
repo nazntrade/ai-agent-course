@@ -844,8 +844,25 @@ with st.sidebar:
 
     chats = store.list_chats()
     rename_id = st.session_state.get("rename_chat_id")
+
+    # Highlight the active chat through the exact widget key class
+    # (`class~=`, not `class*=`: `chat_4` must not match `chat_42`). The active
+    # chat button keeps its plain title; the green state carries the marker.
+    if chat_id is not None:
+        st.markdown(
+            f"""
+            <style>
+            div[class~="st-key-chat_{chat_id}"] button {{
+                background-color: rgba(46,125,50,0.18) !important;
+                border-color: rgba(46,125,50,0.75) !important;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
     for chat in chats:
-        label = f"▶ {chat.title}" if chat.id == chat_id else chat.title
+        label = chat.title
         # Stretch the chat button so long titles shrink and ellipsize inside
         # their own column instead of forcing the row wider and clipping the
         # icons. The two icon buttons form a single right-aligned horizontal

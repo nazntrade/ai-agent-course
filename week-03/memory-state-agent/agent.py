@@ -9,6 +9,7 @@ import os
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -66,13 +67,50 @@ from tokens import estimate_tokens
 BASE_URL = "https://api.deepseek.com"
 API_KEY_ENV = "DEEPSEEK_API_KEY"
 
+# Local/test override of the provider endpoint. The isolated E2E runtime sets
+# both variables to a loopback recording proxy; the owner's real DeepSeek
+# configuration is never read in that mode.
+LLM_BASE_URL_ENV = "MEMORY_AGENT_LLM_BASE_URL"
+LLM_API_KEY_ENV = "MEMORY_AGENT_LLM_API_KEY"
+LLM_API_KEY_PLACEHOLDER = "local-e2e"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer briefly and to the point."
 )
 
 
+def _loopback_host(url) -> bool:
+    """Return ``True`` when the URL points at a loopback host.
+
+    The override is meant for a local server only, so anything else is refused
+    instead of silently sending chat history to a remote endpoint.
+    """
+    try:
+        host = urlsplit(str(url)).hostname
+    except ValueError:
+        return False
+    return host in LOOPBACK_HOSTS
+
+
 def get_client():
-    """Return a DeepSeek API client, or None if the key is not set."""
+    """Return an OpenAI-compatible client, or ``None`` without credentials.
+
+    ``MEMORY_AGENT_LLM_BASE_URL`` is an explicit local override: it must point
+    at a loopback endpoint, and ``load_dotenv()`` is deliberately not called, so
+    the owner's ``.env`` is never read in that mode. Without the override the
+    previous DeepSeek behavior is unchanged, including returning ``None`` when
+    no key is set.
+    """
+    base_url = os.getenv(LLM_BASE_URL_ENV)
+    if base_url:
+        if not _loopback_host(base_url):
+            raise ValueError(
+                f"{LLM_BASE_URL_ENV} must point at a loopback host "
+                f"(127.0.0.1, localhost or ::1), got {base_url!r}"
+            )
+        api_key = os.getenv(LLM_API_KEY_ENV) or LLM_API_KEY_PLACEHOLDER
+        return OpenAI(api_key=api_key, base_url=base_url)
     load_dotenv()
     api_key = os.getenv(API_KEY_ENV)
     if not api_key:

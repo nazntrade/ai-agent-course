@@ -31,7 +31,7 @@ action in the current state (nothing was written in that case).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from agent import ChatAgent
 from invariants import (
@@ -66,6 +66,7 @@ from tasks import (
     ACTION_UNBLOCK,
     API_ERROR_PROVIDER,
     ARTIFACT_TASK_BRIEF,
+    DOMAIN_ACTIONS,
     EVENT_API_ERROR,
     EVENT_BLOCK,
     EVENT_CANCEL,
@@ -86,15 +87,24 @@ from tasks import (
     EXPECTED_RUN_STEP,
     EXPECTED_RUN_VALIDATION,
     InvalidTransitionError,
+    REASON_ALLOWED,
+    REASON_CONFIRMATION_REQUIRED,
+    REASON_INVALID_PAYLOAD,
+    REASON_INVALID_TRANSITION,
+    REASON_NOT_ALLOWED,
+    REASON_RETRY_REQUIRES_API_ERROR,
     STAGE_DONE,
     STAGE_EXECUTION,
     STAGE_PLANNING,
     STAGE_VALIDATION,
     STATUS_CANCELLED,
     Task,
+    TransitionDecision,
     TransitionPayloadError,
     apply_transition,
     can_apply,
+    explain_transition,
+    format_refusal,
     plan_steps,
     ui_actions,
     validate_error_message,
@@ -139,6 +149,12 @@ _STAGE_LLM_ACTIONS = {
     STAGE_VALIDATION: ACTION_RUN_VALIDATION,
 }
 
+# Execution calls attach a bounded read-only storage snapshot (journal events
+# plus the refusal audit) so the model never invents journal data and the same
+# snapshot later validates its reply.
+STEP_FACTS_EVENTS_LIMIT = 20
+STEP_FACTS_REFUSALS_LIMIT = 10
+
 
 @dataclass
 class TaskActionResult:
@@ -162,6 +178,43 @@ class TaskActionResult:
     def ok(self) -> bool:
         """Whether the action completed successfully."""
         return self.status == STATUS_SUCCESS
+
+
+@dataclass
+class TransitionGuardReport:
+    """Read-only snapshot of the transition guard of one task (Day 15).
+
+    ``allowed`` is the current ``can_apply`` set, ``decisions`` explains every
+    domain action and ``refusals`` is the task's append-only refusal audit.
+    Building the report never calls the provider and never writes anything.
+    """
+
+    task: Task | None
+    allowed: tuple = ()
+    decisions: list = field(default_factory=list)
+    refusals: list = field(default_factory=list)
+
+
+@dataclass
+class TransitionProbeResult:
+    """Outcome of one explicit guard probe of a task (Day 15 fix).
+
+    ``allowed`` is ``True`` when the FSM would allow the action. A soft refusal
+    carries its stored ``reason`` plus the ``audit_id`` of the append-only
+    ``task_transition_attempts`` row the production guard wrote; a hard
+    invariant refusal (``STATUS_REFUSED``) grows the invariant journal instead,
+    so it has no audit row and carries only its ``message``; an unknown task
+    carries ``error``. The probe never calls the provider and never changes the
+    task's stage, status, version, current step, events or artifacts.
+    """
+
+    task: Task | None
+    action: str
+    allowed: bool
+    reason: str = ""
+    message: str = ""
+    audit_id: int | None = None
+    error: str | None = None
 
 
 class TaskOrchestrator:
@@ -272,6 +325,95 @@ class TaskOrchestrator:
         domain = can_apply(task, last_event_type=last_event, progress=progress)
         return tuple(domain) + tuple(ui_actions(task))
 
+    def transition_guard_report(self, task_id, *, limit=10) -> TransitionGuardReport:
+        """Explain the allowed actions and the refusal audit of one task.
+
+        Read-only: it reads the task, its progress, the latest journal event and
+        the refusal log, and never calls the provider or writes anything. A
+        missing task yields an empty report so the diagnostics panel can render
+        every selection.
+        """
+        task = self._repository.get_task(task_id)
+        if task is None:
+            return TransitionGuardReport(task=None)
+        progress = self._repository.step_progress(task_id)
+        last_event = self._repository.latest_event_type(task_id)
+        allowed = can_apply(task, last_event_type=last_event, progress=progress)
+        decisions = [
+            explain_transition(
+                task, action, last_event_type=last_event, progress=progress
+            )
+            for action in DOMAIN_ACTIONS
+        ]
+        return TransitionGuardReport(
+            task=task,
+            allowed=tuple(allowed),
+            decisions=decisions,
+            refusals=self._repository.list_transition_attempts(task_id, limit=limit),
+        )
+
+    def probe_refused_transition(
+        self, task_id, action=ACTION_FINISH_EXECUTION
+    ) -> TransitionProbeResult:
+        """Exercise one production transition guard without changing the task.
+
+        The probe runs exactly the production guard (``_guarded``): an allowed
+        action returns ``allowed=True`` and writes nothing, while a soft refusal
+        writes one append-only audit row through the production
+        ``_noop -> _refusal_decision -> _record_refusal`` chain and reports its
+        id. A hard invariant refusal (``STATUS_REFUSED``) is recorded in the
+        invariant journal, not in ``task_transition_attempts``, so ``audit_id``
+        stays ``None`` and the refusal message is returned instead. The provider
+        is never called and stage, status, version, current step and journal are
+        never touched.
+        """
+        task, blocked = self._guarded(task_id, action)
+        if blocked is None:
+            return TransitionProbeResult(
+                task=task,
+                action=action,
+                allowed=True,
+                reason=REASON_ALLOWED,
+            )
+        if blocked.status == STATUS_ERROR:
+            return TransitionProbeResult(
+                task=blocked.task,
+                action=action,
+                allowed=False,
+                error=blocked.error_message or "",
+            )
+        if blocked.status == STATUS_REFUSED:
+            return TransitionProbeResult(
+                task=blocked.task,
+                action=action,
+                allowed=False,
+                message=blocked.error_message or "",
+            )
+
+        # STATUS_NOOP: the production chain already appended the audit row;
+        # read it back instead of fabricating a reason or an id.
+        reason = REASON_NOT_ALLOWED
+        audit_id = None
+        attempts = self._repository.list_transition_attempts(task_id, limit=5)
+        rows = [
+            row for row in attempts if getattr(row, "action", None) == action
+        ]
+        if rows:
+            newest = max(
+                rows,
+                key=lambda row: row.id if row.id is not None else -1,
+            )
+            reason = newest.reason or reason
+            audit_id = newest.id
+        return TransitionProbeResult(
+            task=blocked.task,
+            action=action,
+            allowed=False,
+            reason=reason,
+            message=blocked.error_message or "",
+            audit_id=audit_id,
+        )
+
     # --- Model actions -----------------------------------------------------
 
     def run_planning(self, task_id) -> TaskActionResult:
@@ -302,11 +444,15 @@ class TaskOrchestrator:
         if blocked is not None:
             return blocked
         progress = self._repository.step_progress(task_id)
-        packet, executor, config = self._prepare(task, task.stage, ACTION_RUN_STEP)
+        events, refusals = self._step_fact_sources(task_id)
+        packet, executor, config = self._prepare(
+            task, task.stage, ACTION_RUN_STEP, events=events, refusals=refusals
+        )
         stage_result = executor.run_step(
             packet.messages,
             stream=bool(config.stream) and on_chunk is not None,
             on_chunk=on_chunk,
+            facts=packet.step_facts,
         )
         return self._settle(
             task,
@@ -408,7 +554,7 @@ class TaskOrchestrator:
             task = self._repository.get_task(task_id)
             if task is None:
                 return self._not_found(task_id, ACTION_CANCEL)
-            return self._noop(task, ACTION_CANCEL, "CANCEL requires confirmed=true")
+            return self._noop(task, ACTION_CANCEL, REASON_CONFIRMATION_REQUIRED)
         return self._simple(task_id, ACTION_CANCEL, EVENT_CANCEL, {"confirmed": True})
 
     # --- Retry -------------------------------------------------------------
@@ -431,19 +577,11 @@ class TaskOrchestrator:
             task, last_event_type=last_event, progress=progress
         ):
             return self._noop(
-                task,
-                ACTION_RETRY,
-                "RETRY is allowed only for an active task whose last event "
-                "is API_ERROR",
+                task, ACTION_RETRY, REASON_RETRY_REQUIRES_API_ERROR
             )
         target = self._retry_target(task)
         if target is None:
-            return self._noop(
-                task,
-                ACTION_RETRY,
-                f"Nothing to retry for stage={task.stage}, "
-                f"expected_action={task.expected_action_type}",
-            )
+            return self._noop(task, ACTION_RETRY, REASON_NOT_ALLOWED)
         conflict = find_action_conflict(
             self.applicable_invariants(task_id), target
         )
@@ -492,7 +630,14 @@ class TaskOrchestrator:
             return self._builder.build_context_packet(
                 stage=task.stage, action=ACTION_NONE, task=task
             )
-        packet, _, _ = self._prepare(task, stage, action)
+        events, refusals = (
+            self._step_fact_sources(task.id)
+            if stage == STAGE_EXECUTION
+            else ((), ())
+        )
+        packet, _, _ = self._prepare(
+            task, stage, action, events=events, refusals=refusals
+        )
         return packet
 
     # --- Internals ---------------------------------------------------------
@@ -529,13 +674,15 @@ class TaskOrchestrator:
             )
         return agent, executor
 
-    def _prepare(self, task, stage, action):
+    def _prepare(self, task, stage, action, *, events=(), refusals=()):
         """Build the packet, the executor and the config snapshot for one call."""
         agent, executor = self._session(task.chat_id)
-        packet = self._build_packet(task, agent, stage, action)
+        packet = self._build_packet(
+            task, agent, stage, action, events=events, refusals=refusals
+        )
         return packet, executor, agent.config
 
-    def _build_packet(self, task, agent, stage, action):
+    def _build_packet(self, task, agent, stage, action, *, events=(), refusals=()):
         config = agent.config
         summary = self._load_summary(task.chat_id, agent.active_branch_id)
         return self._builder.build_context_packet(
@@ -561,6 +708,8 @@ class TaskOrchestrator:
             sliding_window_messages=config.sliding_window_messages,
             facts_window_messages=config.facts_window_messages,
             facts=self._load_facts(task.chat_id),
+            events=events,
+            refusals=refusals,
             model=config.model,
         )
 
@@ -577,6 +726,22 @@ class TaskOrchestrator:
     def _load_facts(self, chat_id):
         loader = getattr(self._store, "load_facts", None)
         return loader(chat_id) if loader is not None else []
+
+    def _step_fact_sources(self, task_id) -> tuple:
+        """Return the bounded read-only ``(events, refusals)`` snapshot.
+
+        Execution packets carry at most the last ``STEP_FACTS_EVENTS_LIMIT``
+        events (chronologically) and the newest ``STEP_FACTS_REFUSALS_LIMIT``
+        refusals, so the prompt stays bounded while still containing the real
+        journal ids the validator checks against.
+        """
+        events = self._repository.list_events(task_id)
+        if len(events) > STEP_FACTS_EVENTS_LIMIT:
+            events = events[-STEP_FACTS_EVENTS_LIMIT:]
+        refusals = self._repository.list_transition_attempts(
+            task_id, limit=STEP_FACTS_REFUSALS_LIMIT
+        )
+        return events, refusals
 
     def _task_brief_text(self, task_id) -> str:
         artifacts = self._repository.list_artifacts(task_id, kind=ARTIFACT_TASK_BRIEF)
@@ -605,12 +770,7 @@ class TaskOrchestrator:
         progress = self._repository.step_progress(task_id)
         last_event = self._repository.latest_event_type(task_id)
         if action not in can_apply(task, last_event_type=last_event, progress=progress):
-            return task, self._noop(
-                task,
-                action,
-                f"{action} is not allowed in stage={task.stage}, "
-                f"status={task.status}, expected_action={task.expected_action_type}",
-            )
+            return task, self._noop(task, action)
         conflict = find_action_conflict(
             self.applicable_invariants(task.id), action
         )
@@ -693,7 +853,11 @@ class TaskOrchestrator:
                 progress=progress,
                 last_event_type=last_event,
             )
-        except (InvalidTransitionError, TransitionPayloadError) as exc:
+        except InvalidTransitionError as exc:
+            self._record_transition_refusal(task, action, REASON_INVALID_TRANSITION)
+            return self._error(task, action, ERROR_INVALID_TRANSITION, exc)
+        except TransitionPayloadError as exc:
+            self._record_transition_refusal(task, action, REASON_INVALID_PAYLOAD)
             return self._error(task, action, ERROR_INVALID_TRANSITION, exc)
 
         try:
@@ -748,14 +912,71 @@ class TaskOrchestrator:
         payload["message"] = validate_error_message(stage_result.error or "")
         return payload
 
-    def _noop(self, task, action, message) -> TaskActionResult:
+    def _noop(self, task, action, reason=None) -> TaskActionResult:
+        """A refused (or unknown) action: nothing changed and nothing ran.
+
+        With a known task the decision is explained from the FSM and appended
+        to the refusal audit (best effort); ``reason`` overrides the derived
+        code when the caller knows the specific precondition. A missing task is
+        reported without touching the audit.
+        """
+        if task is None:
+            return TaskActionResult(
+                task=None,
+                action=action,
+                status=STATUS_NOOP,
+                error_kind=ERROR_INVALID_TRANSITION,
+                error_message=reason or "",
+            )
+        decision = self._refusal_decision(task, action, reason)
+        self._record_refusal(task, action, decision)
         return TaskActionResult(
             task=task,
             action=action,
             status=STATUS_NOOP,
             error_kind=ERROR_INVALID_TRANSITION,
-            error_message=message,
+            error_message=decision.message,
         )
+
+    def _refusal_decision(self, task, action, reason=None) -> TransitionDecision:
+        """Explain one action for the task, optionally overriding the reason."""
+        last_event = self._repository.latest_event_type(task.id)
+        progress = self._repository.step_progress(task.id)
+        decision = explain_transition(
+            task, action, last_event_type=last_event, progress=progress
+        )
+        if reason is not None:
+            decision = replace(decision, reason=reason, message="")
+            decision = replace(decision, message=format_refusal(decision))
+        return decision
+
+    def _record_refusal(self, task, action, decision) -> None:
+        """Append the refusal to the Day 15 audit; never break the action."""
+        recorder = getattr(
+            self._repository, "record_transition_attempt", None
+        )
+        if recorder is None or getattr(task, "id", None) is None:
+            return
+        try:
+            recorder(
+                task.id,
+                action,
+                reason=decision.reason,
+                allowed_actions=decision.allowed_actions,
+                from_stage=getattr(task, "stage", None),
+                from_status=getattr(task, "status", None),
+                expected_action_type=getattr(task, "expected_action_type", None),
+            )
+        except Exception:
+            pass
+
+    def _record_transition_refusal(self, task, action, reason) -> None:
+        """Audit a refused commit best-effort; the returned error is unchanged."""
+        try:
+            decision = self._refusal_decision(task, action, reason)
+            self._record_refusal(task, action, decision)
+        except Exception:
+            pass
 
     def _refused(self, task, action, conflict) -> TaskActionResult:
         """A hard invariant refused the action; nothing was done."""

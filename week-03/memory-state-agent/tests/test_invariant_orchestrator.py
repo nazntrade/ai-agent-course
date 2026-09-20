@@ -26,6 +26,7 @@ from task_orchestrator import (
 )
 from task_storage import TaskRepository
 from tasks import (
+    ACTION_PAUSE,
     ACTION_RUN_PLANNING,
     ACTION_RUN_STEP,
     ACTION_RUN_VALIDATION,
@@ -179,6 +180,47 @@ class TransitionConflictTest(OrchestratorTestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(conflicts[0].details["phase"], "commit")
         self.assertEqual(conflicts[0].details["event"], EVENT_PAUSE)
+
+    def test_hard_transition_conflict_writes_no_transition_attempt(self):
+        # A hard invariant refusal is not a transition refusal: it never reaches
+        # the FSM audit, so task_transition_attempts stays empty.
+        self.add_rule(code="INV-BLOCK-PAUSE-AUDIT", guard_events=(EVENT_PAUSE,))
+        orchestrator = self.orchestrator()
+        task = self.new_task()
+
+        result = orchestrator.pause(task.id, reason="stop")
+
+        self.assertEqual(result.status, STATUS_REFUSED)
+        self.assertEqual(self.repo.list_transition_attempts(task.id), [])
+
+    def test_hard_action_conflict_writes_no_transition_attempt(self):
+        self.add_rule(code="INV-BLOCK-PLAN-AUDIT", guard_actions=(ACTION_RUN_PLANNING,))
+        orchestrator = self.orchestrator([plan_response()])
+        task = self.new_task()
+
+        result = orchestrator.run_planning(task.id)
+
+        self.assertEqual(result.status, STATUS_REFUSED)
+        self.assertEqual(self.repo.list_transition_attempts(task.id), [])
+
+    def test_probe_of_a_hard_invariant_refusal_has_no_audit_row(self):
+        # A hard invariant refusal is journaled by the invariant store, not by
+        # the FSM audit: the probe must report the refusal message with no
+        # audit id, and ``task_transition_attempts`` must not grow.
+        self.add_rule(code="INV-BLOCK-PROBE", guard_actions=(ACTION_PAUSE,))
+        orchestrator = self.orchestrator()
+        task = self.new_task()
+        attempts_before = self.repo.list_transition_attempts(task.id)
+
+        probe = orchestrator.probe_refused_transition(task.id, ACTION_PAUSE)
+
+        self.assertFalse(probe.allowed)
+        self.assertIsNone(probe.audit_id)
+        self.assertIsNone(probe.error)
+        self.assertTrue(probe.message)
+        self.assertEqual(
+            self.repo.list_transition_attempts(task.id), attempts_before
+        )
 
     def test_legitimate_validation_is_not_blocked_by_the_seed(self):
         orchestrator = self.orchestrator(

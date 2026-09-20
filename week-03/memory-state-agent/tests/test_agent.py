@@ -6,13 +6,16 @@ import unittest
 from contextlib import closing
 from dataclasses import asdict
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent import (
     AgentConfig,
     ApiContextOverflowError,
     ChatAgent,
     ContextLimitError,
+    get_client,
 )
+import agent
 from context import (
     SUMMARY_MAX_TOKENS,
     SUMMARY_RETRY_MAX_TOKENS,
@@ -2214,6 +2217,78 @@ class CompleteMethodTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             agent.complete([{"role": "user", "content": "x"}])
         self.assertEqual(len(agent.history), 1)
+
+
+class GetClientOverrideTest(unittest.TestCase):
+    """The loopback override of ``get_client`` (isolated local runtime).
+
+    Level U: no network call is made; the returned client is only inspected. The
+    tests prove the override never reads ``.env`` and that the previous DeepSeek
+    behavior is untouched without it.
+    """
+
+    def setUp(self):
+        self._saved = {
+            key: os.environ.get(key)
+            for key in (
+                "DEEPSEEK_API_KEY",
+                "MEMORY_AGENT_LLM_BASE_URL",
+                "MEMORY_AGENT_LLM_API_KEY",
+            )
+        }
+        for key in self._saved:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_without_any_key_returns_none_and_reads_dotenv(self):
+        with patch.object(agent, "load_dotenv") as loader:
+            self.assertIsNone(get_client())
+        loader.assert_called_once_with()
+
+    def test_deepseek_key_keeps_the_previous_base_url(self):
+        os.environ["DEEPSEEK_API_KEY"] = "sk-test"
+        with patch.object(agent, "load_dotenv") as loader:
+            client = get_client()
+        loader.assert_called_once_with()
+        self.assertEqual(str(client.base_url).rstrip("/"), agent.BASE_URL)
+
+    def test_override_points_at_loopback_and_never_reads_dotenv(self):
+        os.environ["MEMORY_AGENT_LLM_BASE_URL"] = "http://127.0.0.1:8080/v1"
+        os.environ["MEMORY_AGENT_LLM_API_KEY"] = "local-e2e"
+        with patch.object(agent, "load_dotenv") as loader:
+            client = get_client()
+        loader.assert_not_called()
+        self.assertEqual(
+            str(client.base_url).rstrip("/"), "http://127.0.0.1:8080/v1"
+        )
+
+    def test_override_uses_a_placeholder_key_when_none_is_set(self):
+        os.environ["MEMORY_AGENT_LLM_BASE_URL"] = "http://localhost:8000/v1"
+        with patch.object(agent, "load_dotenv") as loader:
+            client = get_client()
+        loader.assert_not_called()
+        self.assertEqual(client.api_key, agent.LLM_API_KEY_PLACEHOLDER)
+
+    def test_override_rejects_a_non_loopback_host(self):
+        os.environ["MEMORY_AGENT_LLM_BASE_URL"] = "https://api.deepseek.com"
+        with patch.object(agent, "load_dotenv") as loader:
+            with self.assertRaises(ValueError):
+                get_client()
+        loader.assert_not_called()
+
+    def test_override_wins_over_a_deepseek_key_without_reading_it(self):
+        os.environ["DEEPSEEK_API_KEY"] = "sk-test"
+        os.environ["MEMORY_AGENT_LLM_BASE_URL"] = "http://127.0.0.1:9000/v1"
+        with patch.object(agent, "load_dotenv") as loader:
+            client = get_client()
+        loader.assert_not_called()
+        self.assertNotIn("deepseek", str(client.base_url).lower())
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ opens a fresh connection so the store is safe to reuse across Streamlit reruns.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -38,6 +39,26 @@ DEFAULT_CHAT_TITLE = "New chat"
 # first-message title just like ``DEFAULT_CHAT_TITLE``.
 LEGACY_CHAT_TITLES = ("Новый чат",)
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "chat_history.db"
+
+# Isolated runtime/test override of the database file. An explicitly passed path
+# always wins, so every existing call site keeps its current behavior.
+DB_PATH_ENV = "MEMORY_AGENT_DB_PATH"
+
+
+def resolve_db_path(db_path=None) -> Path:
+    """Resolve the database path: explicit argument, env override, default.
+
+    The order matters for isolation: the E2E runtime passes
+    ``MEMORY_AGENT_DB_PATH`` so a temporary database is used and the owner's
+    working file is never opened.
+    """
+    if db_path is not None:
+        return Path(db_path)
+    env_path = os.getenv(DB_PATH_ENV)
+    if env_path:
+        return Path(env_path)
+    return DEFAULT_DB_PATH
+
 
 # A fresh database starts with two contrastive demo profiles. They are ordinary
 # editable rows, never special-cased by the UI or the agent, and the marker
@@ -397,8 +418,8 @@ class TurnRecord:
 class ChatStore:
     """SQLite-backed store for chats, messages, turns and last-selected state."""
 
-    def __init__(self, db_path=DEFAULT_DB_PATH):
-        self._db_path = Path(db_path)
+    def __init__(self, db_path=None):
+        self._db_path = resolve_db_path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
