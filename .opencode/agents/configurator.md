@@ -1,6 +1,8 @@
 ---
 description: "Конфигуратор: изменяет защищённые конфигурационные файлы и сервисные скрипты по GOVERNANCE-задаче Coordinator; прямой вызов пользователем допустим только как явно описанное bootstrap-исключение."
 mode: subagent
+model: deepseek/deepseek-flash
+variant: high
 permission:
   edit:
     "*": deny
