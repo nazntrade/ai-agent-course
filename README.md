@@ -7,11 +7,13 @@
 - `week-01/llm-api-project` — развивающийся проект первой недели: запросы к LLM через DeepSeek API и локальную модель (Дни 1–5).
 - `week-02/first-agent` — развивающийся проект второй недели «Первый агент»: агент как отдельная сущность с инкапсулированной историей диалога, DeepSeek API, Streamlit-интерфейсом, хранением контекста в SQLite и управлением контекстом (пять стратегий на уровне чата: полная история, сводка, скользящее окно, Sticky Facts и ветвление).
 - `week-03/memory-state-agent` — проект третьей недели «Memory State Agent»: явное продолжение финальной Week 2 с английским интерфейсом и явными слоями памяти (Short-term, Working, Long-term), ручными операциями Add/Edit/Promote/Forget/Include in prompt, инвариантами и наследованием слоёв при ветвлении.
+- `week-04/day-16-mcp-agent` — проект четвёртой недели «MCP Agent»: вторая половина архитектуры агента — работа с инструментами по стандартному протоколу MCP. Отдельный MCP-сервер процессом (loopback, Streamable HTTP, endpoint `/mcp`) с read-only инструментами `calculate` и `get_server_info`, CLI discovery, FastAPI-backend (health, статус MCP, список инструментов, SSE-чат) и браузерный чат без сборки и CDN; локальная OpenAI-compatible модель сама выбирает инструмент. Есть trace в JSONL с санитайзером, harness реального lifecycle и live E2E «модель → MCP-инструмент → модель»; переиспользует общий `qa/`-runtime.
 - `qa/` — общий переиспользуемый runtime изолированного Local LLM + browser E2E: единственная точка входа `qa\run_local_e2e.bat`, режимы `AUTO`/`LOCAL`/`MOCK`/`NETWORK` и `TESTS`, первая интеграция — Day 15 проекта `week-03/memory-state-agent`. Подробности — в README недельного проекта.
 
 | День | Тема | Ссылка | Статус |
 |---|---|---|---|
 | День 11 | Модель памяти агента | [Описание](week-03/memory-state-agent/README.md) | PASS |
+| День 16 | Локальный MCP-агент | [Описание](week-04/day-16-mcp-agent/README.md) | PASS |
 
 ## Агентская разработка
 
