@@ -1,0 +1,21 @@
+# Runtime dependencies of week-04/day-16-mcp-agent.
+#
+# Pinned to the exact versions installed by the first successful `setup.bat`
+# run on the target machine (Python 3.12). The MCP SDK is still evolving, so
+# the installed version and its API are also checked by
+# tests/test_sdk_contract.py. Transitive dependencies stay unpinned.
+#
+# mcp is pinned to 2.x: the code uses the v2 API (`Client`, `MCPServer`,
+# snake_case result fields, per-request `read_timeout_seconds`). v2 is the
+# current stable line and speaks the 2026-07-28 protocol revision.
+mcp==2.2.0
+# mcp-types is imported directly (`from mcp_types import REQUEST_TIMEOUT` in
+# agent/mcp_adapter.py), so it is a direct dependency, not just the transitive
+# pin that mcp==2.2.0 happens to require.
+mcp-types==2.2.0
+fastapi==0.141.1
+uvicorn==0.53.0
+openai==3.17.0
+python-dotenv==1.2.3
+httpx==0.28.1
+playwright==1.63.0

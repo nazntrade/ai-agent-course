@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Day 16 MCP Agent</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Day 16 MCP Agent</h1>
+      <p class="subtitle">
+        Local model &middot; real MCP server (Streamable HTTP) &middot; streamed chat
+      </p>
+    </header>
+
+    <main class="layout">
+      <section class="panel chat" aria-label="Chat">
+        <div class="panel-head">
+          <h2>Chat</h2>
+          <button id="clear-button" type="button" class="ghost">Clear session</button>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chat-form" class="composer" autocomplete="off">
+          <label class="visually-hidden" for="message-input">Message</label>
+          <textarea
+            id="message-input"
+            rows="2"
+            placeholder="Ask something, for example: What is 23 multiplied by 17?"
+            maxlength="8000"
+          ></textarea>
+          <button id="send-button" type="submit">Send</button>
+        </form>
+        <p class="hint">Enter sends the message, Shift+Enter adds a new line.</p>
+      </section>
+
+      <aside class="panel status" aria-label="MCP status">
+        <div class="panel-head">
+          <h2>MCP status</h2>
+          <button id="refresh-button" type="button" class="ghost">Refresh</button>
+        </div>
+        <div id="mcp-status" class="status-body">
+          <p class="muted">Checking the MCP server&hellip;</p>
+        </div>
+      </aside>
+    </main>
+
+    <script src="/markdown-render.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
