@@ -1,7 +1,7 @@
 ---
 description: Основной агент, принимающий обычные задания пользователя. Маршрутизирует разработку в developer, архитектурные решения в architect, приёмку — в tester; сам редактирует только README.
 mode: primary
-model: llama-server/qwen3.8-27b-iq4xs
+model: llama-server/qwen3.8-27b-local
 steps: 60
 temperature: 0.2
 permission:

@@ -15,8 +15,8 @@
         "apiKey": "{env:OPENCODE_LOCAL_LLM_API_KEY}"
       },
       "models": {
-        "qwen3.8-27b-iq4xs": {
-          "name": "Qwen3 27B (local)",
+        "qwen3.8-27b-local": {
+          "name": "Qwen3.8 27B (local)",
           "tool_call": true
         }
       }

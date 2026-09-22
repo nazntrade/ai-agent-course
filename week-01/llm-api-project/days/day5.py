@@ -58,9 +58,9 @@ LOCAL_SERVER_HINT = (
 DAY5_MODELS = [
     {
         "key": "qwen_local",
-        "label": "Qwen3.8 27B IQ4_XS (локальная)",
+        "label": "Qwen3.8 27B (локальная)",
         "kind": "local",
-        "model": "qwen3.8-27b-iq4xs",
+        "model": "qwen3.8-27b-local",
         "base_url": "http://127.0.0.1:8080/v1",
         "api_key_env": "LOCAL_LLM_API_KEY",
         "thinking_disabled": False,

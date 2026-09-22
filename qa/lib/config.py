@@ -41,7 +41,7 @@ LOCAL_ENV_KEYS = (
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
 # Fallback model id used only when neither the configuration nor the running
 # endpoint advertises one; it is not a secret and stays in tracked code.
-DEFAULT_LOCAL_MODEL = "qwen3.8-27b-iq4xs"
+DEFAULT_LOCAL_MODEL = "qwen3.8-27b-local"
 DEFAULT_API_KEY = "local-e2e"
 DEFAULT_READINESS_SECONDS = 90
 # Budget of a live browser scenario. A real 27B local model may need ~72 s just
