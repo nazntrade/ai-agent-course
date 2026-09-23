@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 
 from mcp import Client
 
+from mcp_server import web_search
 from mcp_server.server import MCPServer
 
 
@@ -111,6 +113,66 @@ class InProcessMcpTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "ok")
         for forbidden in ("env", "path", "api_key", "token"):
             self.assertNotIn(forbidden, payload)
+
+
+class InProcessSearchWebTest(unittest.IsolatedAsyncioTestCase):
+    """``search_web`` is advertised and served through the real SDK surface."""
+
+    def _server(self) -> MCPServer:
+        return MCPServer(host="127.0.0.1", port=0)
+
+    async def test_tool_is_listed_with_a_query_required_schema(self):
+        server = self._server()
+        async with Client(server.app) as client:
+            result = await client.list_tools()
+        names = [tool.name for tool in result.tools]
+        self.assertIn("search_web", names)
+        tool = next(tool for tool in result.tools if tool.name == "search_web")
+        schema = tool.input_schema
+        self.assertEqual(schema.get("type"), "object")
+        properties = schema.get("properties", {})
+        self.assertIn("query", properties)
+        self.assertEqual(properties["query"].get("type"), "string")
+        self.assertEqual(properties["max_results"].get("type"), "integer")
+        self.assertEqual(set(schema.get("required", [])), {"query"})
+
+    async def test_structured_success_has_no_secrets(self):
+        payload = {
+            "query": "cats",
+            "count": 1,
+            "results": [
+                {
+                    "title": "Docs",
+                    "url": "https://docs.example.test/1",
+                    "description": "snippet",
+                }
+            ],
+            "more_results_available": False,
+            "note": web_search.SEARCH_NOTE,
+        }
+        service = mock.Mock()
+        service.search.return_value = payload
+        server = self._server()
+        with mock.patch.object(web_search, "default_service", return_value=service):
+            async with Client(server.app) as client:
+                result = await client.call_tool("search_web", {"query": "cats"})
+        self.assertFalse(_is_error(result))
+        self.assertEqual(_payload(result)["results"][0]["url"], payload["results"][0]["url"])
+        raw = _content_text(result)
+        for marker in ("api_key", "token", "authorization", "subscription"):
+            self.assertNotIn(marker, raw.lower())
+
+    async def test_search_error_is_a_controlled_tool_error(self):
+        service = mock.Mock()
+        service.search.side_effect = web_search.SearchError(
+            "not_configured", web_search.NOT_CONFIGURED_MESSAGE
+        )
+        server = self._server()
+        with mock.patch.object(web_search, "default_service", return_value=service):
+            async with Client(server.app) as client:
+                result = await client.call_tool("search_web", {"query": "cats"})
+        self.assertTrue(_is_error(result))
+        self.assertIn("not configured", _content_text(result))
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run

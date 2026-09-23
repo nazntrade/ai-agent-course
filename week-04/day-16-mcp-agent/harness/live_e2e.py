@@ -62,6 +62,7 @@ ensure_paths()
 
 from agent.mcp_adapter import inspect_tools  # noqa: E402
 from agent.settings import DEFAULT_MODEL_NAME  # noqa: E402
+from tests.support.fake_search import FAKE_API_KEY, RESULT_URLS, FakeSearchServer  # noqa: E402
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -76,6 +77,13 @@ BACKEND_READY_TIMEOUT_SECONDS = 60.0
 QUESTION = "What is 23 multiplied by 17?"
 EXPECTED_ANSWER = "391"
 EXPECTED_TOOL = "calculate"
+
+# The web-search scenario asks the model to use the online search tool. The
+# fake search API returns deterministic links under this prefix, so the answer
+# can be checked for real tool output without opening any page.
+SEARCH_QUESTION = "Find the official Python documentation online and give me the links."
+SEARCH_EXPECTED_TOOL = "search_web"
+SEARCH_EXPECTED_PREFIX = "https://docs.example.test/"
 
 # Each step is ``(event name, expected fields, non-empty fields)``. A missing
 # expected field is a mismatch: an event that merely shares a name is not proof
@@ -92,7 +100,20 @@ REQUIRED_TRACE_CHAIN = (
     ("request_done", {"ok": True}, ()),
 )
 
+# Same ordered chain for the search scenario, with ``search_web`` as the tool.
+SEARCH_TRACE_CHAIN = (
+    ("mcp_connect", {"ok": True}, ()),
+    ("mcp_list_tools", None, ()),
+    ("model_request", {"phase": "tool_selection"}, ()),
+    ("tool_selected", {"tool": SEARCH_EXPECTED_TOOL}, ()),
+    ("tool_completed", {"tool": SEARCH_EXPECTED_TOOL, "ok": True}, ("result",)),
+    ("model_request", {"phase": "final_answer"}, ()),
+    ("request_done", {"ok": True}, ()),
+)
+
 NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+# Bare http(s) URLs of the streamed answer, for the search-source diagnostics.
+URL_RE = re.compile(r"""https?://[^\s)\]"'>]+""", re.IGNORECASE)
 
 
 def _mcp_ready(url: str, timeout: float) -> bool:
@@ -216,6 +237,26 @@ def read_trace(path: Path) -> list:
     return records
 
 
+def _read_text(path) -> str:
+    """Read a text artifact, or an empty string when it is missing."""
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def key_is_isolated(key: str, artifacts) -> bool:
+    """Whether ``key`` is absent from every observable artifact (D17-07).
+
+    ``artifacts`` is any iterable of strings: the streamed answer, the JSONL
+    trace, the MCP server log and the backend log. ``True`` means the search key
+    never left the MCP process. An empty key is trivially isolated.
+    """
+    if not key:
+        return True
+    return all(key not in (text or "") for text in artifacts)
+
+
 def _matches(record: dict, fields) -> tuple[bool, str]:
     """Return whether ``record`` satisfies ``fields`` and the first problem.
 
@@ -243,8 +284,13 @@ def _empty_field(record: dict, names) -> str:
     return ""
 
 
-def verify_trace(records: list, request_id: str | None) -> dict:
-    """Check the ordered tool-call chain of one request in the trace."""
+def verify_trace(records: list, request_id: str | None, chain=None) -> dict:
+    """Check the ordered tool-call chain of one request in the trace.
+
+    ``chain`` defaults to the arithmetic chain so existing callers keep their
+    behaviour; the search scenario passes :data:`SEARCH_TRACE_CHAIN`.
+    """
+    required_chain = REQUIRED_TRACE_CHAIN if chain is None else chain
     scoped = [
         record
         for record in records
@@ -259,7 +305,7 @@ def verify_trace(records: list, request_id: str | None) -> dict:
 
     position = 0
     matched: list = []
-    for name, fields, non_empty in REQUIRED_TRACE_CHAIN:
+    for name, fields, non_empty in required_chain:
         found = False
         problem = ""
         while position < len(scoped):
@@ -318,6 +364,74 @@ def verify_sse(events: list) -> dict:
         "events": names,
         "answer_found": EXPECTED_ANSWER in text,
         "answer_matches": bool(numbers),
+        "text_chars": len(text),
+        "errors": errors,
+        "done": done,
+    }
+
+
+def verify_tools_listed(records: list, request_id: str | None, tool_name: str) -> dict:
+    """Check that ``tools/list`` in the trace advertised ``tool_name``.
+
+    ``verify_trace`` proves the event exists; this proves the server actually
+    offered the searched tool, which is the precondition of the search chain.
+    """
+    scoped = [
+        record
+        for record in records
+        if record.get("event") == "mcp_list_tools"
+        and (request_id is None or record.get("request_id") == request_id)
+    ]
+    names: list = []
+    for record in scoped:
+        value = record.get("tool_names")
+        if isinstance(value, list):
+            names = [str(item) for item in value]
+            break
+    return {"ok": tool_name in names, "tool": tool_name, "tool_names": names}
+
+
+def verify_search_sse(events: list, expected_urls) -> dict:
+    """Check the SSE order and that the answer cites at least two tool links."""
+    names = [name for name, _ in events]
+    text = "".join(
+        str(data.get("text") or "") for name, data in events if name == "delta"
+    )
+    errors = [data for name, data in events if name == "error"]
+    done = [data for name, data in events if name == "done"]
+
+    def ordered(first: str, second: str) -> bool:
+        try:
+            return names.index(first) < names.index(second)
+        except ValueError:
+            return False
+
+    # The browser normalizes the host case, so compare case-insensitively: a
+    # link the model wrote as ``HTTPS://Docs.Example.Test/1`` still points at
+    # the tool URL. Any other occurrence is recorded for diagnostics only.
+    text_lower = text.lower()
+    found = sorted({url for url in expected_urls if url.lower() in text_lower})
+    observed = sorted(
+        {
+            match.group(0).strip(".,;")
+            for match in URL_RE.finditer(text)
+            if "example.test" in match.group(0).lower()
+        }
+    )
+    ok = (
+        not errors
+        and bool(done)
+        and ordered("tool_call", "tool_result")
+        and ordered("tool_result", "delta")
+        and ordered("delta", "done")
+        and len(found) >= 2
+    )
+    return {
+        "ok": ok,
+        "events": names,
+        "urls_found": found,
+        "urls_observed": observed,
+        "url_count": len(found),
         "text_chars": len(text),
         "errors": errors,
         "done": done,
@@ -483,16 +597,153 @@ def run_ui_e2e(url: str, run_dir: Path, report: dict) -> str:
             pass
 
 
-def run(ui: bool = False) -> int:
+def run_ui_search_e2e(url: str, run_dir: Path, report: dict) -> str:
+    """Drive the search scenario through the system browser; return the status.
+
+    The answer must render at least two real anchor tags from the tool result,
+    with the technical details collapsed and the loader gone.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "BLOCKED"
+
+    shot = run_dir / "screenshots" / "01_chat_search.png"
+    manager = None
+    browser = None
+    page_errors: list = []
+    console_errors: list = []
+    try:
+        manager = sync_playwright().start()
+        browser, channel = qa_browser.launch_browser(manager, headless=True)
+        report["ui_channel"] = channel
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.set_default_timeout(60000)
+        page = context.new_page()
+
+        def on_page_error(error):
+            page_errors.append(f"{type(error).__name__}: {error}")
+
+        def on_console(message):
+            if message.type == "error":
+                console_errors.append(message.text)
+
+        page.on("pageerror", on_page_error)
+        page.on("console", on_console)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_selector("#message-input", timeout=30000)
+
+        try:
+            page.wait_for_selector(".pill.ok", timeout=30000)
+            report["ui_mcp_connected"] = True
+        except Exception:  # noqa: BLE001 - the status panel may be slow
+            report["ui_mcp_connected"] = False
+
+        page.fill("#message-input", SEARCH_QUESTION)
+        page.click("#send-button")
+
+        loader_seen = False
+        try:
+            page.wait_for_selector(".loader", timeout=5000)
+            loader_seen = True
+        except Exception:  # noqa: BLE001 - the loader is short-lived
+            loader_seen = False
+        report["ui_loader_seen"] = loader_seen
+
+        # The tool URLs live in the anchor ``href`` (Markdown links), not in the
+        # visible text, so wait for rendered anchors instead of the URL string.
+        page.wait_for_function(
+            """() => {
+                return document.querySelectorAll(
+                    '.bubble.assistant .text a[href^="https://docs.example.test/"]'
+                ).length >= 2;
+            }""",
+            timeout=900000,
+        )
+        ui_checks = page.evaluate(
+            """() => {
+                const bubbles = Array.from(document.querySelectorAll(".bubble.assistant"));
+                const withText = bubbles.filter((b) => b.querySelector(".text"));
+                const answer = withText[withText.length - 1];
+                if (!answer) {
+                    return { answer: false };
+                }
+                const details = answer.querySelector("details.technical");
+                const anchors = Array.from(answer.querySelectorAll(".text a"));
+                const valid = anchors.filter((anchor) =>
+                    (anchor.getAttribute("href") || "").startsWith(
+                        "https://docs.example.test/"
+                    )
+                );
+                const linesOutside = Array.from(
+                    document.querySelectorAll(".tool-line")
+                ).filter((line) => !line.closest("details.technical"));
+                return {
+                    answer: true,
+                    details: !!details,
+                    details_open: details ? details.open : null,
+                    loader: !!answer.querySelector(".loader"),
+                    anchor_count: anchors.length,
+                    valid_anchor_count: valid.length,
+                    hrefs: anchors.map((anchor) => anchor.getAttribute("href")),
+                    tool_lines_outside: linesOutside.length,
+                    assistant_bubbles: bubbles.length,
+                };
+            }"""
+        )
+        report["ui_checks"] = ui_checks
+        ui_ok = (
+            bool(ui_checks.get("answer"))
+            and bool(ui_checks.get("details"))
+            and ui_checks.get("details_open") is False
+            and ui_checks.get("tool_lines_outside") == 0
+            and not ui_checks.get("loader")
+            and ui_checks.get("anchor_count", 0) >= 2
+            and ui_checks.get("valid_anchor_count", 0) >= 2
+            and ui_checks.get("assistant_bubbles") == 1
+            and not page_errors
+        )
+        report["ui_answer_visible"] = bool(ui_checks.get("answer"))
+        qa_browser.screenshot(page, shot)
+        context.close()
+        return "PASS" if ui_ok else "FAIL"
+    except qa_browser.PrerequisiteError as exc:
+        report["ui_error"] = str(exc)
+        return "BLOCKED"
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    finally:
+        report["ui_page_errors"] = page_errors
+        report["ui_console_errors"] = console_errors
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            if manager is not None:
+                manager.stop()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
+def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     """Execute the live E2E scenario and return its exit code."""
+    is_search = str(scenario or "arithmetic").strip().lower() == "search"
+    question = SEARCH_QUESTION if is_search else QUESTION
+    chain = SEARCH_TRACE_CHAIN if is_search else REQUIRED_TRACE_CHAIN
+    session_id = "live-e2e-search" if is_search else "live-e2e"
+
     mcp_port = int(os.environ.get("MCP_TEST_PORT") or DEFAULT_MCP_TEST_PORT)
     backend_port = int(os.environ.get("BACKEND_TEST_PORT") or DEFAULT_BACKEND_TEST_PORT)
 
-    run_dir = create_run_dir("live-e2e")
+    run_dir = create_run_dir("live-e2e-search" if is_search else "live-e2e")
     report: dict = {
-        "scenario": "live-e2e",
-        "question": QUESTION,
-        "expected_answer": EXPECTED_ANSWER,
+        "scenario": "live-e2e-search" if is_search else "live-e2e",
+        "question": question,
+        "expected_answer": "" if is_search else EXPECTED_ANSWER,
+        "expected_tool": chain[3][1]["tool"],
         "ui_requested": bool(ui),
     }
 
@@ -524,19 +775,41 @@ def run(ui: bool = False) -> int:
 
     mcp_process: ManagedProcess | None = None
     backend_process: ManagedProcess | None = None
+    fake_search: FakeSearchServer | None = None
     cleanup: list = []
     exit_code = EXIT_FAIL
     live_status = "FAIL"
     ui_status = "NOT_REQUESTED"
 
     try:
+        mcp_env = {
+            "MCP_SERVER_HOST": "127.0.0.1",
+            "MCP_SERVER_PORT": str(mcp_port),
+            # The harness always isolates the MCP child from a local .env. In
+            # the arithmetic scenario this prevents an accidental real search
+            # call; the search scenario passes an explicit fake API below.
+            "MCP_LOAD_DOTENV": "0",
+        }
+        if is_search:
+            fake_search = FakeSearchServer(0).start()
+            report["fake_search"] = {"loopback_port": fake_search.port}
+            # The key lives only in the MCP child process; the harness keeps the
+            # deterministic fake API on loopback and never reads the real one.
+            mcp_env.update(
+                {
+                    "MCP_SEARCH_API_KEY_ENV": "TAVILY_API_KEY",
+                    "TAVILY_API_KEY": FAKE_API_KEY,
+                    "MCP_SEARCH_BASE_URL": fake_search.base_url,
+                    "MCP_SEARCH_TIMEOUT_SECONDS": "3",
+                    "MCP_SEARCH_MAX_RESULTS": "5",
+                }
+            )
+
         mcp_process = ManagedProcess(
             name="mcp-server",
             args=python_module("mcp_server"),
             cwd=PROJECT_DIR,
-            env=sanitized_env(
-                {"MCP_SERVER_HOST": "127.0.0.1", "MCP_SERVER_PORT": str(mcp_port)}
-            ),
+            env=sanitized_env(mcp_env),
             log_path=run_dir / "mcp_server.log",
         ).start()
         cleanup.append(mcp_process)
@@ -578,34 +851,68 @@ def run(ui: bool = False) -> int:
 
         events = collect_sse(
             f"{backend_url}/api/chat/stream",
-            {"session_id": "live-e2e", "message": QUESTION},
+            {"session_id": session_id, "message": question},
             timeout_s=1800.0,
         )
-        sse = verify_sse(events)
+        sse = (
+            verify_search_sse(events, RESULT_URLS)
+            if is_search
+            else verify_sse(events)
+        )
         report["sse"] = sse
 
         records = read_trace(run_dir / "trace.jsonl")
-        trace = verify_trace(records, None)
+        trace = verify_trace(records, None, chain)
         report["trace"] = trace
         report["trace_events"] = [
             {key: record.get(key) for key in ("event", "phase", "tool", "ok") if key in record}
             for record in records
         ]
 
-        ok = bool(sse["ok"]) and bool(trace["ok"])
+        tools_listed = {"ok": True, "tool": None, "tool_names": []}
+        if is_search:
+            tools_listed = verify_tools_listed(records, None, SEARCH_EXPECTED_TOOL)
+            report["tools_listed"] = tools_listed
+
+        key_isolation = None
+        if is_search:
+            sse_text = "".join(
+                str(data.get("text") or "") for name, data in events if name == "delta"
+            )
+            key_isolation = key_is_isolated(
+                FAKE_API_KEY,
+                (
+                    sse_text,
+                    _read_text(run_dir / "trace.jsonl"),
+                    _read_text(run_dir / "mcp_server.log"),
+                    _read_text(run_dir / "backend.log"),
+                ),
+            )
+            # The verdict is stored, never the key itself.
+            report["key_isolation"] = key_isolation
+
+        ok = bool(sse["ok"]) and bool(trace["ok"]) and bool(tools_listed["ok"])
+        if key_isolation is False:
+            ok = False
         live_status = "PASS" if ok else "FAIL"
         report["live_llm_status"] = live_status
         print(f"LIVE_LLM_STATUS: {live_status}")
         if not ok:
             print("  sse: " + json.dumps(sse, ensure_ascii=False))
             print("  trace: " + json.dumps(trace, ensure_ascii=False))
+            print("  tools: " + json.dumps(tools_listed, ensure_ascii=False))
+            if key_isolation is False:
+                print("  key_isolation: FAIL - the search key leaked into an artifact")
             print((backend_process.tail_log() or "")[-2000:])
             exit_code = EXIT_FAIL
         else:
             exit_code = EXIT_OK
 
         if ui:
-            ui_status = run_ui_e2e(backend_url, run_dir, report)
+            if is_search:
+                ui_status = run_ui_search_e2e(backend_url, run_dir, report)
+            else:
+                ui_status = run_ui_e2e(backend_url, run_dir, report)
             print(f"UI_E2E_STATUS: {ui_status}")
             report["ui_e2e_status"] = ui_status
         report["status"] = "pass" if exit_code == EXIT_OK else "fail"
@@ -618,6 +925,8 @@ def run(ui: bool = False) -> int:
     finally:
         for process in reversed(cleanup):
             report.setdefault("stopped", []).append(process.stop())
+        if fake_search is not None:
+            fake_search.stop()
         if launcher is not None:
             report["local_llm"]["stop"] = launcher.stop()
         report.setdefault("live_llm_status", live_status)
@@ -631,9 +940,15 @@ def main(argv=None) -> int:
     """Entry point of ``harness/live_e2e.py``."""
     parser = argparse.ArgumentParser(prog="live_e2e")
     parser.add_argument("--ui", action="store_true", help="also run the UI E2E")
+    parser.add_argument(
+        "--scenario",
+        choices=("arithmetic", "search"),
+        default=str(os.environ.get("LIVE_E2E_SCENARIO") or "arithmetic"),
+        help="which live scenario to run (default: arithmetic)",
+    )
     args = parser.parse_args(argv)
     ui = bool(args.ui or str(os.environ.get("RUN_UI_E2E") or "").strip() == "1")
-    return run(ui=ui)
+    return run(ui=ui, scenario=args.scenario)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

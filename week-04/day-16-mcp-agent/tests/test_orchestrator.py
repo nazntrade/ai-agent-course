@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent.mcp_adapter import McpCallResult, McpError
 from agent.orchestrator import (
+    SYSTEM_PROMPT,
     DeltaEvent,
     DoneEvent,
     ErrorEvent,
@@ -39,6 +40,26 @@ async def _collect(orchestrator, request_id, session, message):
 
 def _names(events):
     return [event.name for event in events]
+
+
+class SystemPromptTest(unittest.TestCase):
+    """The prompt tells the model to search and not to overclaim (D17-11)."""
+
+    def test_prompt_requires_search_web_for_online_requests(self):
+        self.assertIn("search_web", SYSTEM_PROMPT)
+        self.assertIn("find something online", SYSTEM_PROMPT)
+
+    def test_prompt_forbids_claiming_pages_were_read(self):
+        self.assertIn("snippets", SYSTEM_PROMPT.lower())
+        self.assertIn("never", SYSTEM_PROMPT.lower())
+        self.assertIn("pages", SYSTEM_PROMPT)
+        self.assertIn("invent", SYSTEM_PROMPT)
+
+    def test_prompt_requires_markdown_sources(self):
+        self.assertIn("Markdown links", SYSTEM_PROMPT)
+
+    def test_prompt_keeps_the_arithmetic_instruction(self):
+        self.assertIn("calculate", SYSTEM_PROMPT)
 
 
 class HappyPathTest(unittest.IsolatedAsyncioTestCase):

@@ -122,6 +122,22 @@ body {
   font-size: 0.85rem;
 }
 
+/* Chat answer links: the dark panel makes the browser default blue unreadable.
+   The rule is independent of the container class and covers every link state
+   (:link, :visited) so the browser's own colours can never win. */
+a,
+a:link,
+a:visited {
+  color: #dbeafe;
+  text-decoration: underline dashed;
+  text-underline-offset: 2px;
+}
+
+a:hover,
+a:focus-visible {
+  color: #ffffff;
+}
+
 .tool-line {
   font-size: 0.82rem;
   color: var(--muted);

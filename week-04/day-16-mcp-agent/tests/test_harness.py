@@ -8,7 +8,13 @@ import subprocess
 import sys
 import unittest
 
-from harness.live_e2e import verify_trace
+from harness.live_e2e import (
+    SEARCH_TRACE_CHAIN,
+    key_is_isolated,
+    verify_search_sse,
+    verify_tools_listed,
+    verify_trace,
+)
 from harness.mcp_unavailable_e2e import (
     duplicate_sentences,
     error_text_problems,
@@ -174,6 +180,145 @@ class LiveTraceVerificationTest(unittest.TestCase):
         self.assertIn("tool", result["reason"])
 
 
+class SearchHarnessVerificationTest(unittest.TestCase):
+    """The search scenario's trace chain and SSE check (D17-09/D17-10 logic).
+
+    The real LIVE run needs a running model and the missing ``test.bat search``
+    mode; these unit checks keep the verification logic itself covered.
+    """
+
+    @staticmethod
+    def _search_records() -> list:
+        return [
+            {"event": "request_start", "request_id": "r1"},
+            {"event": "mcp_connect", "request_id": "r1", "ok": True},
+            {
+                "event": "mcp_list_tools",
+                "request_id": "r1",
+                "tools_count": 3,
+                "tool_names": ["calculate", "get_server_info", "search_web"],
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "tool_selection"},
+            {"event": "tool_selected", "request_id": "r1", "tool": "search_web"},
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "tool": "search_web",
+                "ok": True,
+                "result": {"query": "cats", "count": 2, "results": ["<omitted>"]},
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "final_answer"},
+            {"event": "request_done", "request_id": "r1", "ok": True},
+        ]
+
+    def test_search_chain_passes(self):
+        result = verify_trace(self._search_records(), "r1", SEARCH_TRACE_CHAIN)
+        self.assertTrue(result["ok"], msg=result)
+        self.assertIn("tool_completed", result["matched"])
+
+    def test_arithmetic_chain_rejects_the_search_tool(self):
+        result = verify_trace(self._search_records(), "r1")
+        self.assertFalse(result["ok"])
+        self.assertIn("tool_selected", result["reason"])
+
+    def test_sse_requires_two_tool_urls(self):
+        urls = ("https://docs.example.test/1", "https://docs.example.test/2")
+        events = [
+            ("tool_call", {"tool": "search_web"}),
+            ("tool_result", {"tool": "search_web", "ok": True}),
+            ("delta", {"text": f"[a]({urls[0]}) and [b]({urls[1]})"}),
+            ("done", {"ok": True}),
+        ]
+        result = verify_search_sse(events, urls)
+        self.assertTrue(result["ok"], msg=result)
+        self.assertEqual(result["url_count"], 2)
+
+    def test_sse_with_one_url_fails(self):
+        urls = ("https://docs.example.test/1", "https://docs.example.test/2")
+        events = [
+            ("tool_call", {"tool": "search_web"}),
+            ("tool_result", {"tool": "search_web", "ok": True}),
+            ("delta", {"text": f"[a]({urls[0]})"}),
+            ("done", {"ok": True}),
+        ]
+        self.assertFalse(verify_search_sse(events, urls)["ok"])
+
+    def test_sse_url_match_is_case_insensitive(self):
+        urls = ("https://docs.example.test/1", "https://docs.example.test/2")
+        events = [
+            ("tool_call", {"tool": "search_web"}),
+            ("tool_result", {"tool": "search_web", "ok": True}),
+            (
+                "delta",
+                {
+                    "text": (
+                        "[a](HTTPS://Docs.Example.Test/1) "
+                        "[b](HTTPS://DOCS.EXAMPLE.TEST/2)"
+                    )
+                },
+            ),
+            ("done", {"ok": True}),
+        ]
+        result = verify_search_sse(events, urls)
+        self.assertTrue(result["ok"], msg=result)
+        self.assertEqual(result["url_count"], 2)
+
+    def test_sse_records_observed_tool_urls(self):
+        urls = ("https://docs.example.test/1", "https://docs.example.test/2")
+        events = [
+            (
+                "delta",
+                {
+                    "text": (
+                        "[a](https://docs.example.test/1) "
+                        "[x](https://docs.python.org/)"
+                    )
+                },
+            ),
+            ("done", {"ok": True}),
+        ]
+        result = verify_search_sse(events, urls)
+        self.assertEqual(result["urls_observed"], ["https://docs.example.test/1"])
+
+    def test_tools_listed_requires_the_search_tool(self):
+        records = self._search_records()
+        listed = next(r for r in records if r["event"] == "mcp_list_tools")
+        listed["tool_names"] = ["calculate", "get_server_info", "search_web"]
+        self.assertTrue(verify_tools_listed(records, "r1", "search_web")["ok"])
+
+    def test_tools_listed_without_the_search_tool_fails(self):
+        records = self._search_records()
+        listed = next(r for r in records if r["event"] == "mcp_list_tools")
+        listed["tool_names"] = ["calculate", "get_server_info"]
+        self.assertFalse(verify_tools_listed(records, "r1", "search_web")["ok"])
+
+
+class KeyIsolationTest(unittest.TestCase):
+    """The search key must be absent from every observable artifact (D17-07)."""
+
+    KEY = "unit-test-search-key"
+
+    def test_missing_key_is_isolated(self):
+        self.assertTrue(key_is_isolated("", [self.KEY, "anything"]))
+
+    def test_absent_key_is_isolated(self):
+        artifacts = [
+            "Here are the sources: [Docs](https://docs.example.test/1)",
+            '{"event": "tool_selected", "tool": "search_web"}',
+            "INFO:mcp.server:Tool 'search_web' completed",
+            "INFO:agent.server:chat request started",
+        ]
+        self.assertTrue(key_is_isolated(self.KEY, artifacts))
+
+    def test_leak_in_any_artifact_is_detected(self):
+        clean = "no secret here"
+        for index in range(4):
+            with self.subTest(artifact=index):
+                artifacts = [clean, clean, clean, clean]
+                artifacts[index] = f"prefix {self.KEY} suffix"
+                self.assertFalse(key_is_isolated(self.KEY, artifacts))
+
+
 class McpUnavailableTextTest(unittest.TestCase):
     """The MCP-unavailable error text is checked for duplicates and leaks.
 
@@ -273,6 +418,19 @@ class HarnessEntryPointTest(unittest.TestCase):
         completed = self._run("live_e2e.py", argv=("--help",))
         self.assertNotIn("ModuleNotFoundError", completed.stderr)
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_live_e2e_accepts_the_search_scenario_option(self):
+        completed = self._run("live_e2e.py", argv=("--scenario", "search", "--help"))
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_tavily_live_blocks_without_explicit_opt_in(self):
+        completed = self._run(
+            "tavily_live.py", extra_env={"TAVILY_LIVE_ALLOW": ""}
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+        self.assertIn("TAVILY_STATUS: BLOCKED", completed.stdout)
 
     def test_acceptance_script_runs_from_a_file_path(self):
         completed = self._run("acceptance.py", argv=("--help",))

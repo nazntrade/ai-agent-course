@@ -38,6 +38,20 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger("agent.server")
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """Static assets must always be revalidated.
+
+    Without an explicit header, the browser may keep serving a cached
+    ``styles.css`` after the file changed, which is exactly the stale-CSS bug
+    that made chat links unreadable.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
 class HealthResponse(BaseModel):
     """Liveness of the backend process."""
 
@@ -294,6 +308,10 @@ def create_app(
         )
 
     if STATIC_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+        app.mount(
+            "/",
+            NoCacheStaticFiles(directory=str(STATIC_DIR), html=True),
+            name="static",
+        )
 
     return app

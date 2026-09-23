@@ -1,8 +1,10 @@
 """MCP server assembly and process entry point.
 
 The server is a separate loopback process speaking Streamable HTTP on its own
-port. It exposes only the two read-only tools of ``mcp_server.tools``: there is
-no shell, filesystem, network or Git access.
+port. It exposes the three read-only tools of ``mcp_server.tools``: ``calculate``
+and ``get_server_info`` are side-effect free, while ``search_web`` performs one
+outgoing HTTPS request to the configured search API. There is no shell,
+filesystem or Git access.
 
 Run it with ``python -m mcp_server``. A port that is already in use is a
 prerequisite error: the process prints a short explanation and exits with code
@@ -56,7 +58,7 @@ def port_is_available(host: str, port: int) -> bool:
 
 
 class MCPServer:
-    """The MCP server: the SDK ``MCPServer`` plus the two registered tools."""
+    """The MCP server: the SDK ``MCPServer`` plus the three registered tools."""
 
     def __init__(
         self,
@@ -77,6 +79,7 @@ class MCPServer:
         server = SdkMCPServer(self.name, version=self.version)
         server.tool()(tools.calculate)
         server.tool()(tools.get_server_info)
+        server.tool()(tools.search_web)
         return server
 
     def run(self) -> None:

@@ -44,6 +44,7 @@ from harness.run_dir import create_run_dir, relative, write_report
 ensure_paths()
 
 from agent.mcp_adapter import inspect_tools  # noqa: E402
+from tests.support.fake_search import FAKE_API_KEY, FakeSearchServer  # noqa: E402
 from tests.support.stub_model import MODEL_ID, StubModelServer  # noqa: E402
 
 try:
@@ -228,12 +229,19 @@ def run() -> int:
     mcp_process: ManagedProcess | None = None
     backend_process: ManagedProcess | None = None
     stub: StubModelServer | None = None
+    search_server: FakeSearchServer | None = None
     cleanup: list = []
     exit_code = EXIT_FAIL
 
     try:
         stub = StubModelServer(stub_port).start()
         report["stub_model"] = {"url": stub.base_url, "model": MODEL_ID}
+
+        # The fake search API keeps the live MCP smoke independent from the
+        # paid Tavily service. The key and base URL are passed only to the MCP
+        # child process; MCP_LOAD_DOTENV=0 keeps it away from a local .env.
+        search_server = FakeSearchServer(0).start()
+        report["fake_search"] = {"loopback_port": search_server.port}
 
         mcp_process = ManagedProcess(
             name="mcp-server",
@@ -243,6 +251,12 @@ def run() -> int:
                 {
                     "MCP_SERVER_HOST": "127.0.0.1",
                     "MCP_SERVER_PORT": str(mcp_port),
+                    "MCP_LOAD_DOTENV": "0",
+                    "MCP_SEARCH_API_KEY_ENV": "TAVILY_API_KEY",
+                    "TAVILY_API_KEY": FAKE_API_KEY,
+                    "MCP_SEARCH_BASE_URL": search_server.base_url,
+                    "MCP_SEARCH_TIMEOUT_SECONDS": "3",
+                    "MCP_SEARCH_MAX_RESULTS": "5",
                 }
             ),
             log_path=run_dir / "mcp_server.log",
@@ -364,9 +378,23 @@ def run() -> int:
             + ("PASS" if backend_tests.returncode == 0 else "FAIL")
         )
 
+        search_tests = _run_unittest("tests.integration.test_search_live", test_env)
+        print("--- integration: web search ---")
+        print(_tail(search_tests.stdout or search_tests.stderr))
+        report["search_integration"] = {
+            "ok": search_tests.returncode == 0,
+            "exit_code": search_tests.returncode,
+        }
+        print(
+            "SEARCH_INTEGRATION_STATUS: "
+            + ("PASS" if search_tests.returncode == 0 else "FAIL")
+        )
+
         exit_code = (
             EXIT_OK
-            if mcp_tests.returncode == 0 and backend_tests.returncode == 0
+            if mcp_tests.returncode == 0
+            and backend_tests.returncode == 0
+            and search_tests.returncode == 0
             else EXIT_FAIL
         )
         return exit_code
@@ -385,6 +413,8 @@ def run() -> int:
             report.setdefault("stopped", []).append(result)
         if stub is not None:
             stub.stop()
+        if search_server is not None:
+            search_server.stop()
         report["ports_released"] = {
             "mcp": qa_port_is_free(mcp_port, "127.0.0.1"),
             "backend": qa_port_is_free(backend_port, "127.0.0.1"),

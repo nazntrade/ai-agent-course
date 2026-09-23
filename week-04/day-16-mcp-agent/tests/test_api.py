@@ -154,6 +154,22 @@ class McpStatusTest(unittest.TestCase):
         self.assertEqual(mcp.list_calls, 0)
 
 
+class StaticAssetsTest(unittest.TestCase):
+    """The static UI is served with cache revalidation."""
+
+    def test_stylesheet_disables_caching(self):
+        with TestClient(_build_app()) as client:
+            response = client.get("/styles.css")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("cache-control"), "no-cache")
+
+    def test_index_requests_a_versioned_stylesheet(self):
+        with TestClient(_build_app()) as client:
+            response = client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("/styles.css?v=", response.text)
+
+
 class ChatStreamTest(unittest.TestCase):
     """The chat stream follows the documented SSE contract."""
 

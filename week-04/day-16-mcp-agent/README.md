@@ -332,3 +332,151 @@ VPS-развёртывание **не выполнялось** и намерен
 Чего для VPS пока нет и что придётся добавить отдельной задачей: TLS/домен, reverse proxy,
 процессный менеджер, аутентификация и ограничение доступа, персистентность истории,
 мультипользовательская изоляция, ограничения частоты запросов и портирование harness на Linux.
+
+## День 17. Веб-поиск в MCP-агенте
+
+### Задача дня
+
+Добавить в **существующий MCP-сервер** собственный инструмент поиска в интернете вокруг
+внешнего поискового API **Tavily Search** и добиться его реального вызова агентом из
+браузерного чата. Архитектура дня 16 сохраняется: тот же отдельный MCP-сервер на Streamable
+HTTP, тот же backend с MCP-клиентом и потоковым чатом, те же `calculate` и `get_server_info`.
+
+Обязательная часть (граница дня):
+
+- третий MCP-инструмент `search_web` в том же сервере (запрос + лимит результатов);
+- компактный **structured**-результат: названия, ссылки и краткие описания;
+- ключ внешнего API хранится только на сервере;
+- обработаны пустая выдача, отсутствие ключа, тайм-аут и ошибки API — без вымышленных
+  ссылок и без утечки секретов;
+- по «найди в интернете …» агент даёт несколько ссылок с пояснениями, для свежих данных
+  использует поиск, и не утверждает, что прочитал страницы целиком, если получил только
+  поисковые описания (snippets);
+- новый инструмент работает и с локальным Qwen, и с DeepSeek на VPS через существующий
+  интерфейс `ModelProvider`; модельная часть ради поиска не перестраивалась.
+
+Вне границы дня: развёртывание на VPS, реальные платные вызовы Tavily в автотестах,
+mutating tools, доступ MCP к shell/Git/файловой системе.
+
+### Что реализовано
+
+| Файл | Назначение |
+| --- | --- |
+| `mcp_server/config.py` | `SearchConfig` и `resolve_search_config`; ключ с `repr=False`; `.env` читает только MCP-сервер; гейт `MCP_LOAD_DOTENV` |
+| `mcp_server/web_search.py` | **единственная граница сети**: `Transport`/`UrllibTransport` (stdlib), `WebSearchService`, `SearchError`; `POST /search` к Tavily с `Authorization: Bearer`, санитизация ответа и лимиты |
+| `mcp_server/tools.py` | тонкий `search_web(query, max_results=0)`; `calculate` и `get_server_info` не изменены |
+| `mcp_server/server.py` | регистрация третьего инструмента |
+| `agent/orchestrator.py` | изменён **только текст** `SYSTEM_PROMPT`: использовать `search_web` для свежих данных, давать ссылки, не выдумывать факты и не утверждать о прочтении страниц |
+| `.env.example` | блок `MCP_SEARCH_*` (ключ пустой, без плейсхолдера) |
+| `docs/specs/day-17-web-search/` | SPEC.md, PLAN.md, ACCEPTANCE.md (критерии D17-01…D17-15) |
+| `tests/test_web_search.py`, `tests/support/fake_search.py`, `tests/integration/test_search_live.py` | unit-тесты поиска, loopback-фейк поискового API и интеграционный сценарий |
+| `harness/live_mcp.py` | `SEARCH_INTEGRATION_STATUS` поверх фейкового поискового сервера |
+| `harness/live_e2e.py` | `--scenario {arithmetic,search}` (по умолчанию arithmetic — поведение дня 16) |
+| `harness/acceptance.py` | шаг «live search E2E» (реальный Qwen + UI) со статусами `SEARCH_LIVE_STATUS` / `SEARCH_UI_STATUS` |
+| `harness/tavily_live.py` | реальный Tavily только opt-in (`TAVILY_LIVE_ALLOW=1`), иначе `TAVILY_STATUS: BLOCKED` |
+
+Интеграция поиска изначально была сделана на Brave Search API и позже переведена на Tavily
+отдельной правкой: внешний контракт `search_web`, чат, потоковый ответ, Technical details,
+`calculate` и `get_server_info` при этом сохранены, модельная часть не менялась. Отчёты о
+прогонах прежней версии остались в `docs/specs/day-17-web-search/ACCEPTANCE.md` как
+историческая справка.
+
+Файлы `.bat` (доверенные точки входа) **не изменялись**: они защищены политикой прав, поэтому
+новые режимы не добавлялись, а LIVE+UI-проверка поиска встроена в существующий
+`test.bat acceptance`.
+
+### Контракт `search_web`
+
+- Аргументы: `query: string` (обязателен, до 600 символов) и `max_results: integer = 0`
+  (0 — серверный default, максимум 10).
+- Успех: `{query, count, results: [{title, url, description}], more_results_available, note}`;
+  `note` = `Snippets only; the pages were not opened.` Пустая выдача — это тоже успех
+  (`count = 0`, `results = []`), а не выдуманный ответ. Tavily не отдаёт признак «есть ещё
+  результаты», поэтому `more_results_available` всегда `false` — поле сохранено ради
+  совместимости контракта.
+- Ошибки — контролируемая `ToolError` с санитизированным текстом (нет ключа, заголовков,
+  тела ответа и полного URL): `not configured` (нет ключа, сетевого вызова нет),
+  `timed out`, `rejected (HTTP 401/403/432/433)`, `rate limit was reached (HTTP 429)`,
+  `failed (HTTP …)`, `unreachable`, `unexpected response`.
+- Страницы не открываются: инструмент возвращает только список сниппетов. Это же сказано
+  модели в промпте.
+
+### Переменные окружения (день 17)
+
+Ключ читает только процесс MCP-сервера. Backend его не использует и не выводит; в модель,
+UI, SSE, trace и логи он не попадает.
+
+| Переменная | Назначение | Значение по умолчанию |
+| --- | --- | --- |
+| `MCP_SEARCH_API_KEY_ENV` | Имя переменной с ключом поиска | `TAVILY_API_KEY` |
+| `TAVILY_API_KEY` | Ключ Tavily Search; пусто → `search_web` честно сообщает `not configured` | (пусто) |
+| `MCP_SEARCH_BASE_URL` | База API; в тестах подменяется на loopback | `https://api.tavily.com` |
+| `MCP_SEARCH_TIMEOUT_SECONDS` | Тайм-аут одного запроса, clamp 1…25 | `10` |
+| `MCP_SEARCH_MAX_RESULTS` | Число результатов по умолчанию, 1…10 | `5` |
+| `MCP_LOAD_DOTENV` | `0` — MCP-сервер не читает `.env` (используется harness) | `1` |
+
+Конфиг поиска резолвится при первом вызове и кэшируется: после правки `.env` MCP-сервер
+нужно перезапустить.
+
+### Команды проверок (день 17)
+
+```
+SETUP:         setup.bat
+UNIT:          test.bat                  (unit + in-process MCP, без сети)
+MCP SMOKE:     smoke_test.bat            (реальный MCP + backend + INT, включая SEARCH_INTEGRATION_STATUS)
+LIVE + UI:     test.bat acceptance       (unit → MCP-unavailable UI → live MCP → live arithmetic →
+                                          live search + UI поиска)
+UI (день 16):  test.bat live ui          (регрессия арифметики)
+REAL Tavily:   .venv\Scripts\python.exe harness\tavily_live.py
+               (ручной opt-in, только с TAVILY_LIVE_ALLOW=1 и реальным ключом)
+```
+
+Автотесты изолированы от внешней сети: поиск тестируется на loopback-фейке
+`tests/support/fake_search.py`, реальный Tavily автоматически не вызывается.
+
+### Результаты проверок (фактические)
+
+| Проверка | Команда | Результат |
+| --- | --- | --- |
+| Unit + in-process MCP | `test.bat` | `UNIT_STATUS: PASS` — 298 тестов, 32 skipped |
+| Реальный MCP + backend + поиск (INT) | `smoke_test.bat` | `MCP_INTEGRATION_STATUS: PASS` (11), `BACKEND_INTEGRATION_STATUS: PASS` (14), `SEARCH_INTEGRATION_STATUS: PASS` (7) |
+| LIVE-поиск + UI + день 16 | `test.bat acceptance` | exit 0: `MCP_UNAVAILABLE_UI_STATUS: PASS`, live MCP PASS, `LIVE_LLM_STATUS: PASS`, `SEARCH_LIVE_STATUS: PASS`, `SEARCH_UI_STATUS: PASS`, `key_isolation: true` |
+| UI арифметики (регрессия) | `test.bat live ui` | `LIVE_LLM_STATUS: PASS`, `UI_E2E_STATUS: PASS` |
+| Реальный Tavily | ручной `harness\tavily_live.py` | **не проверено** (нет ключа и явного разрешения) → `TAVILY_STATUS: BLOCKED` |
+
+Независимая приёмка Tester: `test.bat`, `smoke_test.bat` и `test.bat acceptance` запущены
+заново, результаты совпали; `tools/list` содержит `search_web` (`required=["query"]`,
+`max_results` integer default 0); trace-цепочка `mcp_connect → mcp_list_tools →
+model_request(tool_selection) → tool_selected(search_web) → tool_completed(ok) →
+model_request(final_answer) → request_done(ok)`; в ответе 3 URL из tool-результата; UI —
+2 ссылки, `details.technical` закрыт, loader исчез. Поиск по артефактам не нашёл значения
+фейкового ключа. `TEST_STATUS: BLOCKED` — единственный непроверенный критерий D17-14
+(реальный вызов Tavily), дефектов нет.
+
+### Сценарий демонстрации (день 17)
+
+1. Запустить `run_app.bat` (MCP-сервер + backend + UI).
+2. Ввести `Find the official Python documentation online` — полученный ответ содержит ссылки
+   с пояснениями; технические шаги (вызов `search_web`) собраны в свёрнутом `Technical details`.
+3. Спросить про свежие данные (например, «что нового в Python 3.12») — агент использует поиск
+   и приводит источники.
+4. Спросить `What is 23 multiplied by 17?` — по-прежнему вызывается `calculate`.
+5. Если ключ Tavily не задан, `search_web` сообщает, что поиск не настроен, и не выдумывает
+   ссылки. Ключ добавляется в `.env` (`TAVILY_API_KEY`), после чего MCP-сервер
+   перезапускается.
+
+### Ограничения дня 17
+
+- **Реальный Tavily Search не проверялся** автоматической проверкой: нет ключа и явного
+  разрешения на реальные вызовы. Реальная внешняя граница остаётся неподтверждённой;
+  `tavily_live.py` без `TAVILY_LIVE_ALLOW=1` возвращает `BLOCKED`.
+- LIVE-сценарий использует детерминированный loopback-фейк поискового API, поэтому проверяет
+  цепочку «модель → MCP → поиск → ответ со ссылками», но не контракт настоящего Tavily.
+- Поведение модели «не утверждать о прочтении страниц» покрыто UNIT только на уровне текста
+  промпта; фактическое поведение проверялось ручным просмотром ответа.
+- Запуск приложения без `.env` и UI-поведение при отсутствии ключа автотестом не покрыты
+  (остаются ручной проверкой).
+- `test.bat acceptance` теперь всегда делает дополнительный LIVE-прогон с реальной моделью,
+  поэтому время приёмки растёт.
+- Запуск и демонстрация на DeepSeek/VPS по-прежнему не выполнялись; контракт `ModelProvider`
+  не изменён, поэтому инструмент доступен любой модели, которую обслуживает этот провайдер.

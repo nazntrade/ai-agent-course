@@ -35,7 +35,14 @@ from agent.trace import NullTraceWriter
 SYSTEM_PROMPT = (
     "You are a helpful assistant with access to MCP tools. "
     "When the user asks for arithmetic, call the 'calculate' tool instead of "
-    "computing the result yourself. Answer in the language of the user."
+    "computing the result yourself. Answer in the language of the user. "
+    "When the user asks to find something online or needs current facts, call the "
+    "'search_web' tool instead of answering from memory. "
+    "The 'search_web' result contains only titles, links and short snippets: never "
+    "claim to have opened or read the pages, and never invent facts, quotes or links "
+    "that the tool did not return. "
+    "When you use search results, include the sources as Markdown links [title](url). "
+    "If a tool returns an error, report it briefly; do not fabricate a result."
 )
 
 DEFAULT_MAX_TOOL_ROUNDS = 3

@@ -1,8 +1,11 @@
 """Pure implementations of the MCP tools.
 
-The functions are plain, synchronous and side-effect free so they can be unit
-tested without a server. ``mcp_server/server.py`` only registers them on the
-MCP server; no shell, filesystem, network or Git access is available here.
+The arithmetic and informational functions are plain, synchronous and
+side-effect free so they can be unit tested without a server.
+``mcp_server/server.py`` only registers them on the MCP server; the server has
+no shell, filesystem or Git access. ``search_web`` delegates to
+:mod:`mcp_server.web_search`, the single module that performs one outgoing
+HTTPS request.
 
 A controlled failure (for example division by zero) raises the SDK's
 :class:`ToolError`. The MCP layer turns that into a tool error result instead of
@@ -19,6 +22,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver.exceptions import ToolError
 
 from mcp_server import SERVER_NAME, SERVER_VERSION
+from mcp_server import web_search
 
 Operation = Literal["add", "subtract", "multiply", "divide"]
 
@@ -89,3 +93,30 @@ def get_server_info() -> dict[str, Any]:
         "status": "ok",
         "uptime_seconds": round(max(time.time() - _STARTED_AT, 0.0), 3),
     }
+
+
+# Concrete return annotation keeps the result structured (see ``calculate``).
+# ``max_results`` stays a plain ``int`` default instead of ``int | None``: the
+# server sanitizes the generated schema, which keeps only the first type of a
+# union, and ``0`` already means "use the server default".
+def search_web(query: str, max_results: int = 0) -> dict[str, Any]:
+    """Search the web for current information.
+
+    Returns short result titles, links and snippets for a query. The pages are
+    not opened: the result is a snippet list, not their full text.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ToolError("Argument 'query' must be a non-empty string")
+    if isinstance(max_results, bool) or not isinstance(max_results, int):
+        raise ToolError("Argument 'max_results' must be an integer")
+
+    trimmed = query.strip()
+    if len(trimmed) > web_search.MAX_QUERY_LENGTH:
+        trimmed = trimmed[: web_search.MAX_QUERY_LENGTH]
+    if max_results > web_search.SEARCH_MAX_RESULTS_CAP:
+        max_results = web_search.SEARCH_MAX_RESULTS_CAP
+
+    try:
+        return web_search.default_service().search(trimmed, max_results)
+    except web_search.SearchError as exc:
+        raise ToolError(exc.message) from exc

@@ -53,6 +53,22 @@ def _run(command: list, timeout: float, extra_env: dict | None = None):
     )
 
 
+def _status_from_output(text: str, prefix: str) -> str:
+    """Return the last ``<prefix>: <STATUS>`` token of a harness output.
+
+    The harness prints one-line status records (``LIVE_LLM_STATUS: PASS``); this
+    reads the first token after the colon so an appended explanation does not
+    hide the verdict.
+    """
+    value = "UNKNOWN"
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix + ":"):
+            remainder = stripped.split(":", 1)[1].strip()
+            value = remainder.split()[0] if remainder else "UNKNOWN"
+    return value
+
+
 def run(ui: bool, live: bool) -> int:
     """Run the acceptance steps in order."""
     run_dir = create_run_dir("acceptance")
@@ -120,6 +136,46 @@ def run(ui: bool, live: bool) -> int:
         if e2e.returncode == 2 and exit_code == EXIT_OK:
             exit_code = EXIT_PREREQUISITE
         elif e2e.returncode not in (0, 2):
+            exit_code = EXIT_FAIL
+
+        # The web-search scenario runs through the same trusted entry point:
+        # the real model has to select ``search_web`` and the answer has to
+        # cite the deterministic fake-search links. The UI part is optional: a
+        # missing system browser yields ``UI_E2E_STATUS: BLOCKED`` and does not
+        # fail acceptance, because the live_e2e exit code is the LLM verdict.
+        print("=== live search E2E (real model + fake search API) ===")
+        search_env = {"RUN_LIVE_LLM": "1"}
+        search_env.update({key: os.environ.get(key) for key in BROWSER_ENV_KEYS})
+        search = _run(
+            [
+                sys.executable,
+                str(PROJECT_DIR / "harness" / "live_e2e.py"),
+                "--scenario",
+                "search",
+                "--ui",
+            ],
+            STEP_TIMEOUT_SECONDS,
+            search_env,
+        )
+        print(search.stdout or "")
+        print(search.stderr or "")
+        search_live_status = _status_from_output(search.stdout, "LIVE_LLM_STATUS")
+        search_ui_status = _status_from_output(search.stdout, "UI_E2E_STATUS")
+        if search.returncode == 2:
+            search_live_status = "BLOCKED"
+        elif search.returncode != 0:
+            search_live_status = "FAIL"
+        report["steps"]["search_live_e2e"] = {
+            "exit_code": search.returncode,
+            "live_status": search_live_status,
+            "ui_status": search_ui_status,
+        }
+        print(f"SEARCH_LIVE_STATUS: {search_live_status}")
+        print(f"SEARCH_UI_STATUS: {search_ui_status}")
+        if search.returncode == 2:
+            if exit_code == EXIT_OK:
+                exit_code = EXIT_PREREQUISITE
+        elif search.returncode != 0 or search_ui_status == "FAIL":
             exit_code = EXIT_FAIL
 
     report["exit_code"] = exit_code
