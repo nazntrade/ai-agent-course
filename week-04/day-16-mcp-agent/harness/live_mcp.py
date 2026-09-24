@@ -104,6 +104,17 @@ def _run(command: list, env: dict, timeout: float) -> subprocess.CompletedProces
     )
 
 
+def _status_from_output(text: str, prefix: str) -> str:
+    """Return the last ``<prefix>: <STATUS>`` token of a harness output."""
+    value = "UNKNOWN"
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix + ":"):
+            remainder = stripped.split(":", 1)[1].strip()
+            value = remainder.split()[0] if remainder else "UNKNOWN"
+    return value
+
+
 def _run_discovery(url: str, env: dict) -> subprocess.CompletedProcess:
     return _run(
         [sys.executable, str(PROJECT_DIR / "discovery_cli.py"), "--url", url],
@@ -148,6 +159,15 @@ def _count_mcp_posts(text: str) -> int:
     )
 
 
+def _create_chat(backend_url: str, title: str = "") -> str:
+    """Create a chat through the real API and return its opaque id."""
+    response = httpx.post(
+        f"{backend_url}/api/chats", json={"title": title}, timeout=20.0
+    )
+    response.raise_for_status()
+    return response.json()["id"]
+
+
 def _check_mcp_probe_count(backend_url: str, process: ManagedProcess, report: dict) -> bool:
     """Isolated no-tool chat request: exactly one MCP probe must be opened.
 
@@ -164,9 +184,10 @@ def _check_mcp_probe_count(backend_url: str, process: ManagedProcess, report: di
         return True
     before = _read_log(process)
     try:
+        chat_id = _create_chat(backend_url, "probe")
         response = httpx.post(
             f"{backend_url}/api/chat/stream",
-            json={"session_id": "smoke-probe", "message": NO_TOOL_MESSAGE},
+            json={"chat_id": chat_id, "message": NO_TOOL_MESSAGE},
             timeout=httpx.Timeout(
                 connect=10.0, read=NO_TOOL_CHAT_TIMEOUT_SECONDS, write=10.0, pool=10.0
             ),
@@ -206,6 +227,7 @@ def run() -> int:
     )
 
     run_dir = create_run_dir("live-mcp")
+    db_path = run_dir / "day18.sqlite3"
     report: dict = {
         "scenario": "live-mcp-smoke",
         "ports": {
@@ -213,6 +235,7 @@ def run() -> int:
             "backend": backend_port,
             "stub_model": stub_port,
         },
+        "db": relative(db_path),
     }
 
     try:
@@ -252,11 +275,13 @@ def run() -> int:
                     "MCP_SERVER_HOST": "127.0.0.1",
                     "MCP_SERVER_PORT": str(mcp_port),
                     "MCP_LOAD_DOTENV": "0",
+                    "MCP_TASK_TICK_SECONDS": "0.5",
                     "MCP_SEARCH_API_KEY_ENV": "TAVILY_API_KEY",
                     "TAVILY_API_KEY": FAKE_API_KEY,
                     "MCP_SEARCH_BASE_URL": search_server.base_url,
                     "MCP_SEARCH_TIMEOUT_SECONDS": "3",
                     "MCP_SEARCH_MAX_RESULTS": "5",
+                    "AGENT_DB_PATH": str(db_path),
                 }
             ),
             log_path=run_dir / "mcp_server.log",
@@ -293,6 +318,7 @@ def run() -> int:
                     "AGENT_MODEL_TIMEOUT_SECONDS": "30",
                     "AGENT_TRACE_PATH": str(run_dir / "trace.jsonl"),
                     "AGENT_LOG_LEVEL": "INFO",
+                    "AGENT_DB_PATH": str(db_path),
                 }
             ),
             log_path=run_dir / "backend.log",
@@ -351,6 +377,8 @@ def run() -> int:
                 "MCP_TEST_URL": mcp_url,
                 "BACKEND_TEST_URL": backend_url,
                 "MCP_UNREACHABLE_URL": unreachable_url,
+                "TASKS_TEST_DB": str(db_path),
+                "FAKE_SEARCH_URL": search_server.base_url,
             }
         )
 
@@ -390,13 +418,51 @@ def run() -> int:
             + ("PASS" if search_tests.returncode == 0 else "FAIL")
         )
 
-        exit_code = (
-            EXIT_OK
-            if mcp_tests.returncode == 0
+        tasks_tests = _run_unittest("tests.integration.test_tasks_live", test_env)
+        print("--- integration: scheduled tasks ---")
+        print(_tail(tasks_tests.stdout or tasks_tests.stderr))
+        report["tasks_integration"] = {
+            "ok": tasks_tests.returncode == 0,
+            "exit_code": tasks_tests.returncode,
+        }
+        print(
+            "TASKS_INTEGRATION_STATUS: "
+            + ("PASS" if tasks_tests.returncode == 0 else "FAIL")
+        )
+
+        # The restart checks run their own processes on private ports, so the
+        # running smoke processes do not interfere.
+        restart = _run(
+            [sys.executable, str(PROJECT_DIR / "harness" / "scheduler_restart.py")],
+            sanitized_env(),
+            INTEGRATION_TIMEOUT_SECONDS,
+        )
+        print("--- restart: persistence and scheduler ---")
+        print(_tail(restart.stdout or restart.stderr))
+        persistence_status = _status_from_output(
+            restart.stdout, "PERSISTENCE_RESTART_STATUS"
+        )
+        scheduler_status = _status_from_output(
+            restart.stdout, "SCHEDULER_RESTART_STATUS"
+        )
+        if restart.returncode == 2:
+            persistence_status = scheduler_status = "BLOCKED"
+        report["restart"] = {
+            "exit_code": restart.returncode,
+            "persistence_status": persistence_status,
+            "scheduler_status": scheduler_status,
+        }
+        print(f"PERSISTENCE_RESTART_STATUS: {persistence_status}")
+        print(f"SCHEDULER_RESTART_STATUS: {scheduler_status}")
+
+        ok = (
+            mcp_tests.returncode == 0
             and backend_tests.returncode == 0
             and search_tests.returncode == 0
-            else EXIT_FAIL
+            and tasks_tests.returncode == 0
+            and restart.returncode == 0
         )
+        exit_code = EXIT_OK if ok else EXIT_FAIL
         return exit_code
     except PrerequisiteError as exc:
         print(f"PREREQUISITE: {exc}")

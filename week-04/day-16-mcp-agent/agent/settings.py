@@ -33,6 +33,11 @@ DEFAULT_BACKEND_PORT = 8600
 DEFAULT_TRACE_PATH = "logs/trace.jsonl"
 DEFAULT_LOG_LEVEL = "INFO"
 
+DEFAULT_DB_FILENAME = "day18.sqlite3"
+DEFAULT_CHAT_CONTEXT_MESSAGES = 20
+CHAT_CONTEXT_MIN_MESSAGES = 2
+CHAT_CONTEXT_MAX_MESSAGES = 100
+
 
 def load_dotenv_if_present(env_path=None) -> bool:
     """Load ``.env`` when it exists; a missing file is not an error."""
@@ -68,6 +73,23 @@ def _to_float(value, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
+def _to_int_clamped(value, default: int, low: int, high: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return min(max(parsed, low), high)
+
+
+def resolve_db_path(environment) -> Path:
+    """Resolve ``AGENT_DB_PATH``, defaulting to ``data/day18.sqlite3``."""
+    raw = str(environment.get("AGENT_DB_PATH") or "").strip()
+    path = Path(raw) if raw else PROJECT_ROOT / "data" / DEFAULT_DB_FILENAME
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     """The resolved runtime configuration.
@@ -94,6 +116,11 @@ class Settings:
 
     trace_path: Path | None = None
     log_level: str = DEFAULT_LOG_LEVEL
+
+    db_path: Path = field(
+        default_factory=lambda: PROJECT_ROOT / "data" / DEFAULT_DB_FILENAME
+    )
+    chat_context_messages: int = DEFAULT_CHAT_CONTEXT_MESSAGES
 
     api_key: str = field(default="", repr=False)
     model_configured: bool = False
@@ -176,6 +203,13 @@ def resolve_settings(env=None, *, dotenv=True, env_path=None) -> Settings:
         public_frontend_url=public_frontend_url,
         trace_path=trace_path,
         log_level=_clean(environment.get("AGENT_LOG_LEVEL"), DEFAULT_LOG_LEVEL).upper(),
+        db_path=resolve_db_path(environment),
+        chat_context_messages=_to_int_clamped(
+            environment.get("AGENT_CHAT_CONTEXT_MESSAGES"),
+            DEFAULT_CHAT_CONTEXT_MESSAGES,
+            CHAT_CONTEXT_MIN_MESSAGES,
+            CHAT_CONTEXT_MAX_MESSAGES,
+        ),
         api_key=api_key,
         model_configured=model_configured,
         has_env_file=has_env_file,

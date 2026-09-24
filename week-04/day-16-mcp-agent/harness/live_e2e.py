@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -60,9 +61,16 @@ from harness.run_dir import create_run_dir, relative, write_report
 
 ensure_paths()
 
-from agent.mcp_adapter import inspect_tools  # noqa: E402
+from agent.mcp_adapter import SdkMcpClient, inspect_tools  # noqa: E402
 from agent.settings import DEFAULT_MODEL_NAME  # noqa: E402
-from tests.support.fake_search import FAKE_API_KEY, RESULT_URLS, FakeSearchServer  # noqa: E402
+from storage.chats import ChatRepository  # noqa: E402
+from storage.db import Database  # noqa: E402
+from tests.support.fake_search import (  # noqa: E402
+    FAKE_API_KEY,
+    MANY_MARKER,
+    RESULT_URLS,
+    FakeSearchServer,
+)
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -107,6 +115,35 @@ SEARCH_TRACE_CHAIN = (
     ("model_request", {"phase": "tool_selection"}, ()),
     ("tool_selected", {"tool": SEARCH_EXPECTED_TOOL}, ()),
     ("tool_completed", {"tool": SEARCH_EXPECTED_TOOL, "ok": True}, ("result",)),
+    ("model_request", {"phase": "final_answer"}, ()),
+    ("request_done", {"ok": True}, ()),
+)
+
+# The tasks scenario schedules a repeating search and then reads its summary.
+TASKS_QUESTION_1 = (
+    "Schedule a search for the official Python documentation to run every day "
+    "and tell me when the first run will start."
+)
+TASKS_QUESTION_2 = (
+    "Show me the latest saved results of that scheduled search and include the links."
+)
+TASKS_EXPECTED_TOOL_1 = "schedule_search_task"
+TASKS_EXPECTED_TOOL_2 = "get_latest_search_run"
+
+TASKS_SCHEDULE_CHAIN = (
+    ("mcp_connect", {"ok": True}, ()),
+    ("mcp_list_tools", None, ()),
+    ("model_request", {"phase": "tool_selection"}, ()),
+    ("tool_selected", {"tool": TASKS_EXPECTED_TOOL_1}, ()),
+    ("tool_completed", {"tool": TASKS_EXPECTED_TOOL_1, "ok": True}, ("result",)),
+    ("model_request", {"phase": "final_answer"}, ()),
+    ("request_done", {"ok": True}, ()),
+)
+
+TASKS_SUMMARY_CHAIN = (
+    ("model_request", {"phase": "tool_selection"}, ()),
+    ("tool_selected", {"tool": TASKS_EXPECTED_TOOL_2}, ()),
+    ("tool_completed", {"tool": TASKS_EXPECTED_TOOL_2, "ok": True}, ("result",)),
     ("model_request", {"phase": "final_answer"}, ()),
     ("request_done", {"ok": True}, ()),
 )
@@ -438,6 +475,32 @@ def verify_search_sse(events: list, expected_urls) -> dict:
     }
 
 
+def _start_fresh_chat(page) -> None:
+    """Create and select a new chat so the answer count starts from zero.
+
+    Chats and history persist, so a page reload shows earlier answers; the UI
+    checks below count assistant bubbles for one turn only. A full chat list is
+    not fatal: the previously selected chat just keeps its history.
+    """
+    try:
+        before = page.locator("#chats-list .chat-item").count()
+        page.click("#new-chat-button")
+        page.wait_for_function(
+            "(n) => document.querySelectorAll('#chats-list .chat-item').length > n",
+            arg=before,
+            timeout=8000,
+        )
+    except Exception:  # noqa: BLE001 - a full list keeps the selected chat
+        return
+    try:
+        page.wait_for_function(
+            "() => document.querySelectorAll('#messages .bubble.assistant').length === 0",
+            timeout=8000,
+        )
+    except Exception:  # noqa: BLE001 - the empty state is asserted later
+        return
+
+
 def run_ui_e2e(url: str, run_dir: Path, report: dict) -> str:
     """Drive the chat UI through the system browser; return the UI status."""
     try:
@@ -478,6 +541,7 @@ def run_ui_e2e(url: str, run_dir: Path, report: dict) -> str:
         except Exception:  # noqa: BLE001 - the status panel may be slow
             report["ui_mcp_connected"] = False
 
+        _start_fresh_chat(page)
         page.fill("#message-input", QUESTION)
         page.click("#send-button")
 
@@ -639,6 +703,7 @@ def run_ui_search_e2e(url: str, run_dir: Path, report: dict) -> str:
         except Exception:  # noqa: BLE001 - the status panel may be slow
             report["ui_mcp_connected"] = False
 
+        _start_fresh_chat(page)
         page.fill("#message-input", SEARCH_QUESTION)
         page.click("#send-button")
 
@@ -728,23 +793,577 @@ def run_ui_search_e2e(url: str, run_dir: Path, report: dict) -> str:
             pass
 
 
+def run_ui_chats_e2e(url: str, db_path: Path, run_dir: Path, report: dict) -> str:
+    """Drive the chats panel through the system browser; return the status.
+
+    Checks the limit message, rename through the browser dialog, persistence
+    across a real page reload and ``Clear chat`` scoped to one chat. The message
+    history is seeded through the storage layer, so no model is needed.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "BLOCKED"
+
+    shot = run_dir / "screenshots" / "10_chats.png"
+    manager = None
+    browser = None
+    page_errors: list = []
+    try:
+        manager = sync_playwright().start()
+        browser, channel = qa_browser.launch_browser(manager, headless=True)
+        report["ui_channel"] = channel
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.set_default_timeout(60000)
+        page = context.new_page()
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_selector("#chats-list .chat-item", timeout=30000)
+
+        # Create chats up to the limit, then confirm the limit message.
+        attempts = 0
+        while page.locator("#chats-list .chat-item").count() < 5 and attempts < 8:
+            before = page.locator("#chats-list .chat-item").count()
+            page.click("#new-chat-button")
+            try:
+                page.wait_for_function(
+                    "(n) => document.querySelectorAll('#chats-list .chat-item').length > n",
+                    arg=before,
+                    timeout=15000,
+                )
+            except Exception:  # noqa: BLE001 - the count is asserted below
+                break
+            attempts += 1
+        chat_count = page.locator("#chats-list .chat-item").count()
+        page.click("#new-chat-button")
+        page.wait_for_selector("#chat-limit-message:not([hidden])", timeout=15000)
+        limit_text = page.inner_text("#chat-limit-message")
+        limit_ok = chat_count == 5 and "limit of 5" in limit_text.lower()
+
+        # Rename one chat through the prompt dialog.
+        page.once("dialog", lambda dialog: dialog.accept("Renamed chat"))
+        page.locator("#chats-list .chat-item").first.locator(".chat-rename").click()
+        page.wait_for_function(
+            "() => Array.from(document.querySelectorAll('#chats-list .chat-select'))"
+            ".some((button) => button.textContent.trim() === 'Renamed chat')",
+            timeout=15000,
+        )
+        rename_ok = True
+
+        # Seed history into the selected chat, reload and expect it back.
+        active_id = page.evaluate(
+            "() => window.localStorage.getItem('day18.activeChatId')"
+        )
+        persist_ok = False
+        clear_ok = False
+        if active_id:
+            ChatRepository(Database(db_path)).add_exchange(
+                active_id, "seeded question", "seeded answer"
+            )
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_selector("#messages .bubble", timeout=30000)
+            persist_ok = "seeded answer" in page.inner_text("#messages")
+        if persist_ok:
+            page.click("#clear-button")
+            page.wait_for_function(
+                "() => !document.querySelector('#messages').textContent"
+                ".includes('seeded answer')",
+                timeout=15000,
+            )
+            clear_ok = ChatRepository(Database(db_path)).message_count(active_id) == 0
+
+        qa_browser.screenshot(page, shot)
+        context.close()
+        ok = limit_ok and rename_ok and persist_ok and clear_ok and not page_errors
+        report["chats_ui"] = {
+            "chat_count": chat_count,
+            "limit": limit_ok,
+            "rename": rename_ok,
+            "reload": persist_ok,
+            "clear": clear_ok,
+            "page_errors": page_errors,
+        }
+        return "PASS" if ok else "FAIL"
+    except qa_browser.PrerequisiteError as exc:
+        report["chats_ui_error"] = str(exc)
+        return "BLOCKED"
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["chats_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    finally:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            if manager is not None:
+                manager.stop()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
+def _fake_search_request_count(report: dict) -> int:
+    """Read the loopback fake-search request counter recorded in the report."""
+    port = (report.get("fake_search") or {}).get("loopback_port")
+    if not port:
+        return -1
+    try:
+        response = httpx.get(f"http://127.0.0.1:{port}/__stats__", timeout=5.0)
+        return int(response.json().get("requests") or 0)
+    except Exception:  # noqa: BLE001 - the check reports the -1 below
+        return -1
+
+
+def run_ui_tasks_e2e(url: str, mcp_url: str, run_dir: Path, report: dict) -> str:
+    """Drive the tasks panel through the system browser; return the status.
+
+    The chat is selected while it has none of the test queries, so the tasks are
+    created only after the page is open (from a background thread, because the
+    sync Playwright API owns the main thread): the new cards and links can then
+    reach the panel only through its own poll timer, never through the selection
+    request or a Refresh click. The limited task must render three links and the
+    default one five. One poll cycle must not add a search request, and switching
+    chats must refresh the panel at once. Deleting the chat must warn about the
+    active tasks and then remove them.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "BLOCKED"
+
+    shot = run_dir / "screenshots" / "11_tasks.png"
+    limit_query = f"{MANY_MARKER} limit"
+    default_query = f"{MANY_MARKER} default"
+    manager = None
+    browser = None
+    page_errors: list = []
+
+    # Create the tasks before the browser starts: the sync Playwright API owns
+    # the main thread's event loop, so asyncio.run must happen first.
+    try:
+        chats = httpx.get(f"{url}/api/chats", timeout=20.0).json().get("chats", [])
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["tasks_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    if not chats:
+        report["tasks_ui_error"] = "there is no chat to attach the task to"
+        return "FAIL"
+    chat_id = chats[0]["id"]
+
+    other_chat_id = None
+    for chat in chats:
+        if chat["id"] == chat_id:
+            continue
+        try:
+            tasks = httpx.get(
+                f"{url}/api/chats/{chat['id']}/tasks", timeout=20.0
+            ).json()
+        except Exception:  # noqa: BLE001 - an unreadable chat is just skipped
+            continue
+        if not tasks.get("count"):
+            other_chat_id = chat["id"]
+            break
+
+    # The task queries the selected chat already has, read directly from the
+    # API: the panel must show exactly these before any new task is created.
+    try:
+        chat_tasks = httpx.get(
+            f"{url}/api/chats/{chat_id}/tasks", timeout=20.0
+        ).json().get("tasks", [])
+    except Exception:  # noqa: BLE001 - an unreadable chat just yields no expectation
+        chat_tasks = []
+    pre_task_queries = sorted(str(task.get("query") or "") for task in chat_tasks)
+
+    client = SdkMcpClient(mcp_url, call_timeout_s=30.0)
+
+    try:
+        manager = sync_playwright().start()
+        browser, channel = qa_browser.launch_browser(manager, headless=True)
+        report["ui_channel"] = channel
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.set_default_timeout(60000)
+        page = context.new_page()
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_selector("#chats-list .chat-item", timeout=30000)
+        page.wait_for_selector(".pill.ok", timeout=30000)
+
+        # Select the chat before the tasks exist. Its own tasks request resolves
+        # with the pre-task state, so a later appearance of the cards can only
+        # come from the poll timer; no Refresh click happens anywhere below.
+        page.click(
+            f'#chats-list .chat-item[data-chat-id="{chat_id}"] .chat-select'
+        )
+        page.wait_for_selector(
+            f'#chats-list .chat-item.active[data-chat-id="{chat_id}"]',
+            timeout=15000,
+        )
+        # The panel must reflect the pre-task state of this chat before the MCP
+        # calls start, so the selection request has already resolved and cannot
+        # deliver the tasks that are created next.
+        page.wait_for_function(
+            """(expected) => {
+                const cards = Array.from(
+                    document.querySelectorAll('#tasks-list .task-card')
+                );
+                const queries = cards.map(
+                    (card) => (card.querySelector('.task-query')?.textContent || '').trim()
+                );
+                return expected.length === queries.length
+                    && expected.every((query) => queries.includes(query));
+            }""",
+            arg=pre_task_queries,
+            timeout=30000,
+        )
+        # A local read resolves in milliseconds; this settle guarantees the
+        # selection request finished before any task is created.
+        page.wait_for_timeout(1000)
+
+        # The sync Playwright API owns the main thread, so the real MCP calls run
+        # in a background thread with their own event loop. The page stays
+        # untouched: only its ten-second timer can bring the new state in.
+        schedule_state: dict = {}
+
+        def _schedule_from_thread():
+            requests = (
+                (
+                    "limited",
+                    {
+                        "query": limit_query,
+                        "interval_seconds": 3600,
+                        "chat_id": chat_id,
+                        "max_results": 3,
+                    },
+                ),
+                (
+                    "defaulted",
+                    {
+                        "query": default_query,
+                        "interval_seconds": 3600,
+                        "chat_id": chat_id,
+                    },
+                ),
+            )
+            try:
+                for key, arguments in requests:
+                    schedule_state[key] = asyncio.run(
+                        client.call_tool("schedule_search_task", arguments)
+                    )
+            except Exception as exc:  # noqa: BLE001 - reported as FAIL below
+                schedule_state["error"] = f"{type(exc).__name__}: {exc}"
+
+        scheduler_thread = threading.Thread(
+            target=_schedule_from_thread, name="ui-tasks-schedule", daemon=True
+        )
+        scheduler_thread.start()
+
+        auto_refreshed = False
+        try:
+            page.wait_for_function(
+                """() => {
+                    const cards = Array.from(
+                        document.querySelectorAll('#tasks-list .task-card')
+                    );
+                    const links = (needle) => cards
+                        .filter((card) => (card.querySelector('.task-query')?.textContent || '').includes(needle))
+                        .map((card) => card.querySelectorAll('.task-links a').length);
+                    const limited = links('limit')[0] || 0;
+                    const defaulted = links('default')[0] || 0;
+                    return limited === 3 && defaulted === 5;
+                }""",
+                timeout=90000,
+            )
+            auto_refreshed = True
+        except Exception:  # noqa: BLE001 - the link counts are asserted below
+            auto_refreshed = False
+
+        scheduler_thread.join(timeout=60.0)
+        reported_limited = schedule_state.get("limited")
+        reported_defaulted = schedule_state.get("defaulted")
+        task_created = (
+            reported_limited is not None
+            and reported_defaulted is not None
+            and bool(reported_limited.ok)
+            and bool((reported_limited.structured or {}).get("created"))
+            and bool(reported_defaulted.ok)
+            and bool((reported_defaulted.structured or {}).get("created"))
+        )
+        if "error" in schedule_state:
+            report["tasks_ui_schedule_error"] = schedule_state["error"]
+
+        link_counts = page.evaluate(
+            """() => {
+                const cards = Array.from(
+                    document.querySelectorAll('#tasks-list .task-card')
+                );
+                const count = (needle) => {
+                    const card = cards.find((item) =>
+                        (item.querySelector('.task-query')?.textContent || '').includes(needle)
+                    );
+                    return card ? card.querySelectorAll('.task-links a').length : -1;
+                };
+                return { limited: count('limit'), defaulted: count('default') };
+            }"""
+        )
+
+        # One poll cycle re-reads the tasks endpoint only: the fake search
+        # counter must not move. The scheduled runs are already stored and the
+        # task interval is an hour, so no new search can start in this window.
+        before = _fake_search_request_count(report)
+        time.sleep(13.0)
+        after = _fake_search_request_count(report)
+        poll_is_read_only = before >= 0 and after == before
+        report["tasks_ui_poll"] = {
+            "requests_before": before,
+            "requests_after": after,
+        }
+
+        # Switching chats refreshes the panel immediately (well under one poll).
+        switch_ok = True
+        if other_chat_id:
+            page.click(
+                f'#chats-list .chat-item[data-chat-id="{other_chat_id}"] .chat-select'
+            )
+            try:
+                page.wait_for_function(
+                    """() => document.querySelector('#tasks-list')
+                        .textContent.includes('No scheduled tasks')""",
+                    timeout=5000,
+                )
+            except Exception:  # noqa: BLE001 - asserted as a failed switch below
+                switch_ok = False
+            page.click(
+                f'#chats-list .chat-item[data-chat-id="{chat_id}"] .chat-select'
+            )
+            page.wait_for_function(
+                """() => document.querySelector('#tasks-list')
+                    .textContent.includes('limit')""",
+                timeout=5000,
+            )
+
+        warned = {"value": False}
+
+        def _accept(dialog):
+            warned["value"] = "task" in dialog.message.lower()
+            dialog.accept()
+
+        page.once("dialog", _accept)
+        page.locator("#chats-list .chat-item.active .chat-delete").click()
+        page.wait_for_function(
+            "(needle) => !document.querySelector('#tasks-list').textContent.includes(needle)",
+            arg=limit_query,
+            timeout=30000,
+        )
+
+        qa_browser.screenshot(page, shot)
+        context.close()
+        links_ok = (
+            link_counts.get("limited") == 3 and link_counts.get("defaulted") == 5
+        )
+        ok = (
+            task_created
+            and auto_refreshed
+            and links_ok
+            and poll_is_read_only
+            and switch_ok
+            and warned["value"]
+            and not page_errors
+        )
+        report["tasks_ui"] = {
+            "task_created": task_created,
+            "auto_refreshed": auto_refreshed,
+            "link_counts": link_counts,
+            "poll_is_read_only": poll_is_read_only,
+            "switch_immediate": switch_ok,
+            "delete_warning": warned["value"],
+            "page_errors": page_errors,
+        }
+        return "PASS" if ok else "FAIL"
+    except qa_browser.PrerequisiteError as exc:
+        report["tasks_ui_error"] = str(exc)
+        return "BLOCKED"
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["tasks_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    finally:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            if manager is not None:
+                manager.stop()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
+def _create_chat(backend_url: str, title: str = "") -> str:
+    """Create a chat through the real API and return its opaque id."""
+    response = httpx.post(
+        f"{backend_url}/api/chats", json={"title": title}, timeout=20.0
+    )
+    response.raise_for_status()
+    return response.json()["id"]
+
+
+def _request_ids(records: list) -> list:
+    """Return the unique request ids of a trace, in arrival order."""
+    ids: list = []
+    for record in records:
+        request_id = record.get("request_id")
+        if request_id and request_id not in ids:
+            ids.append(request_id)
+    return ids
+
+
+def verify_task_schedule_sse(events: list) -> dict:
+    """Check that turn 1 scheduled a task through the real MCP tool."""
+    names = [name for name, _ in events]
+    errors = [data for name, data in events if name == "error"]
+    done = [data for name, data in events if name == "done"]
+    calls = [
+        data
+        for name, data in events
+        if name == "tool_call" and data.get("tool") == TASKS_EXPECTED_TOOL_1
+    ]
+    results = [
+        data for name, data in events if name == "tool_result"
+    ]
+    ok = (
+        not errors
+        and bool(done)
+        and bool(calls)
+        and any(
+            result.get("tool") == TASKS_EXPECTED_TOOL_1 and result.get("ok")
+            for result in results
+        )
+    )
+    return {"ok": ok, "events": names, "schedule_calls": len(calls), "errors": errors}
+
+
+def verify_task_summary_sse(events: list, expected_urls) -> dict:
+    """Check that turn 2 read a summary with real tool links.
+
+    A model may stream a preamble before it calls the tool, so the check does
+    not require the first delta to follow the tool result; it requires the tool
+    call, a successful result and at least two links from the result.
+    """
+    names = [name for name, _ in events]
+    text = "".join(
+        str(data.get("text") or "") for name, data in events if name == "delta"
+    )
+    errors = [data for name, data in events if name == "error"]
+    done = [data for name, data in events if name == "done"]
+    calls = [
+        data
+        for name, data in events
+        if name == "tool_call" and data.get("tool") == TASKS_EXPECTED_TOOL_2
+    ]
+    results = [
+        data
+        for name, data in events
+        if name == "tool_result" and data.get("tool") == TASKS_EXPECTED_TOOL_2
+    ]
+    text_lower = text.lower()
+    found = sorted({url for url in expected_urls if url.lower() in text_lower})
+    ok = (
+        not errors
+        and bool(done)
+        and bool(calls)
+        and any(result.get("ok") for result in results)
+        and len(found) >= 2
+    )
+    return {
+        "ok": ok,
+        "events": names,
+        "urls_found": found,
+        "url_count": len(found),
+        "errors": errors,
+    }
+
+
+def _run_tasks_turns(
+    backend_url: str, records_path: Path, run_dir: Path, report: dict, model_ready: bool
+) -> str:
+    """Run the two LIVE turns of the tasks scenario and return its status."""
+    if not model_ready:
+        report["tasks_live_reason"] = "no local OpenAI-compatible model"
+        return "BLOCKED"
+
+    chat_id = _create_chat(backend_url, "Tasks live")
+    events_schedule = collect_sse(
+        f"{backend_url}/api/chat/stream",
+        {"chat_id": chat_id, "message": TASKS_QUESTION_1},
+        timeout_s=1800.0,
+    )
+    sse_schedule = verify_task_schedule_sse(events_schedule)
+    report["sse_schedule"] = sse_schedule
+
+    # The scheduler runs the first search within a tick; wait a short bounded
+    # time so the summary turn has a stored run to read.
+    time.sleep(3.0)
+    events_summary = collect_sse(
+        f"{backend_url}/api/chat/stream",
+        {"chat_id": chat_id, "message": TASKS_QUESTION_2},
+        timeout_s=1800.0,
+    )
+    sse_summary = verify_task_summary_sse(events_summary, RESULT_URLS)
+    report["sse_summary"] = sse_summary
+
+    records = read_trace(records_path)
+    ids = _request_ids(records)
+    trace_schedule = verify_trace(records, ids[0] if ids else None, TASKS_SCHEDULE_CHAIN)
+    trace_summary = verify_trace(
+        records, ids[-1] if ids else None, TASKS_SUMMARY_CHAIN
+    )
+    tools_listed = verify_tools_listed(
+        records, ids[0] if ids else None, TASKS_EXPECTED_TOOL_1
+    )
+    report["trace_schedule"] = trace_schedule
+    report["trace_summary"] = trace_summary
+    report["tools_listed"] = tools_listed
+
+    ok = (
+        bool(sse_schedule["ok"])
+        and bool(sse_summary["ok"])
+        and bool(trace_schedule["ok"])
+        and bool(trace_summary["ok"])
+        and bool(tools_listed["ok"])
+    )
+    return "PASS" if ok else "FAIL"
+
+
 def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     """Execute the live E2E scenario and return its exit code."""
-    is_search = str(scenario or "arithmetic").strip().lower() == "search"
-    question = SEARCH_QUESTION if is_search else QUESTION
-    chain = SEARCH_TRACE_CHAIN if is_search else REQUIRED_TRACE_CHAIN
-    session_id = "live-e2e-search" if is_search else "live-e2e"
+    scenario = str(scenario or "arithmetic").strip().lower()
+    is_search = scenario == "search"
+    is_tasks = scenario == "tasks"
+    label = "live-e2e-search" if is_search else "live-e2e-tasks" if is_tasks else "live-e2e"
+    question = (
+        SEARCH_QUESTION if is_search else TASKS_QUESTION_1 if is_tasks else QUESTION
+    )
+    chain = (
+        SEARCH_TRACE_CHAIN
+        if is_search
+        else TASKS_SCHEDULE_CHAIN
+        if is_tasks
+        else REQUIRED_TRACE_CHAIN
+    )
 
     mcp_port = int(os.environ.get("MCP_TEST_PORT") or DEFAULT_MCP_TEST_PORT)
     backend_port = int(os.environ.get("BACKEND_TEST_PORT") or DEFAULT_BACKEND_TEST_PORT)
 
-    run_dir = create_run_dir("live-e2e-search" if is_search else "live-e2e")
+    run_dir = create_run_dir(label)
+    db_path = run_dir / "day18.sqlite3"
     report: dict = {
-        "scenario": "live-e2e-search" if is_search else "live-e2e",
+        "scenario": label,
         "question": question,
-        "expected_answer": "" if is_search else EXPECTED_ANSWER,
+        "expected_answer": "" if (is_search or is_tasks) else EXPECTED_ANSWER,
         "expected_tool": chain[3][1]["tool"],
         "ui_requested": bool(ui),
+        "db": relative(db_path),
     }
 
     try:
@@ -755,7 +1374,10 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         return EXIT_PREREQUISITE
 
     config, model, launcher = ensure_local_model(run_dir, report)
-    if not model or qa_local_llm.probe(config.base_url, api_key=config.api_key) is None:
+    model_ready = bool(model) and qa_local_llm.probe(
+        config.base_url, api_key=config.api_key
+    ) is not None
+    if not model_ready and not is_tasks:
         print(
             "LIVE_LLM_STATUS: BLOCKED - no local OpenAI-compatible model is "
             "running and no launcher is configured "
@@ -768,8 +1390,10 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         write_report(run_dir, report)
         print(f"RUN_DIR: {relative(run_dir)}")
         return EXIT_PREREQUISITE
+    # The tasks scenario still produces its UI statuses without a model.
 
     report["model"] = model
+    report["model_ready"] = model_ready
     mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
     backend_url = f"http://127.0.0.1:{backend_port}"
 
@@ -778,8 +1402,10 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     fake_search: FakeSearchServer | None = None
     cleanup: list = []
     exit_code = EXIT_FAIL
-    live_status = "FAIL"
+    live_status = "BLOCKED" if is_tasks and not model_ready else "FAIL"
     ui_status = "NOT_REQUESTED"
+    chats_ui_status = "NOT_REQUESTED"
+    tasks_ui_status = "NOT_REQUESTED"
 
     try:
         mcp_env = {
@@ -787,10 +1413,14 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             "MCP_SERVER_PORT": str(mcp_port),
             # The harness always isolates the MCP child from a local .env. In
             # the arithmetic scenario this prevents an accidental real search
-            # call; the search scenario passes an explicit fake API below.
+            # call; the search and tasks scenarios pass an explicit fake API.
             "MCP_LOAD_DOTENV": "0",
+            "AGENT_DB_PATH": str(db_path),
         }
-        if is_search:
+        if is_tasks:
+            # The scheduler must run soon so the summary turn has a stored run.
+            mcp_env["MCP_TASK_TICK_SECONDS"] = "0.5"
+        if is_search or is_tasks:
             fake_search = FakeSearchServer(0).start()
             report["fake_search"] = {"loopback_port": fake_search.port}
             # The key lives only in the MCP child process; the harness keeps the
@@ -833,6 +1463,7 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
                     "AGENT_MODEL_TIMEOUT_SECONDS": "1800",
                     "AGENT_TRACE_PATH": str(run_dir / "trace.jsonl"),
                     "AGENT_LOG_LEVEL": "INFO",
+                    "AGENT_DB_PATH": str(db_path),
                 }
             ),
             log_path=run_dir / "backend.log",
@@ -849,73 +1480,104 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             print("LIVE_LLM_STATUS: FAIL - the MCP server did not complete a handshake")
             return EXIT_FAIL
 
-        events = collect_sse(
-            f"{backend_url}/api/chat/stream",
-            {"session_id": session_id, "message": question},
-            timeout_s=1800.0,
-        )
-        sse = (
-            verify_search_sse(events, RESULT_URLS)
-            if is_search
-            else verify_sse(events)
-        )
-        report["sse"] = sse
+        records_path = run_dir / "trace.jsonl"
 
-        records = read_trace(run_dir / "trace.jsonl")
-        trace = verify_trace(records, None, chain)
-        report["trace"] = trace
-        report["trace_events"] = [
-            {key: record.get(key) for key in ("event", "phase", "tool", "ok") if key in record}
-            for record in records
-        ]
-
-        tools_listed = {"ok": True, "tool": None, "tool_names": []}
-        if is_search:
-            tools_listed = verify_tools_listed(records, None, SEARCH_EXPECTED_TOOL)
-            report["tools_listed"] = tools_listed
-
-        key_isolation = None
-        if is_search:
-            sse_text = "".join(
-                str(data.get("text") or "") for name, data in events if name == "delta"
+        if is_tasks:
+            live_status = _run_tasks_turns(
+                backend_url, records_path, run_dir, report, model_ready
             )
-            key_isolation = key_is_isolated(
-                FAKE_API_KEY,
-                (
-                    sse_text,
-                    _read_text(run_dir / "trace.jsonl"),
-                    _read_text(run_dir / "mcp_server.log"),
-                    _read_text(run_dir / "backend.log"),
-                ),
-            )
-            # The verdict is stored, never the key itself.
-            report["key_isolation"] = key_isolation
-
-        ok = bool(sse["ok"]) and bool(trace["ok"]) and bool(tools_listed["ok"])
-        if key_isolation is False:
-            ok = False
-        live_status = "PASS" if ok else "FAIL"
-        report["live_llm_status"] = live_status
-        print(f"LIVE_LLM_STATUS: {live_status}")
-        if not ok:
-            print("  sse: " + json.dumps(sse, ensure_ascii=False))
-            print("  trace: " + json.dumps(trace, ensure_ascii=False))
-            print("  tools: " + json.dumps(tools_listed, ensure_ascii=False))
-            if key_isolation is False:
-                print("  key_isolation: FAIL - the search key leaked into an artifact")
-            print((backend_process.tail_log() or "")[-2000:])
-            exit_code = EXIT_FAIL
+            print(f"TASKS_LIVE_STATUS: {live_status}")
+            report["tasks_live_status"] = live_status
         else:
-            exit_code = EXIT_OK
+            events = collect_sse(
+                f"{backend_url}/api/chat/stream",
+                {"chat_id": _create_chat(backend_url), "message": question},
+                timeout_s=1800.0,
+            )
+            sse = (
+                verify_search_sse(events, RESULT_URLS)
+                if is_search
+                else verify_sse(events)
+            )
+            report["sse"] = sse
+
+            records = read_trace(records_path)
+            trace = verify_trace(records, None, chain)
+            report["trace"] = trace
+            report["trace_events"] = [
+                {key: record.get(key) for key in ("event", "phase", "tool", "ok") if key in record}
+                for record in records
+            ]
+
+            tools_listed = {"ok": True, "tool": None, "tool_names": []}
+            key_isolation = None
+            if is_search:
+                tools_listed = verify_tools_listed(records, None, SEARCH_EXPECTED_TOOL)
+                report["tools_listed"] = tools_listed
+                sse_text = "".join(
+                    str(data.get("text") or "") for name, data in events if name == "delta"
+                )
+                key_isolation = key_is_isolated(
+                    FAKE_API_KEY,
+                    (
+                        sse_text,
+                        _read_text(records_path),
+                        _read_text(run_dir / "mcp_server.log"),
+                        _read_text(run_dir / "backend.log"),
+                    ),
+                )
+                # The verdict is stored, never the key itself.
+                report["key_isolation"] = key_isolation
+                print(f"KEY_ISOLATION: {'PASS' if key_isolation else 'FAIL'}")
+
+            ok = bool(sse["ok"]) and bool(trace["ok"]) and bool(tools_listed["ok"])
+            if key_isolation is False:
+                ok = False
+            live_status = "PASS" if ok else "FAIL"
+            report["live_llm_status"] = live_status
+            print(f"LIVE_LLM_STATUS: {live_status}")
+            if not ok:
+                print("  sse: " + json.dumps(sse, ensure_ascii=False))
+                print("  trace: " + json.dumps(trace, ensure_ascii=False))
+                print("  tools: " + json.dumps(tools_listed, ensure_ascii=False))
+                if key_isolation is False:
+                    print("  key_isolation: FAIL - the search key leaked into an artifact")
+                print((backend_process.tail_log() or "")[-2000:])
 
         if ui:
-            if is_search:
+            if is_tasks:
+                chats_ui_status = run_ui_chats_e2e(
+                    backend_url, db_path, run_dir, report
+                )
+                print(f"CHATS_UI_STATUS: {chats_ui_status}")
+                tasks_ui_status = run_ui_tasks_e2e(backend_url, mcp_url, run_dir, report)
+                print(f"TASKS_UI_STATUS: {tasks_ui_status}")
+                report["chats_ui_status"] = chats_ui_status
+                report["tasks_ui_status"] = tasks_ui_status
+            elif is_search:
                 ui_status = run_ui_search_e2e(backend_url, run_dir, report)
+                print(f"UI_E2E_STATUS: {ui_status}")
+                report["ui_e2e_status"] = ui_status
             else:
                 ui_status = run_ui_e2e(backend_url, run_dir, report)
-            print(f"UI_E2E_STATUS: {ui_status}")
-            report["ui_e2e_status"] = ui_status
-        report["status"] = "pass" if exit_code == EXIT_OK else "fail"
+                print(f"UI_E2E_STATUS: {ui_status}")
+                report["ui_e2e_status"] = ui_status
+
+        if live_status == "PASS":
+            exit_code = EXIT_OK
+        elif live_status == "BLOCKED":
+            exit_code = EXIT_PREREQUISITE
+        else:
+            exit_code = EXIT_FAIL
+        if is_tasks and ui and "FAIL" in (chats_ui_status, tasks_ui_status):
+            exit_code = EXIT_FAIL
+        report["status"] = (
+            "pass"
+            if exit_code == EXIT_OK
+            else "blocked"
+            if exit_code == EXIT_PREREQUISITE
+            else "fail"
+        )
         return exit_code
     except Exception as exc:  # noqa: BLE001 - the run reports, never crashes
         print(f"LIVE_LLM_STATUS: FAIL - {type(exc).__name__}: {exc}")
@@ -932,6 +1594,8 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         report.setdefault("live_llm_status", live_status)
         if ui:
             report.setdefault("ui_e2e_status", ui_status)
+            report.setdefault("chats_ui_status", chats_ui_status)
+            report.setdefault("tasks_ui_status", tasks_ui_status)
         write_report(run_dir, report)
         print(f"RUN_DIR: {relative(run_dir)}")
 
@@ -942,7 +1606,7 @@ def main(argv=None) -> int:
     parser.add_argument("--ui", action="store_true", help="also run the UI E2E")
     parser.add_argument(
         "--scenario",
-        choices=("arithmetic", "search"),
+        choices=("arithmetic", "search", "tasks"),
         default=str(os.environ.get("LIVE_E2E_SCENARIO") or "arithmetic"),
         help="which live scenario to run (default: arithmetic)",
     )

@@ -8,6 +8,7 @@ header on ``POST /search`` and answers the Tavily response shape.
 Markers inside the query drive the edge cases:
 
 * ``__test_empty__`` — HTTP 200 with no results;
+* ``__test_many__`` — HTTP 200 with six results (more than the default page);
 * ``__test_401__`` — HTTP 401;
 * ``__test_429__`` — HTTP 429;
 * ``__test_timeout__`` — accepts the request and never answers in time.
@@ -29,11 +30,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 FAKE_API_KEY = "fake-search-key"
 
 EMPTY_MARKER = "__test_empty__"
+MANY_MARKER = "__test_many__"
 UNAUTHORIZED_MARKER = "__test_401__"
 RATE_LIMIT_MARKER = "__test_429__"
 TIMEOUT_MARKER = "__test_timeout__"
 
 SEARCH_PATH = "/search"
+# Loopback-only diagnostics endpoint the integration tests poll to prove that no
+# new search call was started after a chat with a task was deleted (D18-09).
+STATS_PATH = "/__stats__"
 STALL_SECONDS = 8.0
 
 RESULTS = (
@@ -58,6 +63,18 @@ RESULTS = (
 )
 
 RESULT_URLS = tuple(item["url"] for item in RESULTS)
+
+# Six results, more than the default page size of five: the ``__test_many__``
+# marker lets a test prove that a stored per-task limit is applied.
+MANY_RESULTS = tuple(
+    {
+        "title": f"Python Reference {index}",
+        "url": f"https://docs.example.test/reference/{index}",
+        "content": f"Reference page number {index}.",
+        "score": 0.9 - index / 100,
+    }
+    for index in range(1, 7)
+)
 
 
 class FakeSearchHandler(BaseHTTPRequestHandler):
@@ -87,6 +104,14 @@ class FakeSearchHandler(BaseHTTPRequestHandler):
             "query": query,
             "results": results,
         }
+
+    def do_GET(self):  # noqa: N802 - stdlib naming
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != STATS_PATH:
+            self._send_json(404, {"error": "not found"})
+            return
+        recorded = getattr(self.server, "requests", None) or []
+        self._send_json(200, {"requests": len(recorded)})
 
     def do_POST(self):  # noqa: N802 - stdlib naming
         parsed = urllib.parse.urlsplit(self.path)
@@ -121,6 +146,9 @@ class FakeSearchHandler(BaseHTTPRequestHandler):
         if EMPTY_MARKER in query:
             self._send_json(200, self._response_payload(query, []))
             return
+        if MANY_MARKER in query:
+            self._send_json(200, self._response_payload(query, list(MANY_RESULTS)))
+            return
         self._send_json(200, self._response_payload(query, list(RESULTS)))
 
 
@@ -154,6 +182,11 @@ class FakeSearchServer:
     @property
     def requests(self) -> list:
         return list(self._httpd.requests) if self._httpd is not None else []
+
+    @property
+    def request_count(self) -> int:
+        """How many search requests the fake API has served so far."""
+        return len(self._httpd.requests) if self._httpd is not None else 0
 
     def start(self) -> "FakeSearchServer":
         self._httpd = _FakeSearchHttpServer(

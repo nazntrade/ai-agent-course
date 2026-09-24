@@ -13,7 +13,7 @@ from agent.mcp_adapter import McpCallResult, McpError, McpStatus, McpTool
 
 
 def sample_tools():
-    """The two tools the real server advertises, as value objects."""
+    """The seven tools the real server advertises, as value objects."""
     return [
         McpTool(
             name="calculate",
@@ -34,6 +34,68 @@ def sample_tools():
             title=None,
             description="Report the name, version, status and uptime.",
             input_schema={"type": "object", "properties": {}},
+        ),
+        McpTool(
+            name="search_web",
+            title=None,
+            description="Search the web for current information.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        ),
+        McpTool(
+            name="schedule_search_task",
+            title=None,
+            description="Schedule a repeating web search for the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "interval_seconds": {"type": "integer"},
+                    "chat_id": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query", "interval_seconds"],
+            },
+        ),
+        McpTool(
+            name="list_search_tasks",
+            title=None,
+            description="List the scheduled searches of the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {"chat_id": {"type": "string"}},
+            },
+        ),
+        McpTool(
+            name="get_latest_search_run",
+            title=None,
+            description="Get the latest saved result of a scheduled search.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                },
+            },
+        ),
+        McpTool(
+            name="stop_search_task",
+            title=None,
+            description="Stop a scheduled search of the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                },
+                "required": ["task_id"],
+            },
         ),
     ]
 

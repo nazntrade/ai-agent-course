@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent import settings as settings_module
 from agent.settings import (
     DEFAULT_MODEL_BASE_URL,
     resolve_settings,
 )
+from mcp_server import config as mcp_config
 
 
 class DefaultsTest(unittest.TestCase):
@@ -45,6 +49,14 @@ class DefaultsTest(unittest.TestCase):
         self.assertIsNotNone(self.settings.trace_path)
         self.assertTrue(str(self.settings.trace_path).endswith("trace.jsonl"))
         self.assertTrue(Path(self.settings.trace_path).is_absolute())
+
+    def test_db_path_defaults_inside_the_project(self):
+        self.assertTrue(Path(self.settings.db_path).is_absolute())
+        self.assertTrue(str(self.settings.db_path).endswith("day18.sqlite3"))
+        self.assertIn("data", str(self.settings.db_path))
+
+    def test_chat_context_window_defaults_to_twenty(self):
+        self.assertEqual(self.settings.chat_context_messages, 20)
 
 
 class EnvironmentTest(unittest.TestCase):
@@ -104,6 +116,102 @@ class EnvironmentTest(unittest.TestCase):
             env={"BACKEND_HOST": "127.0.0.1", "BACKEND_PORT": "8700"}, dotenv=False
         )
         self.assertEqual(resolved.public_frontend_url, "http://127.0.0.1:8700")
+
+    def test_db_path_is_resolved_from_the_environment(self):
+        resolved = resolve_settings(
+            env={"AGENT_DB_PATH": "runs/test.sqlite3"}, dotenv=False
+        )
+        self.assertTrue(Path(resolved.db_path).is_absolute())
+        self.assertTrue(str(resolved.db_path).endswith("test.sqlite3"))
+
+    def test_chat_context_messages_is_clamped(self):
+        self.assertEqual(
+            resolve_settings(env={"AGENT_CHAT_CONTEXT_MESSAGES": "1"}, dotenv=False)
+            .chat_context_messages,
+            2,
+        )
+        self.assertEqual(
+            resolve_settings(env={"AGENT_CHAT_CONTEXT_MESSAGES": "500"}, dotenv=False)
+            .chat_context_messages,
+            100,
+        )
+        self.assertEqual(
+            resolve_settings(env={"AGENT_CHAT_CONTEXT_MESSAGES": "nope"}, dotenv=False)
+            .chat_context_messages,
+            20,
+        )
+
+
+class McpConfigDotenvTest(unittest.TestCase):
+    """The MCP server reads ``AGENT_DB_PATH``/tick from the same ``.env``.
+
+    Regression for the SPEC §5.1 gap: the MCP process used to resolve the
+    database path and the tick before ``.env`` was loaded, so a value set only
+    in a local ``.env`` was seen by the backend but not by the MCP server, and
+    the two processes opened different files (or ignored the configured tick).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.env_path = Path(self._tmp.name) / ".env"
+
+    def _write_env(self, body: str) -> None:
+        self.env_path.write_text(body, encoding="utf-8")
+
+    def test_db_path_is_read_from_dotenv_when_allowed(self):
+        target = Path(self._tmp.name) / "from-env.sqlite3"
+        self._write_env(f"AGENT_DB_PATH={target.as_posix()}\n")
+        with mock.patch.dict(os.environ, {"MCP_LOAD_DOTENV": "1"}, clear=False):
+            os.environ.pop("AGENT_DB_PATH", None)
+            resolved = mcp_config.resolve_db_path(env_path=self.env_path)
+        self.assertEqual(resolved, target)
+
+    def test_db_path_ignores_dotenv_when_disabled(self):
+        self._write_env(
+            f"AGENT_DB_PATH={(Path(self._tmp.name) / 'ignored.sqlite3').as_posix()}\n"
+        )
+        with mock.patch.dict(os.environ, {"MCP_LOAD_DOTENV": "0"}, clear=False):
+            os.environ.pop("AGENT_DB_PATH", None)
+            resolved = mcp_config.resolve_db_path(env_path=self.env_path)
+        self.assertEqual(
+            resolved,
+            mcp_config.PROJECT_ROOT / "data" / mcp_config.DEFAULT_DB_FILENAME,
+        )
+
+    def test_db_path_default_matches_the_backend_default(self):
+        # ``env={}`` never touches a file, so this stays isolated from the real
+        # .env; both processes must compute the same default.
+        self.assertEqual(
+            mcp_config.resolve_db_path(env={}),
+            resolve_settings(env={}, dotenv=False).db_path,
+        )
+        self.assertEqual(
+            mcp_config.resolve_db_path(env={}),
+            mcp_config.PROJECT_ROOT / "data" / "day18.sqlite3",
+        )
+
+    def test_task_tick_is_read_from_dotenv_when_allowed(self):
+        self._write_env("MCP_TASK_TICK_SECONDS=7.5\n")
+        with mock.patch.dict(os.environ, {"MCP_LOAD_DOTENV": "1"}, clear=False):
+            os.environ.pop("MCP_TASK_TICK_SECONDS", None)
+            resolved = mcp_config.resolve_task_tick_seconds(env_path=self.env_path)
+        self.assertEqual(resolved, 7.5)
+
+    def test_task_tick_ignores_dotenv_when_disabled(self):
+        self._write_env("MCP_TASK_TICK_SECONDS=7.5\n")
+        with mock.patch.dict(os.environ, {"MCP_LOAD_DOTENV": "0"}, clear=False):
+            os.environ.pop("MCP_TASK_TICK_SECONDS", None)
+            resolved = mcp_config.resolve_task_tick_seconds(env_path=self.env_path)
+        self.assertEqual(resolved, mcp_config.DEFAULT_TASK_TICK_SECONDS)
+
+    def test_explicit_environment_never_reads_the_file(self):
+        self._write_env("AGENT_DB_PATH=/should/not/be/read.sqlite3\n")
+        with mock.patch.dict(os.environ, {"MCP_LOAD_DOTENV": "1"}, clear=False):
+            resolved = mcp_config.resolve_db_path(
+                env={"AGENT_DB_PATH": "explicit.sqlite3"}
+            )
+        self.assertEqual(resolved, mcp_config.PROJECT_ROOT / "explicit.sqlite3")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run

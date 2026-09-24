@@ -87,6 +87,35 @@ class ToOpenAiToolsTest(unittest.TestCase):
             converted[0]["function"]["parameters"], {"type": "object", "properties": {}}
         )
 
+    def test_hidden_properties_are_removed_from_the_model_schema(self):
+        tool = _tool(
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                },
+                "required": ["query"],
+            }
+        )
+        converted = tool_schema.to_openai_tools(
+            [tool], hidden_properties=tool_schema.HIDDEN_INJECTED_ARGUMENTS
+        )
+        parameters = converted[0]["function"]["parameters"]
+        self.assertIn("query", parameters["properties"])
+        self.assertNotIn("chat_id", parameters["properties"])
+        self.assertNotIn("chat_id", parameters.get("required", []))
+
+    def test_hide_properties_removes_required_entries(self):
+        schema = {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "chat_id": {"type": "string"}},
+            "required": ["query", "chat_id"],
+        }
+        cleaned = tool_schema.hide_properties(schema, {"chat_id"})
+        self.assertEqual(cleaned["required"], ["query"])
+        self.assertNotIn("chat_id", cleaned["properties"])
+
 
 class ParseArgumentsTest(unittest.TestCase):
     """Model arguments are parsed defensively."""

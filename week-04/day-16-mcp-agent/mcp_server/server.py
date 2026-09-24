@@ -20,7 +20,10 @@ import sys
 from mcp.server import MCPServer as SdkMCPServer
 
 from mcp_server import SERVER_NAME, SERVER_VERSION
+from mcp_server import tasks as task_service
 from mcp_server import tools
+from mcp_server.config import resolve_task_tick_seconds
+from mcp_server.scheduler import TaskScheduler
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -75,16 +78,34 @@ class MCPServer:
 
     def _build(self) -> SdkMCPServer:
         # v2 keeps transport settings out of the constructor: only ``run()``
-        # receives the bind address.
+        # receives the bind address. Registering the tools must not open the
+        # database or start the scheduler.
         server = SdkMCPServer(self.name, version=self.version)
         server.tool()(tools.calculate)
         server.tool()(tools.get_server_info)
         server.tool()(tools.search_web)
+        server.tool()(tools.schedule_search_task)
+        server.tool()(tools.list_search_tasks)
+        server.tool()(tools.get_latest_search_run)
+        server.tool()(tools.stop_search_task)
         return server
 
+    def _build_scheduler(self) -> TaskScheduler:
+        return TaskScheduler(
+            task_service.default_task_service(),
+            tick_seconds=resolve_task_tick_seconds(),
+        )
+
     def run(self) -> None:
-        """Serve Streamable HTTP in the current process."""
-        self.app.run(transport="streamable-http", host=self.host, port=self.port)
+        """Serve Streamable HTTP and run the background scheduler."""
+        scheduler = self._build_scheduler()
+        scheduler.start()
+        try:
+            self.app.run(
+                transport="streamable-http", host=self.host, port=self.port
+            )
+        finally:
+            scheduler.stop()
 
 
 def main(argv=None) -> int:

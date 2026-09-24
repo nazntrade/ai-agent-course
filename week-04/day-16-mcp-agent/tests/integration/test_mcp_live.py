@@ -50,7 +50,7 @@ class LiveMcpTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.connected, msg=str(status.error))
         self.assertEqual(status.server_name, "day-16-mcp-server")
         self.assertTrue(status.protocol_version)
-        self.assertGreaterEqual(status.tools_count, 2)
+        self.assertEqual(status.tools_count, 7)
 
     async def test_tools_list_is_valid(self):
         status, tools = await inspect_tools(MCP_URL, connect_timeout_s=10.0)
@@ -58,6 +58,13 @@ class LiveMcpTest(unittest.IsolatedAsyncioTestCase):
         names = [tool.name for tool in tools]
         self.assertIn("calculate", names)
         self.assertIn("get_server_info", names)
+        for task_tool in (
+            "schedule_search_task",
+            "list_search_tasks",
+            "get_latest_search_run",
+            "stop_search_task",
+        ):
+            self.assertIn(task_tool, names)
         calculate = next(tool for tool in tools if tool.name == "calculate")
         self.assertEqual(calculate.input_schema.get("type"), "object")
         self.assertIn("operation", calculate.input_schema.get("properties", {}))

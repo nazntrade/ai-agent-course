@@ -47,6 +47,12 @@ class OpenApiSnapshotTest(unittest.TestCase):
             "/api/mcp/status",
             "/api/mcp/tools",
             "/api/chat/stream",
+            # Day 18: saved chats and their scheduled-task panel.
+            "/api/chats",
+            "/api/chats/{chat_id}",
+            "/api/chats/{chat_id}/messages",
+            "/api/chats/{chat_id}/clear",
+            "/api/chats/{chat_id}/tasks",
         ):
             self.assertIn(path, paths)
 

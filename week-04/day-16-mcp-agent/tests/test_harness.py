@@ -10,11 +10,17 @@ import unittest
 
 from harness.live_e2e import (
     SEARCH_TRACE_CHAIN,
+    TASKS_EXPECTED_TOOL_1,
+    TASKS_SCHEDULE_CHAIN,
+    TASKS_SUMMARY_CHAIN,
     key_is_isolated,
     verify_search_sse,
+    verify_task_schedule_sse,
+    verify_task_summary_sse,
     verify_tools_listed,
     verify_trace,
 )
+from harness.live_mcp import _status_from_output
 from harness.mcp_unavailable_e2e import (
     duplicate_sentences,
     error_text_problems,
@@ -293,6 +299,124 @@ class SearchHarnessVerificationTest(unittest.TestCase):
         self.assertFalse(verify_tools_listed(records, "r1", "search_web")["ok"])
 
 
+class TasksHarnessVerificationTest(unittest.TestCase):
+    """The tasks scenario's trace chains, SSE check and status parsing."""
+
+    TOOL_NAMES = [
+        "calculate",
+        "get_server_info",
+        "search_web",
+        "schedule_search_task",
+        "list_search_tasks",
+        "get_latest_search_run",
+        "stop_search_task",
+    ]
+
+    @staticmethod
+    def _records() -> list:
+        return [
+            {"event": "request_start", "request_id": "r1"},
+            {"event": "mcp_connect", "request_id": "r1", "ok": True},
+            {
+                "event": "mcp_list_tools",
+                "request_id": "r1",
+                "tools_count": 7,
+                "tool_names": TasksHarnessVerificationTest.TOOL_NAMES,
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "tool_selection"},
+            {"event": "tool_selected", "request_id": "r1", "tool": "schedule_search_task"},
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "tool": "schedule_search_task",
+                "ok": True,
+                "result": {"task_id": "t1", "status": "active", "created": True},
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "final_answer"},
+            {"event": "request_done", "request_id": "r1", "ok": True},
+            {"event": "request_start", "request_id": "r2"},
+            {"event": "model_request", "request_id": "r2", "phase": "tool_selection"},
+            {"event": "tool_selected", "request_id": "r2", "tool": "get_latest_search_run"},
+            {
+                "event": "tool_completed",
+                "request_id": "r2",
+                "tool": "get_latest_search_run",
+                "ok": True,
+                "result": {"status": "ok", "count": 2, "results": ["<omitted>"]},
+            },
+            {"event": "model_request", "request_id": "r2", "phase": "final_answer"},
+            {"event": "request_done", "request_id": "r2", "ok": True},
+        ]
+
+    def test_schedule_chain_passes(self):
+        result = verify_trace(self._records(), "r1", TASKS_SCHEDULE_CHAIN)
+        self.assertTrue(result["ok"], msg=result)
+
+    def test_summary_chain_passes(self):
+        result = verify_trace(self._records(), "r2", TASKS_SUMMARY_CHAIN)
+        self.assertTrue(result["ok"], msg=result)
+
+    def test_schedule_chain_rejects_the_wrong_tool(self):
+        records = self._records()
+        selected = next(
+            record
+            for record in records
+            if record["event"] == "tool_selected" and record.get("request_id") == "r1"
+        )
+        selected["tool"] = "search_web"
+        self.assertFalse(verify_trace(records, "r1", TASKS_SCHEDULE_CHAIN)["ok"])
+
+    def test_tools_listed_requires_the_scheduling_tool(self):
+        self.assertTrue(
+            verify_tools_listed(self._records(), "r1", TASKS_EXPECTED_TOOL_1)["ok"]
+        )
+        self.assertFalse(
+            verify_tools_listed(self._records(), "r1", "does_not_exist")["ok"]
+        )
+
+    def test_task_schedule_sse_requires_a_successful_result(self):
+        events = [
+            ("tool_call", {"tool": "schedule_search_task", "arguments": {"query": "x"}}),
+            ("tool_result", {"tool": "schedule_search_task", "ok": False, "summary": "boom"}),
+            ("done", {"ok": True}),
+        ]
+        self.assertFalse(verify_task_schedule_sse(events)["ok"])
+        events[1] = (
+            "tool_result",
+            {"tool": "schedule_search_task", "ok": True, "summary": "scheduled"},
+        )
+        self.assertTrue(verify_task_schedule_sse(events)["ok"])
+
+    def test_summary_sse_tolerates_a_preamble_before_the_tool(self):
+        urls = ("https://docs.example.test/1", "https://docs.example.test/2")
+        events = [
+            ("delta", {"text": "Let me check the saved results."}),
+            ("tool_call", {"tool": "get_latest_search_run", "arguments": {}}),
+            (
+                "tool_result",
+                {"tool": "get_latest_search_run", "ok": True, "summary": "ok"},
+            ),
+            ("delta", {"text": f"[a]({urls[0]}) [b]({urls[1]})"}),
+            ("done", {"ok": True}),
+        ]
+        result = verify_task_summary_sse(events, urls)
+        self.assertTrue(result["ok"], msg=result)
+        self.assertEqual(result["url_count"], 2)
+
+    def test_summary_sse_requires_the_tool(self):
+        urls = ("https://docs.example.test/1", "https://docs.example.test/2")
+        events = [
+            ("delta", {"text": f"[a]({urls[0]}) [b]({urls[1]})"}),
+            ("done", {"ok": True}),
+        ]
+        self.assertFalse(verify_task_summary_sse(events, urls)["ok"])
+
+    def test_status_from_output_reads_the_last_token(self):
+        text = "CHATS_UI_STATUS: PASS\nCHATS_UI_STATUS: FAIL - broken\n"
+        self.assertEqual(_status_from_output(text, "CHATS_UI_STATUS"), "FAIL")
+        self.assertEqual(_status_from_output("", "CHATS_UI_STATUS"), "UNKNOWN")
+
+
 class KeyIsolationTest(unittest.TestCase):
     """The search key must be absent from every observable artifact (D17-07)."""
 
@@ -424,6 +548,11 @@ class HarnessEntryPointTest(unittest.TestCase):
         self.assertNotIn("ModuleNotFoundError", completed.stderr)
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
 
+    def test_live_e2e_accepts_the_tasks_scenario_option(self):
+        completed = self._run("live_e2e.py", argv=("--scenario", "tasks", "--help"))
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
     def test_tavily_live_blocks_without_explicit_opt_in(self):
         completed = self._run(
             "tavily_live.py", extra_env={"TAVILY_LIVE_ALLOW": ""}
@@ -431,6 +560,14 @@ class HarnessEntryPointTest(unittest.TestCase):
         self.assertNotIn("ModuleNotFoundError", completed.stderr)
         self.assertEqual(completed.returncode, 2, msg=completed.stderr)
         self.assertIn("TAVILY_STATUS: BLOCKED", completed.stdout)
+
+    def test_tasks_real_live_blocks_without_explicit_opt_in(self):
+        completed = self._run(
+            "tasks_real_live.py", extra_env={"TASKS_REAL_ALLOW": ""}
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+        self.assertIn("TASKS_REAL_STATUS: BLOCKED", completed.stdout)
 
     def test_acceptance_script_runs_from_a_file_path(self):
         completed = self._run("acceptance.py", argv=("--help",))

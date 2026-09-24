@@ -29,7 +29,7 @@ from agent.provider import (
     TextDelta,
     ToolCallDelta,
 )
-from agent.sessions import Session
+from agent.sessions import ChatSession
 from agent.trace import NullTraceWriter
 
 SYSTEM_PROMPT = (
@@ -42,7 +42,21 @@ SYSTEM_PROMPT = (
     "claim to have opened or read the pages, and never invent facts, quotes or links "
     "that the tool did not return. "
     "When you use search results, include the sources as Markdown links [title](url). "
-    "If a tool returns an error, report it briefly; do not fabricate a result."
+    "If a tool returns an error, report it briefly; do not fabricate a result. "
+    "When the user wants a repeated or daily search, call 'schedule_search_task' "
+    "instead of searching once. Explain that the first background run starts "
+    "within a few seconds and that summaries become available after it, and that "
+    "the schedule runs on the server without an open browser. "
+    "When the user asks how many results or links a repeated search should "
+    "return, pass 'max_results' (a number from 1 to 10) to "
+    "'schedule_search_task'; otherwise omit it and the server default is used. "
+    "Scheduling the same query again keeps its existing limit, so to change the "
+    "limit first call 'stop_search_task' and then schedule the query again. "
+    "To report a scheduled summary, call 'get_latest_search_run' and include the "
+    "links from its result; never invent results when the run has not finished "
+    "or ended with an error. "
+    "To stop a scheduled search, first call 'list_search_tasks' and then "
+    "'stop_search_task' with the task id it returned."
 )
 
 DEFAULT_MAX_TOOL_ROUNDS = 3
@@ -162,14 +176,23 @@ def _millis(started: float) -> int:
 
 
 def _arguments_for_ui(arguments: dict) -> dict:
-    """Keep only atomic values in the UI copy of tool arguments."""
+    """Keep only atomic, non-injected values in the UI copy of tool arguments."""
     if not isinstance(arguments, dict):
         return {}
     return {
         str(key): value
         for key, value in arguments.items()
-        if value is None or isinstance(value, (str, int, float, bool))
+        if key not in tool_schema.HIDDEN_INJECTED_ARGUMENTS
+        and (value is None or isinstance(value, (str, int, float, bool)))
     }
+
+
+def _accepts_chat_id(schema) -> bool:
+    """Whether a tool schema declares the injected ``chat_id`` argument."""
+    if not isinstance(schema, dict):
+        return False
+    properties = schema.get("properties")
+    return isinstance(properties, dict) and "chat_id" in properties
 
 
 def _summarize(result) -> str:
@@ -202,18 +225,22 @@ class Orchestrator:
         self._max_tool_rounds = max(int(max_tool_rounds), 1)
 
     async def run(
-        self, request_id: str, session: Session, user_message: str
+        self, request_id: str, session: ChatSession, user_message: str
     ) -> AsyncIterator[ChatEvent]:
         """Yield the events of one request for ``session``."""
         started = time.monotonic()
-        self._trace.write(
-            "request_start",
-            request_id=request_id,
-            session_id=session.session_id,
-            message_chars=len(user_message or ""),
-        )
 
         async with session.lock:
+            # The context window is read under the per-chat lock so two requests
+            # of one chat cannot interleave their history.
+            history = list(session.history())
+            self._trace.write(
+                "request_start",
+                request_id=request_id,
+                chat_id=session.chat_id,
+                context_messages=len(history),
+                message_chars=len(user_message or ""),
+            )
             yield StatusEvent(request_id, "accepted")
 
             # A missing model configuration is a controlled failure detected
@@ -237,12 +264,14 @@ class Orchestrator:
                 if isinstance(event, ErrorEvent):
                     return
             tools = loaded.get("tools") or []
-            openai_tools = tool_schema.to_openai_tools(tools)
+            openai_tools = tool_schema.to_openai_tools(
+                tools, hidden_properties=tool_schema.HIDDEN_INJECTED_ARGUMENTS
+            )
             schema_by_name = {tool.name: tool.input_schema for tool in tools}
 
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                *session.messages,
+                *history,
                 {"role": "user", "content": str(user_message)},
             ]
 
@@ -295,8 +324,7 @@ class Orchestrator:
                     return
 
                 if not calls:
-                    session.append_user(user_message)
-                    session.append_assistant("".join(text_parts))
+                    session.record_success(user_message, "".join(text_parts))
                     answered = True
                     break
 
@@ -320,7 +348,7 @@ class Orchestrator:
                 )
 
                 async for event in self._run_tools(
-                    request_id, round_index, ordered, schema_by_name, messages
+                    request_id, round_index, ordered, schema_by_name, messages, session
                 ):
                     if isinstance(event, ErrorEvent):
                         yield event
@@ -419,6 +447,7 @@ class Orchestrator:
         calls: list,
         schema_by_name: dict,
         messages: list,
+        session,
     ) -> AsyncIterator[ChatEvent]:
         """Run every tool call of one round, feeding results back to the model."""
         for call in calls:
@@ -426,11 +455,14 @@ class Orchestrator:
             raw_arguments = call["arguments"] or "{}"
             call_id = call["id"] or f"call_{name or 'unknown'}"
 
+            schema = schema_by_name.get(name)
             try:
                 arguments = tool_schema.parse_arguments(raw_arguments)
-                arguments = tool_schema.validate_arguments(
-                    schema_by_name.get(name), arguments
-                )
+                arguments = tool_schema.validate_arguments(schema, arguments)
+                # Chat-scoped tools carry an optional ``chat_id`` the model never
+                # sees; the backend overwrites any value the model supplied.
+                if _accepts_chat_id(schema):
+                    arguments["chat_id"] = session.chat_id
             except ValueError as exc:
                 message = str(exc) or "Tool arguments are not valid"
                 self._trace.write(

@@ -1,11 +1,12 @@
-"""Pure implementations of the MCP tools.
+"""Implementations of the MCP tools.
 
 The arithmetic and informational functions are plain, synchronous and
 side-effect free so they can be unit tested without a server.
 ``mcp_server/server.py`` only registers them on the MCP server; the server has
 no shell, filesystem or Git access. ``search_web`` delegates to
 :mod:`mcp_server.web_search`, the single module that performs one outgoing
-HTTPS request.
+HTTPS request. The four scheduled-search tools are thin wrappers over
+:mod:`mcp_server.tasks`, which owns their business rules and persistence.
 
 A controlled failure (for example division by zero) raises the SDK's
 :class:`ToolError`. The MCP layer turns that into a tool error result instead of
@@ -22,6 +23,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver.exceptions import ToolError
 
 from mcp_server import SERVER_NAME, SERVER_VERSION
+from mcp_server import tasks as task_service
 from mcp_server import web_search
 
 Operation = Literal["add", "subtract", "multiply", "divide"]
@@ -120,3 +122,58 @@ def search_web(query: str, max_results: int = 0) -> dict[str, Any]:
         return web_search.default_service().search(trimmed, max_results)
     except web_search.SearchError as exc:
         raise ToolError(exc.message) from exc
+
+
+# Concrete return annotations keep the results structured (see ``calculate``).
+def schedule_search_task(
+    query: str,
+    interval_seconds: int,
+    chat_id: str = "",
+    max_results: int = 0,
+) -> dict[str, Any]:
+    """Schedule a repeating web search for the current chat.
+
+    Use this when the user wants a search to repeat, for example every day. The
+    first run starts within a few seconds; later runs repeat every
+    ``interval_seconds`` seconds. The runs happen on the server, so they do not
+    need an open browser, and their results can be read later.
+
+    ``max_results`` is how many links each run should return (1 to 10); ``0``
+    uses the server default. The limit is stored with the task and applies to
+    every run.
+    """
+    return task_service.default_task_service().create_task(
+        chat_id, query, interval_seconds, max_results
+    )
+
+
+# Concrete return annotation keeps the result structured (see ``calculate``).
+def list_search_tasks(chat_id: str = "") -> dict[str, Any]:
+    """List the scheduled searches of the current chat.
+
+    Use it to find a task id before stopping a task, or to report which
+    scheduled searches exist and when they will run next.
+    """
+    return task_service.default_task_service().list_tasks(chat_id)
+
+
+# Concrete return annotation keeps the result structured (see ``calculate``).
+def get_latest_search_run(task_id: str = "", chat_id: str = "") -> dict[str, Any]:
+    """Get the most recent saved result of a scheduled search.
+
+    Without ``task_id`` it returns the newest run across the scheduled searches
+    of the current chat. With ``task_id`` it returns the newest run of that
+    task. A summary that has not finished yet is reported as pending, and an
+    error is reported as an error instead of an invented result.
+    """
+    return task_service.default_task_service().get_latest_run(chat_id, task_id)
+
+
+# Concrete return annotation keeps the result structured (see ``calculate``).
+def stop_search_task(task_id: str, chat_id: str = "") -> dict[str, Any]:
+    """Stop a scheduled search of the current chat.
+
+    The task keeps its past runs but will not start any new run. Calling it
+    again for an already stopped task is not an error.
+    """
+    return task_service.default_task_service().stop_task(chat_id, task_id)

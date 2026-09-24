@@ -464,6 +464,8 @@ def run() -> int:
                     "AGENT_MODEL_TIMEOUT_SECONDS": "30",
                     "AGENT_TRACE_PATH": str(trace_path),
                     "AGENT_LOG_LEVEL": "INFO",
+                    # The UI creates a chat on load; keep it out of the real data/.
+                    "AGENT_DB_PATH": str(run_dir / "day18.sqlite3"),
                 }
             ),
             log_path=run_dir / "backend.log",

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Day 16 MCP Agent</title>
-    <link rel="stylesheet" href="/styles.css?v=3" />
+    <link rel="stylesheet" href="/styles.css?v=4" />
   </head>
   <body>
     <header class="topbar">
@@ -15,10 +15,19 @@
     </header>
 
     <main class="layout">
+      <aside id="chats-panel" class="panel chats" aria-label="Chats">
+        <div class="panel-head">
+          <h2>Chats</h2>
+          <button id="new-chat-button" type="button" class="ghost">New chat</button>
+        </div>
+        <p id="chat-limit-message" class="limit-message" role="alert" hidden></p>
+        <ul id="chats-list" class="chats-list" aria-label="Chat list"></ul>
+      </aside>
+
       <section class="panel chat" aria-label="Chat">
         <div class="panel-head">
           <h2>Chat</h2>
-          <button id="clear-button" type="button" class="ghost">Clear session</button>
+          <button id="clear-button" type="button" class="ghost">Clear chat</button>
         </div>
         <div id="messages" class="messages" aria-live="polite"></div>
         <form id="chat-form" class="composer" autocomplete="off">
@@ -32,6 +41,14 @@
           <button id="send-button" type="submit">Send</button>
         </form>
         <p class="hint">Enter sends the message, Shift+Enter adds a new line.</p>
+
+        <section id="tasks-panel" class="tasks" aria-label="Scheduled tasks">
+          <div class="panel-head">
+            <h2>Scheduled tasks</h2>
+            <button id="tasks-refresh-button" type="button" class="ghost">Refresh</button>
+          </div>
+          <div id="tasks-list" class="tasks-list"></div>
+        </section>
       </section>
 
       <aside class="panel status" aria-label="MCP status">

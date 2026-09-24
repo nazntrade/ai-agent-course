@@ -178,6 +178,49 @@ def run(ui: bool, live: bool) -> int:
         elif search.returncode != 0 or search_ui_status == "FAIL":
             exit_code = EXIT_FAIL
 
+        # The tasks scenario schedules a repeating search, then reports its
+        # summary and drives the chats and tasks panels. Its UI statuses are
+        # still produced when no local model is reachable, because the tasks
+        # panel is seeded through the real MCP tool and the message history
+        # through the storage layer.
+        print("=== live tasks E2E (real model + fake search + UI) ===")
+        tasks_env = {"RUN_LIVE_LLM": "1"}
+        tasks_env.update({key: os.environ.get(key) for key in BROWSER_ENV_KEYS})
+        tasks = _run(
+            [
+                sys.executable,
+                str(PROJECT_DIR / "harness" / "live_e2e.py"),
+                "--scenario",
+                "tasks",
+                "--ui",
+            ],
+            STEP_TIMEOUT_SECONDS,
+            tasks_env,
+        )
+        print(tasks.stdout or "")
+        print(tasks.stderr or "")
+        tasks_live_status = _status_from_output(tasks.stdout, "TASKS_LIVE_STATUS")
+        chats_ui_status = _status_from_output(tasks.stdout, "CHATS_UI_STATUS")
+        tasks_ui_status = _status_from_output(tasks.stdout, "TASKS_UI_STATUS")
+        if tasks.returncode == 2:
+            tasks_live_status = "BLOCKED"
+        elif tasks.returncode != 0:
+            tasks_live_status = "FAIL"
+        report["steps"]["tasks_live_e2e"] = {
+            "exit_code": tasks.returncode,
+            "live_status": tasks_live_status,
+            "chats_ui_status": chats_ui_status,
+            "tasks_ui_status": tasks_ui_status,
+        }
+        print(f"TASKS_LIVE_STATUS: {tasks_live_status}")
+        print(f"CHATS_UI_STATUS: {chats_ui_status}")
+        print(f"TASKS_UI_STATUS: {tasks_ui_status}")
+        if tasks.returncode == 2:
+            if exit_code == EXIT_OK:
+                exit_code = EXIT_PREREQUISITE
+        elif tasks.returncode != 0 or "FAIL" in (chats_ui_status, tasks_ui_status):
+            exit_code = EXIT_FAIL
+
     report["exit_code"] = exit_code
     report["status"] = {0: "pass", 1: "fail", 2: "prerequisite"}.get(exit_code, "fail")
     write_report(run_dir, report)

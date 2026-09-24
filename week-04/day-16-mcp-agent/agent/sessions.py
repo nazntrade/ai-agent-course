@@ -1,105 +1,72 @@
-"""In-memory chat history of one session.
+"""Per-chat serialization of chat requests.
 
-There is no database: a session lives for the lifetime of the backend process
-and is serialized by its own ``asyncio.Lock`` so two requests of the same
-session never interleave. The store is bounded, so a long-running process does
-not grow without limit.
+Chat history is persisted in SQLite, so a session no longer stores messages: it
+only carries the ``chat_id``, the per-chat :class:`asyncio.Lock` that keeps two
+requests of one chat from interleaving, and the callbacks the orchestrator uses
+to load the context window and to persist a successful turn.
+
+The registry hands out one shared lock per chat id. Locks are cheap and bounded
+by the number of chats, so they are not evicted.
 """
 
 from __future__ import annotations
 
 import asyncio
 import threading
-import time
-from dataclasses import dataclass, field
-
-MAX_SESSIONS = 200
-MAX_MESSAGES_PER_SESSION = 40
+from typing import Callable
 
 
-@dataclass
-class Session:
-    """One chat session: its message history and its serialization lock."""
-
-    session_id: str
-    messages: list = field(default_factory=list)
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-
-    def _trim(self) -> None:
-        if len(self.messages) > MAX_MESSAGES_PER_SESSION:
-            self.messages = self.messages[-MAX_MESSAGES_PER_SESSION:]
-
-    def append_user(self, text: str) -> None:
-        self.messages.append({"role": "user", "content": str(text)})
-        self.updated_at = time.time()
-        self._trim()
-
-    def append_assistant(self, text: str) -> None:
-        if not text:
-            return
-        self.messages.append({"role": "assistant", "content": str(text)})
-        self.updated_at = time.time()
-        self._trim()
-
-    def append_tool(self, tool_call_id: str, text: str) -> None:
-        self.messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": str(tool_call_id),
-                "content": str(text),
-            }
-        )
-        self.updated_at = time.time()
-        self._trim()
-
-    def pop_last_user(self) -> None:
-        """Undo the user turn of a failed request so a retry stays clean."""
-        if self.messages and self.messages[-1].get("role") == "user":
-            self.messages.pop()
-
-
-class SessionStore:
-    """A bounded, thread-safe registry of sessions."""
+class ChatSession:
+    """One request against one chat: its lock, its window and its callbacks."""
 
     def __init__(
         self,
+        chat_id: str,
         *,
-        max_sessions: int = MAX_SESSIONS,
-        max_messages: int = MAX_MESSAGES_PER_SESSION,
+        lock: asyncio.Lock | None = None,
+        history: list | None = None,
+        history_provider: Callable[[], list] | None = None,
+        on_success: Callable[[str, str], None] | None = None,
     ):
-        self._sessions: dict[str, Session] = {}
-        self._lock = threading.Lock()
+        self.chat_id = str(chat_id)
+        self.lock = lock if lock is not None else asyncio.Lock()
+        self._static_history = list(history or [])
+        self._history_provider = history_provider
+        self._on_success = on_success
+
+    def history(self) -> list:
+        """The context window for this request, loaded under the chat lock."""
+        if self._history_provider is not None:
+            return list(self._history_provider())
+        return list(self._static_history)
+
+    def record_success(self, user_text: str, assistant_text: str) -> None:
+        """Persist a finished turn; a failed turn is never written."""
+        if self._on_success is not None:
+            self._on_success(str(user_text), str(assistant_text))
+
+
+class SessionRegistry:
+    """A thread-safe registry of one lock per chat id."""
+
+    def __init__(self, *, max_sessions: int = 200):
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._guard = threading.Lock()
         self._max_sessions = max(int(max_sessions), 1)
-        self._max_messages = max(int(max_messages), 1)
 
-    def get(self, session_id: str) -> Session:
-        """Return the session, creating it on first use."""
-        key = str(session_id)
-        with self._lock:
-            session = self._sessions.get(key)
-            if session is None:
-                session = Session(session_id=key)
-                self._sessions[key] = session
-                self._evict_locked()
-            return session
+    def lock_for(self, chat_id: str) -> asyncio.Lock:
+        key = str(chat_id)
+        with self._guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[key] = lock
+            return lock
 
-    def drop(self, session_id: str) -> None:
-        """Forget a session (used by tests and diagnostics)."""
-        with self._lock:
-            self._sessions.pop(str(session_id), None)
+    def session(self, chat_id: str, **kwargs) -> ChatSession:
+        """Build a request session sharing the chat's lock."""
+        return ChatSession(chat_id, lock=self.lock_for(chat_id), **kwargs)
 
     def ids(self) -> list:
-        """Return the known session ids."""
-        with self._lock:
-            return list(self._sessions)
-
-    def _evict_locked(self) -> None:
-        if len(self._sessions) <= self._max_sessions:
-            return
-        ordered = sorted(
-            self._sessions.values(), key=lambda item: item.updated_at
-        )
-        for session in ordered[: len(self._sessions) - self._max_sessions]:
-            self._sessions.pop(session.session_id, None)
+        with self._guard:
+            return list(self._locks)

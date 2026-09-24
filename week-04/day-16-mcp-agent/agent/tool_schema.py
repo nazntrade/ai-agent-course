@@ -41,6 +41,11 @@ MAX_SCHEMA_DEPTH = 6
 MAX_PROPERTIES = 64
 DEFAULT_SCHEMA: dict = {"type": "object", "properties": {}}
 
+# Arguments the backend injects into a chat-scoped tool call. They stay in the
+# server-side schema (so validation accepts them) but are removed from the
+# model-facing schema, because the model must never see or supply them.
+HIDDEN_INJECTED_ARGUMENTS = frozenset({"chat_id"})
+
 
 def name_is_allowed(name: Any) -> bool:
     """Whether a tool name is safe to forward to the provider."""
@@ -107,8 +112,30 @@ def sanitize_schema(schema: Any, depth: int = 0) -> dict:
     return cleaned
 
 
-def to_openai_tools(tools) -> list:
-    """Convert MCP tools into the OpenAI ``tools`` payload."""
+def hide_properties(schema: dict, hidden) -> dict:
+    """Remove ``hidden`` properties (and their ``required`` entries) from a schema."""
+    names = frozenset(str(name) for name in (hidden or ()))
+    if not names:
+        return schema
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return schema
+    cleaned = dict(schema)
+    cleaned["properties"] = {
+        key: value for key, value in properties.items() if key not in names
+    }
+    required = schema.get("required")
+    if isinstance(required, list):
+        cleaned["required"] = [name for name in required if name not in names]
+    return cleaned
+
+
+def to_openai_tools(tools, hidden_properties=None) -> list:
+    """Convert MCP tools into the OpenAI ``tools`` payload.
+
+    ``hidden_properties`` names server-side arguments that must not be offered
+    to the model; they are dropped from ``properties`` and ``required``.
+    """
     converted: list = []
     seen: set = set()
     for tool in tools or []:
@@ -122,6 +149,7 @@ def to_openai_tools(tools) -> list:
         schema = sanitize_schema(getattr(tool, "input_schema", None))
         if schema.get("type") != "object":
             schema = dict(DEFAULT_SCHEMA)
+        schema = hide_properties(schema, hidden_properties)
         converted.append(
             {
                 "type": "function",

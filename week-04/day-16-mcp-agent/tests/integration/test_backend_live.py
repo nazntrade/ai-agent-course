@@ -66,10 +66,16 @@ def _parse_sse(text: str) -> list:
     return events
 
 
-def _post_chat(url: str, session_id: str, message: str, timeout: float = CHAT_TIMEOUT):
+def _create_chat(url: str, title: str = "") -> str:
+    response = httpx.post(f"{url}/api/chats", json={"title": title}, timeout=20.0)
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+def _post_chat(url: str, chat_id: str, message: str, timeout: float = CHAT_TIMEOUT):
     return httpx.post(
         f"{url}/api/chat/stream",
-        json={"session_id": session_id, "message": message},
+        json={"chat_id": chat_id, "message": message},
         timeout=httpx.Timeout(connect=10.0, read=timeout, write=10.0, pool=10.0),
     )
 
@@ -82,7 +88,7 @@ def _free_port() -> int:
 
 @unittest.skipUnless(RUN_LIVE and BACKEND_URL, "set RUN_LIVE_MCP=1 to run this test")
 class HealthyBackendTest(unittest.TestCase):
-    """Health, MCP status, tools and the streamed chat of the real backend."""
+    """Health, MCP status, tools, chats and the streamed chat of the real backend."""
 
     def test_health(self):
         response = httpx.get(f"{BACKEND_URL}/api/health", timeout=10.0)
@@ -106,7 +112,7 @@ class HealthyBackendTest(unittest.TestCase):
         payload = httpx.get(f"{BACKEND_URL}/api/mcp/status", timeout=20.0).json()
         self.assertTrue(payload["connected"])
         self.assertTrue(payload["protocol_version"])
-        self.assertGreaterEqual(payload["tools_count"], 2)
+        self.assertEqual(payload["tools_count"], 7)
         self.assertEqual(payload["server"]["name"], "day-16-mcp-server")
 
     def test_tools_match_the_real_mcp_server(self):
@@ -118,11 +124,47 @@ class HealthyBackendTest(unittest.TestCase):
             sorted(tool["name"] for tool in payload["tools"]),
             sorted(tool.name for tool in tools),
         )
+        self.assertEqual(len(tools), 7)
+
+    def test_chats_crud_and_history(self):
+        created = httpx.post(
+            f"{BACKEND_URL}/api/chats", json={"title": "Integration"}, timeout=20.0
+        )
+        self.assertEqual(created.status_code, 201)
+        chat_id = created.json()["id"]
+
+        listed = httpx.get(f"{BACKEND_URL}/api/chats", timeout=20.0).json()
+        self.assertIn(chat_id, [chat["id"] for chat in listed["chats"]])
+        self.assertEqual(listed["limit"], 5)
+
+        renamed = httpx.patch(
+            f"{BACKEND_URL}/api/chats/{chat_id}",
+            json={"title": "Renamed"},
+            timeout=20.0,
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["title"], "Renamed")
+
+        response = _post_chat(BACKEND_URL, chat_id, "What is 23 multiplied by 17?")
+        self.assertEqual(response.status_code, 200)
+        history = httpx.get(
+            f"{BACKEND_URL}/api/chats/{chat_id}/messages", timeout=20.0
+        ).json()
+        self.assertGreaterEqual(history["count"], 1)
+
+        cleared = httpx.post(
+            f"{BACKEND_URL}/api/chats/{chat_id}/clear", timeout=20.0
+        )
+        self.assertEqual(cleared.status_code, 200)
+        self.assertGreaterEqual(cleared.json()["messages_deleted"], 1)
+
+        deleted = httpx.delete(f"{BACKEND_URL}/api/chats/{chat_id}", timeout=20.0)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json()["deleted"])
 
     def test_chat_stream_calls_the_mcp_tool(self):
-        response = _post_chat(
-            BACKEND_URL, "it-tool", "What is 23 multiplied by 17?"
-        )
+        chat_id = _create_chat(BACKEND_URL, "Tool chat")
+        response = _post_chat(BACKEND_URL, chat_id, "What is 23 multiplied by 17?")
         self.assertEqual(response.status_code, 200)
         events = _parse_sse(response.text)
         names = [name for name, _ in events]
@@ -138,21 +180,29 @@ class HealthyBackendTest(unittest.TestCase):
         self.assertIn("391", text)
 
     def test_chat_without_a_tool_request(self):
-        response = _post_chat(BACKEND_URL, "it-plain", "Hello there")
+        chat_id = _create_chat(BACKEND_URL, "Plain chat")
+        response = _post_chat(BACKEND_URL, chat_id, "Hello there")
         events = _parse_sse(response.text)
         names = [name for name, _ in events]
         self.assertNotIn("tool_call", names)
         self.assertEqual(names[-1], "done")
 
-    def test_second_request_in_the_same_session(self):
-        first = _post_chat(BACKEND_URL, "it-repeat", "What is 2 multiplied by 3?")
-        second = _post_chat(BACKEND_URL, "it-repeat", "What is 4 multiplied by 5?")
+    def test_second_request_in_the_same_chat(self):
+        chat_id = _create_chat(BACKEND_URL, "Repeat chat")
+        first = _post_chat(BACKEND_URL, chat_id, "What is 2 multiplied by 3?")
+        second = _post_chat(BACKEND_URL, chat_id, "What is 4 multiplied by 5?")
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(_parse_sse(second.text)[-1][0], "done")
 
+    def test_unknown_chat_is_rejected_with_404(self):
+        response = _post_chat(BACKEND_URL, "does-not-exist", "Hello there")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"]["category"], "chat_not_found")
+
     def test_empty_message_is_rejected(self):
-        response = _post_chat(BACKEND_URL, "it-invalid", "")
+        chat_id = _create_chat(BACKEND_URL, "Empty chat")
+        response = _post_chat(BACKEND_URL, chat_id, "")
         self.assertEqual(response.status_code, 422)
 
     def test_backend_still_answers_after_the_requests(self):
@@ -184,6 +234,8 @@ class DegradedBackendTest(unittest.TestCase):
                     "LOCAL_LLM_API_KEY": api_key,
                     "AGENT_MODEL_TIMEOUT_SECONDS": "10",
                     "AGENT_TRACE_PATH": str(run_dir / "trace.jsonl"),
+                    # Keep the real data/ directory out of the test run.
+                    "AGENT_DB_PATH": str(run_dir / "day18.sqlite3"),
                 }
             ),
             log_path=run_dir / "backend.log",
@@ -200,7 +252,8 @@ class DegradedBackendTest(unittest.TestCase):
         url = self._start_backend(
             mcp_url=UNREACHABLE_URL, model_url=DEAD_MODEL_URL, label="backend-mcp-down"
         )
-        response = _post_chat(url, "it-mcp-down", "What is 2 multiplied by 3?")
+        chat_id = _create_chat(url, "Degraded")
+        response = _post_chat(url, chat_id, "What is 2 multiplied by 3?")
         events = _parse_sse(response.text)
         names = [name for name, _ in events]
         self.assertEqual(names[-1], "error")
@@ -212,7 +265,8 @@ class DegradedBackendTest(unittest.TestCase):
         url = self._start_backend(
             mcp_url=MCP_URL, model_url=DEAD_MODEL_URL, label="backend-model-down"
         )
-        response = _post_chat(url, "it-model-down", "Hello there")
+        chat_id = _create_chat(url, "Degraded")
+        response = _post_chat(url, chat_id, "Hello there")
         events = _parse_sse(response.text)
         names = [name for name, _ in events]
         self.assertEqual(names[-1], "error")
@@ -229,7 +283,8 @@ class DegradedBackendTest(unittest.TestCase):
             label="backend-no-key",
             api_key="",
         )
-        response = _post_chat(url, "it-no-key", "Hello there")
+        chat_id = _create_chat(url, "Degraded")
+        response = _post_chat(url, chat_id, "Hello there")
         events = _parse_sse(response.text)
         names = [name for name, _ in events]
         self.assertEqual(names[-1], "error")

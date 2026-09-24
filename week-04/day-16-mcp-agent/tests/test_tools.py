@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from mcp_server import SERVER_NAME, SERVER_VERSION
+from mcp_server import tasks as task_module
 from mcp_server import tools, web_search
 from mcp_server.tools import ToolError
 
@@ -200,6 +201,93 @@ class SearchWebTest(unittest.TestCase):
         self.assertIn("not configured", message)
         for marker in ("Authorization", "Bearer", "api.tavily.com"):
             self.assertNotIn(marker, message)
+
+
+class _StubTaskService:
+    """A scripted ``TaskService`` for the scheduled-tool boundary tests."""
+
+    def __init__(self):
+        self.calls: list = []
+        self.result: dict = {"ok": True}
+
+    def create_task(self, chat_id, query, interval_seconds, max_results=0):
+        self.calls.append(("create", chat_id, query, interval_seconds, max_results))
+        return self.result
+
+    def list_tasks(self, chat_id):
+        self.calls.append(("list", chat_id))
+        return self.result
+
+    def get_latest_run(self, chat_id, task_id=""):
+        self.calls.append(("latest", chat_id, task_id))
+        return self.result
+
+    def stop_task(self, chat_id, task_id):
+        self.calls.append(("stop", chat_id, task_id))
+        return self.result
+
+
+def _patch_tasks(service):
+    return mock.patch.object(task_module, "default_task_service", return_value=service)
+
+
+class ScheduledToolTest(unittest.TestCase):
+    """The four scheduled-search tools delegate to the task service."""
+
+    def test_schedule_search_task_delegates(self):
+        service = _StubTaskService()
+        with _patch_tasks(service):
+            result = tools.schedule_search_task("python news", 86400, "chat-1")
+        self.assertIs(result, service.result)
+        self.assertEqual(
+            service.calls, [("create", "chat-1", "python news", 86400, 0)]
+        )
+
+    def test_schedule_search_task_forwards_max_results(self):
+        service = _StubTaskService()
+        with _patch_tasks(service):
+            result = tools.schedule_search_task("python news", 86400, "chat-1", 3)
+        self.assertIs(result, service.result)
+        self.assertEqual(
+            service.calls, [("create", "chat-1", "python news", 86400, 3)]
+        )
+
+    def test_list_search_tasks_delegates(self):
+        service = _StubTaskService()
+        with _patch_tasks(service):
+            result = tools.list_search_tasks("chat-1")
+        self.assertIs(result, service.result)
+        self.assertEqual(service.calls, [("list", "chat-1")])
+
+    def test_get_latest_search_run_delegates(self):
+        service = _StubTaskService()
+        with _patch_tasks(service):
+            result = tools.get_latest_search_run("task-1", "chat-1")
+        self.assertIs(result, service.result)
+        self.assertEqual(service.calls, [("latest", "chat-1", "task-1")])
+
+    def test_stop_search_task_delegates(self):
+        service = _StubTaskService()
+        with _patch_tasks(service):
+            result = tools.stop_search_task("task-1", "chat-1")
+        self.assertIs(result, service.result)
+        self.assertEqual(service.calls, [("stop", "chat-1", "task-1")])
+
+    def test_tool_error_from_the_service_propagates(self):
+        class Failing(_StubTaskService):
+            def create_task(self, chat_id, query, interval_seconds, max_results=0):
+                raise ToolError("This tool needs an active chat context")
+
+        with _patch_tasks(Failing()):
+            with self.assertRaises(ToolError) as caught:
+                tools.schedule_search_task("news", 60, "")
+        self.assertEqual(str(caught.exception), "This tool needs an active chat context")
+
+    def test_default_chat_id_is_optional(self):
+        service = _StubTaskService()
+        with _patch_tasks(service):
+            tools.list_search_tasks()
+        self.assertEqual(service.calls, [("list", "")])
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run
