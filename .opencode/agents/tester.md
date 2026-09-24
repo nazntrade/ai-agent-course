@@ -3,7 +3,7 @@ description: "Тестер: независимая проверка и приё�
 mode: subagent
 model: deepseek/deepseek-flash
 variant: high
-steps: 25
+steps: 60
 permission:
   edit: deny
   bash:
