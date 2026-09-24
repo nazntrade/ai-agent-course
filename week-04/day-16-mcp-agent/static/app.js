@@ -5,6 +5,10 @@
 // credential, an Authorization header or an upstream provider key.
 const API_BASE = "";
 
+// The MCP tool whose slow external call drives the spinning-globe indicator.
+const WEB_SEARCH_TOOL = "search_web";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 const messagesEl = document.getElementById("messages");
 const formEl = document.getElementById("chat-form");
 const inputEl = document.getElementById("message-input");
@@ -66,6 +70,55 @@ function setStage(bubble, text) {
   }
 }
 
+// A small spinning globe is shown only while the web-search tool is running.
+// It is created lazily inside the answer bubble and toggled by the `active`
+// class, so consecutive searches reuse one element.
+function createGlobeIcon() {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const outline = document.createElementNS(SVG_NS, "circle");
+  outline.setAttribute("cx", "12");
+  outline.setAttribute("cy", "12");
+  outline.setAttribute("r", "10");
+  const meridian = document.createElementNS(SVG_NS, "ellipse");
+  meridian.setAttribute("cx", "12");
+  meridian.setAttribute("cy", "12");
+  meridian.setAttribute("rx", "4.5");
+  meridian.setAttribute("ry", "10");
+  const equator = document.createElementNS(SVG_NS, "path");
+  equator.setAttribute("d", "M2 12h20");
+  svg.appendChild(outline);
+  svg.appendChild(meridian);
+  svg.appendChild(equator);
+  return svg;
+}
+
+function searchSpinner(bubble) {
+  return bubble.querySelector(":scope > .search-spinner");
+}
+
+function showSearchSpinner(bubble) {
+  let spinner = searchSpinner(bubble);
+  if (!spinner) {
+    spinner = document.createElement("span");
+    spinner.className = "search-spinner";
+    spinner.setAttribute("role", "status");
+    spinner.setAttribute("aria-label", "Searching the web");
+    spinner.appendChild(createGlobeIcon());
+    bubble.appendChild(spinner);
+  }
+  spinner.classList.add("active");
+}
+
+function hideSearchSpinner(bubble) {
+  const spinner = searchSpinner(bubble);
+  if (spinner) {
+    spinner.classList.remove("active");
+  }
+}
+
 // One collapsed Technical details block per answer. Progress lines and the raw
 // tool-call arguments live only here, never in the streamed answer text.
 function technicalBlock(bubble) {
@@ -113,6 +166,7 @@ function describeError(event) {
 
 function failBubble(bubble, text) {
   removeLoader(bubble);
+  hideSearchSpinner(bubble);
   let body = bubble.querySelector(".text");
   if (!body) {
     body = document.createElement("span");
@@ -219,9 +273,15 @@ async function sendMessage(message, bubble) {
           appendText(data.text);
         } else if (event === "tool_call") {
           setStage(bubble, `Calling ${data.tool}…`);
+          if (data.tool === WEB_SEARCH_TOOL) {
+            showSearchSpinner(bubble);
+          }
           const args = JSON.stringify(data.arguments || {});
           technicalLine(bubble, `MCP tool call: ${data.tool} ${args}`, false);
         } else if (event === "tool_result") {
+          if (data.tool === WEB_SEARCH_TOOL) {
+            hideSearchSpinner(bubble);
+          }
           technicalLine(
             bubble,
             `${data.tool} ${data.ok ? "returned" : "failed"}: ${data.summary}`,
@@ -233,6 +293,7 @@ async function sendMessage(message, bubble) {
         } else if (event === "error") {
           failBubble(bubble, describeError(data));
         } else if (event === "done") {
+          hideSearchSpinner(bubble);
           removeLoader(bubble);
         }
       }
@@ -240,6 +301,7 @@ async function sendMessage(message, bubble) {
     }
   }
 
+  hideSearchSpinner(bubble);
   removeLoader(bubble);
   // A finished request with no text and no technical lines leaves no bubble.
   if (!bubble.querySelector(".text") && !bubble.querySelector("details.technical")) {

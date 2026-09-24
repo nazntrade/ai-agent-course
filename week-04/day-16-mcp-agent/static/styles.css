@@ -193,6 +193,42 @@ a:focus-visible {
   margin-left: 0.5rem;
 }
 
+/* Small spinning globe shown only while the web-search tool is running. */
+.search-spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  margin-left: 0.45rem;
+  color: var(--accent);
+  vertical-align: -2px;
+  animation: search-spin 1.1s linear infinite;
+}
+
+.search-spinner.active {
+  display: inline-block;
+}
+
+.search-spinner svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.search-spinner svg circle,
+.search-spinner svg ellipse,
+.search-spinner svg path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+@keyframes search-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 details.technical {
   margin-top: 0.5rem;
 }
