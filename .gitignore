@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
 .idea/
 .vscode/
 
@@ -13,4 +15,3 @@ __pycache__/
 # Isolated local E2E runtime (qa/)
 qa/.runs/
 qa/*.local.json
-

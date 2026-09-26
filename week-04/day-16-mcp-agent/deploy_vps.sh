@@ -82,14 +82,14 @@ systemctl restart day16-mcp
 systemctl is-active --quiet day16-mcp
 systemctl restart day16-backend
 
-echo 'Waiting for the backend and the MCP tools...'
+echo 'Waiting for the backend and the deployed MCP tool contract...'
 for attempt in {1..20}; do
     if curl -fsS --max-time 5 http://127.0.0.1:8600/api/health >/dev/null 2>&1; then
-        status=$(curl -fsS --max-time 5 http://127.0.0.1:8600/api/mcp/status 2>/dev/null || true)
-        if [[ "$status" =~ \"connected\"[[:space:]]*:[[:space:]]*true ]] && \
-           [[ "$status" =~ \"tools_count\"[[:space:]]*:[[:space:]]*([0-9]+) ]] && \
-           (( ${BASH_REMATCH[1]} >= 3 )); then
-            echo 'DEPLOY_STATUS: PASS - backend healthy, MCP connected, at least 3 tools.'
+        tools_response=$(curl -fsS --max-time 5 http://127.0.0.1:8600/api/mcp/tools 2>/dev/null || true)
+        if [[ -n "$tools_response" ]] && \
+           printf '%s' "$tools_response" | python3 "$PROJECT/harness/check_deploy_tools.py" \
+               "$PROJECT/mcp_server/server.py" >/dev/null 2>&1; then
+            echo 'DEPLOY_STATUS: PASS - backend healthy, MCP connected, registered tools match the deployed source.'
             echo "DEPLOY_COMMIT: ${EXPECTED_SHA:0:12}"
             exit 0
         fi
@@ -97,6 +97,6 @@ for attempt in {1..20}; do
     sleep 1
 done
 
-echo 'DEPLOY_STATUS: FAIL - backend/MCP did not report at least 3 tools.' >&2
+echo 'DEPLOY_STATUS: FAIL - backend/MCP health or registered tool names did not match the deployed source.' >&2
 echo 'Inspect: systemctl status day16-mcp day16-backend --no-pager' >&2
 exit 1

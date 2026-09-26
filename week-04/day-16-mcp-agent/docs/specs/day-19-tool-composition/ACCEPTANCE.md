@@ -81,9 +81,11 @@ DOM-класса (`MarkdownRendererDomTest` — 21, `SearchSpinnerBrowserTest` �
   как данные, дедупликация идёт по `normalize_url` только как по ключу.
 * UI search E2E (`.runs/20260925-172446-live-e2e-search/report.json`): `ui_channel: msedge`,
   `ordered_lists: 1`, `ordered_items: 2`, `ordered_starts: [1]`, `ui_e2e_status: PASS` —
-  ответ модели с нумерованным списком отрендерен как один `<ol>`; в DOM-тестах
-  `tests/test_markdown_ui.py` отдельно проверены 3 пункта с continuation `Source:` как один `<ol>`
-  с `start = 1`, `3.` → `start = 3`, пустые строки (loose list) и новый список после абзаца.
+  фактический ответ модели содержал **2 пункта**, отрендеренные как один `<ol>`.
+  Отдельные DOM-тесты в `tests/test_markdown_ui.py` подтвердили 3 пункта с
+  continuation `Source:` в одном `<ol>` с `start = 1`, `3.` → `start = 3`,
+  пустые строки (loose list) и новый список после абзаца. Эти тесты не
+  подтверждают критерий D19-25 на уровне LIVE с ровно тремя пунктами.
 * Композиция LIVE (`.runs/20260925-172728-live-e2e-composition/report.json`):
   `save_report` принят первым вызовом, `stored_urls` = 3, `identity_ok: true`;
   `REPORTS_UI_STATUS: PASS` (отчёт открыт, 2 ссылки, F5/Refresh/switch).
@@ -114,3 +116,5 @@ URL источников совпадают с `RESULT_URLS` фейкового 
 
 Выполняется Tester (`TEST_STATUS` в итоговом отчёте Coordinator). Уровни
 REAL (D19-19) и VPS (D19-20) остаются `BLOCKED` без явного opt-in/оператора.
+D19-25 подтверждён частично: DOM-тест проверил список 1,2,3, а LIVE/UI
+показал два пункта; LIVE/UI-проверка ровно трёх пунктов ещё не выполнена.
