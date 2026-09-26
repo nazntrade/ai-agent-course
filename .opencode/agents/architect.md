@@ -7,6 +7,8 @@ permission:
   edit: deny
   bash: deny
   task: deny
+  token_export: deny
+  token_stats: allow
 ---
 
 Ты — архитектор проекта AI-Agent-Course.

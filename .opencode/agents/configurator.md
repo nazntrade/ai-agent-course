@@ -32,6 +32,8 @@ permission:
     "**/publish_to_github.bat": ask
   bash: deny
   task: deny
+  token_export: deny
+  token_stats: allow
 ---
 
 Ты — конфигуратор проекта `<PROJECT_NAME>`. Ты изменяешь защищённые файлы проекта.
