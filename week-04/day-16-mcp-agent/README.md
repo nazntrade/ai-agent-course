@@ -706,3 +706,212 @@ LIVE-прогон, а не имитация. В том же прогоне UI-ч
 - Миграция схемы односторонняя: после обновления до v2 более старая версия приложения на той же
   БД откажется писать (контролируемая `SchemaVersionError`); backend и MCP-сервер обновляются
   вместе.
+
+## День 19. Композиция MCP-инструментов
+
+### Задача дня
+
+Научить агента по **одному сообщению пользователя** самостоятельно выполнять цепочку из трёх
+**разных настоящих MCP-инструментов**, передавая structured-результат каждого шага следующему:
+
+```
+search_web  →  digest_search_results (обработка)  →  save_report (сохранение)  →  финальный ответ
+```
+
+Каждый шаг — отдельный реальный MCP-вызов, видимый в `tool_call`/`tool_result` (блок
+`Technical details`). Один инструмент не вызывает остальные внутри себя, а передача данных не
+изображается текстом модели. Сценарий A: `Find news about Kotlin, make a short summary with
+sources and save it` → 3 вызова, отчёт сохранён, ответ про доступ к отчёту. Сценарий B:
+`Find news about Kotlin and tell me briefly` → только `search_web` + `digest_search_results`,
+отчёт не создаётся.
+
+Архитектура дней 16–18 сохранена: отдельный MCP-сервер (Streamable HTTP, `/mcp`), FastAPI-backend
+с SSE-чатом, единственная сетевая граница `mcp_server/web_search.py` (Tavily), общий SQLite-файл,
+trace и harness.
+
+### Что реализовано
+
+| Файл | Назначение |
+| --- | --- |
+| `storage/db.py` | schema v3: таблица `reports`, `MIGRATIONS[3]` (v2→v3), прежний гейт версии |
+| `storage/reports.py` | `ReportRepository`: insert + prune (100 на чат), list/get, безопасный `sources_json` |
+| `mcp_server/reports.py` | детерминированные `normalize_url`/`sanitize_sources`/`build_summary`/`compute_digest_id`/`build_digest`, `ReportService.digest/save` |
+| `mcp_server/tools.py` | 2 тонких инструмента с model-facing docstrings; прежние 7 не изменены |
+| `mcp_server/server.py` | регистрация 9 инструментов |
+| `agent/orchestrator.py` | `DEFAULT_MAX_TOOL_ROUNDS = 5`, `SYSTEM_PROMPT` с обязательным порядком |
+| `agent/settings.py` | `AGENT_MAX_TOOL_ROUNDS` (clamp 2..10, default 5) |
+| `agent/server.py` | `max_tool_rounds` в `Orchestrator`; `GET .../reports` и `GET .../reports/{id}` |
+| `agent/chats.py` | `reports_for_chat`, `report_for_chat`, категория `report_not_found` |
+| `static/index.html`, `app.js`, `styles.css` | панель `Saved reports` с ленивой деталью и безопасным рендером |
+| `tests/test_reports.py`, `test_reports_api.py`, `test_reports_ui.py` | новые UNIT-тесты |
+| `tests/integration/test_reports_live.py` | INT-сценарий композиции |
+| `harness/reports_restart.py`, `harness/reports_real_live.py` | RESTART и opt-in REAL |
+| `harness/live_e2e.py`, `harness/acceptance.py`, `harness/live_mcp.py` | LIVE/UI/INT-статусы дня 19 |
+| `docs/specs/day-19-tool-composition/*` | SPEC/PLAN/ACCEPTANCE (D19-01…D19-25) |
+
+Все `.bat` (доверенные точки входа) **не изменялись**: проверки встроены в существующие
+`test.bat`, `smoke_test.bat`, `test.bat acceptance`.
+
+### Хранение отчётов
+
+Отчёты лежат в той же БД `AGENT_DB_PATH`, что чаты/задания/прогоны (schema v3). Пишет `reports`
+только MCP-сервер; backend читает их и каскадно удаляет вместе с чатом. Существующая БД v2
+обновляется на месте (добавляется только таблица `reports`, данные не теряются); БД новее v3
+отклоняется прежней `SchemaVersionError`. Открытие БД остаётся ленивым: `tools/list` и
+`digest_search_results` файл не создают. На VPS `AGENT_DB_PATH` задаётся вне деплой-каталога,
+поэтому отчёты переживают fast-forward деплой.
+
+### Контракт новых инструментов
+
+Всего инструментов 9 (7 прежних + 2 новых).
+
+| Инструмент | Контракт |
+| --- | --- |
+| `digest_search_results(search_result)` | принимает **весь** structured-результат `search_web`; детерминированно санитайзит (`html.unescape`, удаление zero-width, вырезание bare URL, замена `[]()<>\`#*~\|{}` и лимиты 200/300), отсеивает navigation/boilerplate (`filtered_removed`), дедуплицирует URL канонизацией, оставляет **до 3** источников в порядке выдачи, строит plain-text `summary` и `digest_id = d19-<sha256[:16]>` по каноническому (URL-сортированному) summary; пустая/полностью отфильтрованная выдача → `status:"empty"` |
+| `save_report(digest, chat_id)` | принимает **весь** digest; валидирует `chat_id`/`status`/`topic`/длину summary, повторно санитайзит sources, пересчитывает `digest_id` (расхождение → `ToolError` без записи) и **сам пересобирает** сохраняемый `summary` из sources; пишет в `reports` текущего чата с prune; у инструмента нет аргумента пути или URL |
+
+`summary` копируется с сервера, а не с ответа модели: переформатирование, другие пробелы или
+отсутствие `summary` первый `save_report` не ломают; подмена topic/URL/текста sources отклоняется
+по `digest_id`. `chat_id` инжектится backend'ом и скрыт от модели; `digest`/`save` выполняются
+только по явной просьбе сохранить — обычный поиск отчёт не создаёт. Лимит раундов
+`AGENT_MAX_TOOL_ROUNDS=5` (3 зависимых вызова + финальный ответ + запас; один раунд может нести
+несколько параллельных вызовов).
+
+Промпт требует оформлять перечисления одним ordered-списком `1., 2., 3.` без перезапуска
+нумерации; `static/markdown-render.js` держит continuation-строки (`   Source: url`) и одну пустую
+строку внутри одного `<ol>`, выставляет `ol.start` по первому номеру, а рендер ответа не
+дублирует и не сбрасывает нумерацию. Источники отчёта в панели `Saved reports` — тоже
+упорядоченный список `<ol class="report-sources">`.
+
+### HTTP API и UI
+
+`GET /api/chats/{chat_id}/reports` возвращает `{chat_id, reports:[{report_id,topic,created_at,
+source_count}], count}` (новые первыми), `GET /api/chats/{chat_id}/reports/{report_id}` —
+полный отчёт с `summary` и `sources`. Ошибки — в едином формате (`chat_not_found`,
+`report_not_found`, `chat_storage_unavailable`).
+
+В UI под панелью заданий — панель `Saved reports` (`#reports-list`, `#reports-refresh-button`).
+Карточка `details.report-card[data-report-id]` показывает тему и meta `Saved <date> · N source(s)`,
+детали грузятся лениво при первом открытии; `summary` — plain text через `textContent`, ссылки —
+только http/https с `rel="noopener noreferrer"`. `loadReports()` вызывается при выборе чата,
+после завершения ответа, по `Refresh` и после удаления чата; пусто → `No reports in this chat.`.
+
+### Команды проверок (день 19)
+
+```
+UNIT:          test.bat
+INT + RESTART: smoke_test.bat            (новые REPORTS_INTEGRATION_STATUS, REPORTS_RESTART_STATUS)
+LIVE + UI:     test.bat acceptance       (COMPOSITION_LIVE_STATUS, COMPOSITION_NO_SAVE_LIVE_STATUS, REPORTS_UI_STATUS)
+OPENAPI:       test.bat openapi
+REAL Tavily:   .venv\Scripts\python.exe harness\reports_real_live.py
+               (ручной opt-in, только с REPORTS_REAL_ALLOW=1 и реальным ключом)
+```
+
+### Результаты проверок (фактические)
+
+| Проверка | Команда | Результат |
+| --- | --- | --- |
+| UNIT | `test.bat` | `UNIT_STATUS: PASS` — 554 теста, 58 skipped |
+| UNIT (шаг acceptance) | `test.bat acceptance` | `UNIT_STATUS: PASS` — 525 тестов, 61 skipped |
+| INT + RESTART | `smoke_test.bat` | `MCP_INTEGRATION_STATUS: PASS`, `BACKEND_INTEGRATION_STATUS: PASS`, `SEARCH_INTEGRATION_STATUS: PASS`, `TASKS_INTEGRATION_STATUS: PASS`, `REPORTS_INTEGRATION_STATUS: PASS` (15), `PERSISTENCE_RESTART_STATUS: PASS`, `SCHEDULER_RESTART_STATUS: PASS`, `REPORTS_RESTART_STATUS: PASS` |
+| LIVE + UI | `test.bat acceptance` | `LIVE_LLM_STATUS: PASS`, `SEARCH_LIVE_STATUS: PASS`, `SEARCH_UI_STATUS: PASS`, `TASKS_LIVE_STATUS: PASS`, `CHATS_UI_STATUS: PASS`, `TASKS_UI_STATUS: PASS`, `COMPOSITION_LIVE_STATUS: PASS`, `COMPOSITION_NO_SAVE_LIVE_STATUS: PASS`, `REPORTS_UI_STATUS: PASS` |
+| REAL Tavily | ручной `harness\reports_real_live.py` | `REPORTS_REAL_STATUS: BLOCKED` (нет opt-in/ключа; не запускался) |
+| VPS | ручной чек-лист SPEC §9 | `BLOCKED` (оператор; автоматизация не выполнялась) |
+
+Разница 554 тестов в `test.bat` и 525 в unit-шаге `test.bat acceptance` (ранее
+549 против 520; разница та же — 29) объяснима и не является пропуском тестов дня 19.
+Причина: `harness/acceptance.py` запускает unit-набор через `sanitized_env()`, который
+оставляет только allow-list переменных (`harness/processes.py`, `KEEP_ENV_KEYS`) и убирает
+браузерные пути (`PROGRAMFILES`, `PROGRAMFILES(X86)`, `PROGRAMW6432`, `HOMEDRIVE`). Без них
+`qa_browser.launch_browser` бросает `PrerequisiteError` в `setUpClass`, и три DOM-класса
+(`MarkdownRendererDomTest` — 21, `SearchSpinnerBrowserTest` — 5, `LinkStyleBrowserTest` — 3,
+всего 29) пропускаются целиком: на класс приходится ровно один skip (`skipped` 58 → 61),
+а методы класса не входят в `Ran` (`554 − 29 = 525`). Остальные модули, включая все
+UNIT-тесты дня 19, выполняются в обоих прогонах.
+
+### Исправление ревизии 2 (по логу trace)
+
+Расхождение, найденное на реальном прогоне, исправлено и закреплено регресс-тестами; данные
+из `logs/trace.jsonl` обезличены (домены `example.test`):
+
+* `digest_id` больше не привязан к `summary` модели: `save_report` пересобирает summary из
+  санитизированных sources. Поэтому первый `save_report` проходит, даже если модель переписала
+  многострочный текст (`test_reformatted_summary_still_saves_canonical_summary`,
+  `test_missing_summary_still_saves`); подмена topic/URL/текста sources по-прежнему отклоняется
+  (`test_source_text_tampering_is_rejected`, `test_topic_or_url_tampering_is_rejected`) — теперь
+  и на уровне INT через реальный MCP: `test_tampered_topic_is_rejected_over_mcp`,
+  `test_tampered_source_title_is_rejected_over_mcp`, `test_tampered_source_url_is_rejected_over_mcp`
+  (`ok = false` с `digest_id`-mismatch, `GET .../reports` → `count: 0`).
+* Дайджест отсеивает navigation/boilerplate (`####`, `|`, префиксы `Skip to content` и т. п.) и
+  оставляет не более 3 полезных результатов в порядке выдачи; в summary нет `#`/`|`
+  (`NOISY_RESULTS`, `test_noisy_search_is_filtered_and_saves_clean_summary`,
+  `test_many_results_are_truncated_to_three`).
+* Markdown-рендер сохраняет один `<ol>` на всё перечисление (continuation `Source:` и пустая
+  строка не разрывают список), выставляет `ol.start` для списка, начинающегося не с 1, а источники
+  отчёта рендерятся как `<ol class="report-sources">`.
+
+Фактическое подтверждение UI-прогонов (реальный браузер `msedge`): в
+`.runs/20260925-172446-live-e2e-search/report.json` — `ordered_lists: 1`,
+`ordered_items: 2`, `ordered_starts: [1]`; в
+`.runs/20260925-172728-live-e2e-composition/report.json` — `stored_urls` = 3,
+`identity_ok: true`, `REPORTS_UI_STATUS: PASS`. Отдельные DOM-тесты
+`tests/test_markdown_ui.py` проверяют 3 пункта с continuation как один `<ol>` с `start = 1`,
+`3.` → `start = 3`, пустые строки (loose list) и отдельный список после абзаца.
+
+LIVE-прогон `harness/live_e2e.py` сам поднял и остановил локальную модель (`qwen3.8-27b-local`,
+`started_by_harness: true`, `model_ready: true`). Фактическая trace-цепочка сценария A:
+`mcp_connect → mcp_list_tools(9) → model_request(tool_selection) → tool_selected(search_web) →
+tool_completed(ok) → tool_selected(digest_search_results) → tool_completed(ok) →
+tool_selected(save_report) → tool_completed(ok, report_id) → model_request(final_answer) →
+request_done(ok)`. Сохранённые URL отчёта совпадают с URL поиска (`identity_ok: true`). Сценарий B
+выполнил `search_web` + `digest_search_results` и **не** создал отчёт.
+
+Независимая приёмка Tester (ревизии 1 и 2): `test.bat`, `smoke_test.bat` и `test.bat acceptance`
+запущены заново и совпали со статусами Developer. Tester подтвердил, что INT-регрессии подмены
+(`test_tampered_topic_is_rejected_over_mcp`, `test_tampered_source_title_is_rejected_over_mcp`,
+`test_tampered_source_url_is_rejected_over_mcp`) фактически исполняются через реальный MCP
+(`ok=false`, `GET .../reports` → `count: 0`), а `save_report` не имеет аргумента пути; проверил,
+что `digest_id` не зависит от модельного `summary` и что подмена отклоняется без записи. Дефектов
+не найдено. Итоговый `TEST_STATUS: BLOCKED` — только из-за отложенных D19-19 (реальный Tavily) и
+D19-20 (VPS). Реальных запросов Tavily за приёмку — 0.
+
+Состояние реальной локальной модели в LIVE-прогонах Tester (`MODEL_CHECK_KIND: LOCAL`):
+`LOCAL_MODEL_START: PASS` (поднялась `qwen3.8-27b-local`, llama.cpp, `started_by_harness: true`,
+`model_ready: true`), `LOCAL_MODEL_INFERENCE: PASS` (реальные `model_request`, `finish_reason: stop`;
+генерация подтверждена), `LOCAL_SCENARIO_TEST: PASS` (цепочка `search_web → digest_search_results →
+save_report` с `identity_ok: true`, `save_report` принят первым вызовом; сценарий B — без
+`save_report`).
+
+### Сценарий демонстрации (день 19)
+
+1. `setup.bat`, затем `run_app.bat`.
+2. Ввести `Find news about Kotlin, make a short summary with sources and save it` — под ответом
+   в `Technical details` видны три вызова (`search_web`, `digest_search_results`, `save_report`),
+   а в панели `Saved reports` появляется карточка.
+3. Раскрыть карточку: видна сводка с источниками; ссылки открываются в новой вкладке.
+4. Обновить страницу и перезапустить приложение — отчёт остаётся в панели; удаление чата удаляет
+   и отчёт (каскад).
+5. Ввести `Find news about Kotlin and tell me briefly` — выполняются только `search_web` и
+   `digest_search_results`, новый отчёт не появляется.
+
+### Ограничения дня 19
+
+- **Реальный Tavily не проверялся автоматически**: нет opt-in и ключа; `harness/reports_real_live.py`
+  без `REPORTS_REAL_ALLOW=1` возвращает `REPORTS_REAL_STATUS: BLOCKED`.
+- **Выбор инструментов реальной моделью не детерминирован**: промпт требует обязательный порядок
+  `search_web → digest → save` и запрещает повторный поиск, но фактическое следование
+  подтверждается LIVE-прогоном, а не гарантируется дизайном. Наблюдались прогоны, где локальная
+  модель останавливалась после digest; после усиления промпта и docstring `save_report`
+  два подряд целевых прогона и итоговый `test.bat acceptance` прошли.
+- **VPS не проверялся** (ручной чек-лист оператора).
+- Промпт-эвристика «save/report» может сработать на сообщение со словом `report` без просьбы
+  сохранить, а запрет повторного `search_web` сужает легитимные многошаговые поиски; на
+  обязательных сценариях это не проявилось, отдельным постоянным тестом не покрыто.
+- Ссылки отчёта — только заголовки/сниппеты: страницы не открываются, о чём сказано и модели, и
+  в `note` инструмента.
+- Отображаемый URL источника — это исходные данные, а не ключ дедупликации: валидный http(s) URL
+  может содержать `#fragment`, и он сохраняется как есть. `normalize_url` (без fragment,
+  default-портов и завершающего `/`) используется только для дедупликации, поэтому результаты,
+  отличающиеся лишь fragment'ом или завершающим `/`, схлопываются в первый — это осознанное
+  решение, а не побочный эффект.
+- Ограничение на размер истории не менялось; prune ограничивает только число отчётов (100 на чат).

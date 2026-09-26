@@ -210,6 +210,35 @@ class ChatTasksResponse(BaseModel):
     count: int = 0
 
 
+class ReportInfo(BaseModel):
+    """One saved report as shown in the Saved reports panel."""
+
+    report_id: str
+    topic: str
+    created_at: float
+    source_count: int = 0
+
+
+class ChatReportsResponse(BaseModel):
+    """The saved reports of one chat, newest first."""
+
+    chat_id: str
+    reports: list[ReportInfo] = Field(default_factory=list)
+    count: int = 0
+
+
+class ReportDetail(BaseModel):
+    """One saved report with its plain-text summary and sources."""
+
+    report_id: str
+    chat_id: str
+    topic: str
+    summary: str
+    created_at: float
+    source_count: int = 0
+    sources: list[dict] = Field(default_factory=list)
+
+
 def port_is_available(host: str, port: int) -> bool:
     """Whether a loopback port can be bound right now."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -418,6 +447,20 @@ def create_app(
         tasks = _guard_chat(lambda: app.state.chats.tasks_for_chat(chat_id))
         return ChatTasksResponse(chat_id=chat_id, tasks=tasks, count=len(tasks))
 
+    @app.get("/api/chats/{chat_id}/reports", response_model=ChatReportsResponse)
+    async def chat_reports(chat_id: str) -> ChatReportsResponse:
+        reports = _guard_chat(lambda: app.state.chats.reports_for_chat(chat_id))
+        return ChatReportsResponse(chat_id=chat_id, reports=reports, count=len(reports))
+
+    @app.get(
+        "/api/chats/{chat_id}/reports/{report_id}", response_model=ReportDetail
+    )
+    async def chat_report(chat_id: str, report_id: str) -> ReportDetail:
+        report = _guard_chat(
+            lambda: app.state.chats.report_for_chat(chat_id, report_id)
+        )
+        return ReportDetail(**report)
+
     @app.post("/api/chat/stream")
     async def chat_stream(request: Request, body: ChatRequest):
         try:
@@ -451,6 +494,7 @@ def create_app(
             provider=app.state.provider,
             mcp_client=app.state.mcp_client,
             trace=app.state.trace,
+            max_tool_rounds=app.state.settings.max_tool_rounds,
         )
         request_id = uuid.uuid4().hex
         logger.info("chat request started (message_chars=%d)", len(body.message))

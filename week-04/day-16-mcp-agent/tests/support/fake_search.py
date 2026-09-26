@@ -9,6 +9,10 @@ Markers inside the query drive the edge cases:
 
 * ``__test_empty__`` — HTTP 200 with no results;
 * ``__test_many__`` — HTTP 200 with six results (more than the default page);
+* ``__test_duplicates__`` — HTTP 200 with four results that share two URLs
+  (fragment, host case and trailing slash);
+* ``__test_noisy__`` — HTTP 200 with two navigation/boilerplate results and two
+  clean ones, so the digest filtering can be proven end to end;
 * ``__test_401__`` — HTTP 401;
 * ``__test_429__`` — HTTP 429;
 * ``__test_timeout__`` — accepts the request and never answers in time.
@@ -31,6 +35,8 @@ FAKE_API_KEY = "fake-search-key"
 
 EMPTY_MARKER = "__test_empty__"
 MANY_MARKER = "__test_many__"
+DUPLICATES_MARKER = "__test_duplicates__"
+NOISY_MARKER = "__test_noisy__"
 UNAUTHORIZED_MARKER = "__test_401__"
 RATE_LIMIT_MARKER = "__test_429__"
 TIMEOUT_MARKER = "__test_timeout__"
@@ -74,6 +80,70 @@ MANY_RESULTS = tuple(
         "score": 0.9 - index / 100,
     }
     for index in range(1, 7)
+)
+
+# Anonymized search output with the shape that reached a real digest: the first
+# result carries a navigation menu in its snippet and the third is a boilerplate
+# page label. Both must be filtered; the two clean results survive. The
+# ``__test_noisy__`` marker lets a test prove the filtering and the cap.
+NOISY_RESULTS = (
+    {
+        "title": "News : Example Blog | Example Org",
+        "url": "https://docs.example.test/noisy/1",
+        "content": (
+            "#### IDEs #### Plugins & Services #### Team Tools #### "
+            ".NET & Visual Studio #### Company Example | Products | Support"
+        ),
+        "score": 0.95,
+    },
+    {
+        "title": "Kotlin 2.0 released",
+        "url": "https://docs.example.test/noisy/2",
+        "content": "The Kotlin team announced a new stable release.",
+        "score": 0.9,
+    },
+    {
+        "title": "Menu",
+        "url": "https://docs.example.test/noisy/3",
+        "content": "Skip to content Menu Sign in Cookies Privacy",
+        "score": 0.8,
+    },
+    {
+        "title": "Kotlin Multiplatform update",
+        "url": "https://docs.example.test/noisy/4",
+        "content": "Cross-platform development with Kotlin.",
+        "score": 0.7,
+    },
+)
+
+# Four results that collapse to two canonical URLs: one fragment duplicate, one
+# host-case + trailing-slash duplicate and one unique page. The
+# ``__test_duplicates__`` marker lets a test prove the digest deduplicates them.
+DUPLICATE_RESULTS = (
+    {
+        "title": "Guide page one",
+        "url": "https://docs.example.test/dup/1",
+        "content": "First copy of the guide.",
+        "score": 0.9,
+    },
+    {
+        "title": "Guide page one (anchor)",
+        "url": "https://docs.example.test/dup/1#section",
+        "content": "Same page with a fragment.",
+        "score": 0.8,
+    },
+    {
+        "title": "Guide page one (host case)",
+        "url": "https://Docs.Example.Test/dup/1/",
+        "content": "Same page with a different host case and a trailing slash.",
+        "score": 0.7,
+    },
+    {
+        "title": "Guide page two",
+        "url": "https://docs.example.test/dup/2",
+        "content": "A genuinely different page.",
+        "score": 0.6,
+    },
 )
 
 
@@ -148,6 +218,12 @@ class FakeSearchHandler(BaseHTTPRequestHandler):
             return
         if MANY_MARKER in query:
             self._send_json(200, self._response_payload(query, list(MANY_RESULTS)))
+            return
+        if DUPLICATES_MARKER in query:
+            self._send_json(200, self._response_payload(query, list(DUPLICATE_RESULTS)))
+            return
+        if NOISY_MARKER in query:
+            self._send_json(200, self._response_payload(query, list(NOISY_RESULTS)))
             return
         self._send_json(200, self._response_payload(query, list(RESULTS)))
 

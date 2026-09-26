@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 
 from storage.chats import ChatRepository
+from storage.reports import ReportRepository
 from storage.tasks import TaskRepository
 
 MAX_CHATS = 5
@@ -24,6 +25,7 @@ CHAT_LIMIT = "chat_limit"
 CHAT_HAS_ACTIVE_TASKS = "chat_has_active_tasks"
 INVALID_TITLE = "invalid_title"
 CHAT_STORAGE_UNAVAILABLE = "chat_storage_unavailable"
+REPORT_NOT_FOUND = "report_not_found"
 
 ERROR_STATUS = {
     CHAT_NOT_FOUND: 404,
@@ -31,9 +33,11 @@ ERROR_STATUS = {
     CHAT_HAS_ACTIVE_TASKS: 409,
     INVALID_TITLE: 422,
     CHAT_STORAGE_UNAVAILABLE: 503,
+    REPORT_NOT_FOUND: 404,
 }
 
 NOT_FOUND_MESSAGE = "The chat was not found"
+REPORT_NOT_FOUND_MESSAGE = "The report was not found"
 
 
 class ChatError(Exception):
@@ -70,6 +74,7 @@ class ChatService:
         self._database = database
         self._chats = ChatRepository(database)
         self._tasks = TaskRepository(database)
+        self._reports = ReportRepository(database)
         self._max_chats = max(int(max_chats), 1)
         self._clock = clock
 
@@ -154,6 +159,21 @@ class ChatService:
             tasks.append(self._task_info(task))
         return tasks
 
+    # -- reports -----------------------------------------------------------
+
+    def reports_for_chat(self, chat_id: str) -> list:
+        """The saved reports of one chat, newest first (read-only panel)."""
+        self._require_chat(chat_id)
+        return [self._report_info(report) for report in self._reports.list_reports(chat_id)]
+
+    def report_for_chat(self, chat_id: str, report_id: str) -> dict:
+        """One saved report of one chat, or ``report_not_found``."""
+        self._require_chat(chat_id)
+        report = self._reports.get_report(chat_id, report_id)
+        if report is None:
+            raise ChatError(REPORT_NOT_FOUND, REPORT_NOT_FOUND_MESSAGE)
+        return self._report_detail(report)
+
     # -- internals ---------------------------------------------------------
 
     def _require_chat(self, chat_id: str) -> dict:
@@ -161,6 +181,25 @@ class ChatService:
         if row is None:
             raise ChatError(CHAT_NOT_FOUND, NOT_FOUND_MESSAGE)
         return row
+
+    def _report_info(self, report: dict) -> dict:
+        return {
+            "report_id": report["id"],
+            "topic": report["topic"],
+            "created_at": report["created_at"],
+            "source_count": report["source_count"],
+        }
+
+    def _report_detail(self, report: dict) -> dict:
+        return {
+            "report_id": report["id"],
+            "chat_id": report["chat_id"],
+            "topic": report["topic"],
+            "summary": report["summary"],
+            "created_at": report["created_at"],
+            "source_count": report["source_count"],
+            "sources": report["sources"],
+        }
 
     def _chat_info(self, row: dict) -> dict:
         return {

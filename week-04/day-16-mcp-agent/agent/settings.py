@@ -38,6 +38,13 @@ DEFAULT_CHAT_CONTEXT_MESSAGES = 20
 CHAT_CONTEXT_MIN_MESSAGES = 2
 CHAT_CONTEXT_MAX_MESSAGES = 100
 
+# A multi-step tool composition needs more than one round: three dependent calls
+# plus the final answer, with one spare round in case a round carries several
+# parallel calls.
+DEFAULT_MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS_MIN = 2
+MAX_TOOL_ROUNDS_MAX = 10
+
 
 def load_dotenv_if_present(env_path=None) -> bool:
     """Load ``.env`` when it exists; a missing file is not an error."""
@@ -121,6 +128,7 @@ class Settings:
         default_factory=lambda: PROJECT_ROOT / "data" / DEFAULT_DB_FILENAME
     )
     chat_context_messages: int = DEFAULT_CHAT_CONTEXT_MESSAGES
+    max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
 
     api_key: str = field(default="", repr=False)
     model_configured: bool = False
@@ -209,6 +217,12 @@ def resolve_settings(env=None, *, dotenv=True, env_path=None) -> Settings:
             DEFAULT_CHAT_CONTEXT_MESSAGES,
             CHAT_CONTEXT_MIN_MESSAGES,
             CHAT_CONTEXT_MAX_MESSAGES,
+        ),
+        max_tool_rounds=_to_int_clamped(
+            environment.get("AGENT_MAX_TOOL_ROUNDS"),
+            DEFAULT_MAX_TOOL_ROUNDS,
+            MAX_TOOL_ROUNDS_MIN,
+            MAX_TOOL_ROUNDS_MAX,
         ),
         api_key=api_key,
         model_configured=model_configured,

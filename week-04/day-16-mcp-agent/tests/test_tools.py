@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from mcp_server import SERVER_NAME, SERVER_VERSION
+from mcp_server import reports as report_module
 from mcp_server import tasks as task_module
 from mcp_server import tools, web_search
 from mcp_server.tools import ToolError
@@ -288,6 +289,64 @@ class ScheduledToolTest(unittest.TestCase):
         with _patch_tasks(service):
             tools.list_search_tasks()
         self.assertEqual(service.calls, [("list", "")])
+
+
+class _StubReportService:
+    """A scripted ``ReportService`` for the composition-tool boundary tests."""
+
+    def __init__(self):
+        self.calls: list = []
+        self.result: dict = {"ok": True}
+
+    def digest(self, search_result):
+        self.calls.append(("digest", search_result))
+        return self.result
+
+    def save(self, chat_id, digest):
+        self.calls.append(("save", chat_id, digest))
+        return self.result
+
+
+def _patch_reports(service):
+    return mock.patch.object(
+        report_module, "default_report_service", return_value=service
+    )
+
+
+class ReportToolTest(unittest.TestCase):
+    """The digest and save tools delegate to the report service."""
+
+    def test_digest_delegates_with_the_whole_object(self):
+        service = _StubReportService()
+        payload = {"query": "x", "results": []}
+        with _patch_reports(service):
+            result = tools.digest_search_results(payload)
+        self.assertIs(result, service.result)
+        self.assertEqual(service.calls, [("digest", payload)])
+
+    def test_save_delegates_with_the_whole_digest_and_chat(self):
+        service = _StubReportService()
+        digest = {"status": "ok"}
+        with _patch_reports(service):
+            result = tools.save_report(digest, "chat-1")
+        self.assertIs(result, service.result)
+        self.assertEqual(service.calls, [("save", "chat-1", digest)])
+
+    def test_save_defaults_to_an_empty_chat_id(self):
+        service = _StubReportService()
+        with _patch_reports(service):
+            tools.save_report({"status": "empty"})
+        self.assertEqual(service.calls, [("save", "", {"status": "empty"})])
+
+    def test_tool_error_from_the_service_propagates(self):
+        class Failing(_StubReportService):
+            def save(self, chat_id, digest):
+                raise ToolError("This tool needs an active chat context")
+
+        with _patch_reports(Failing()):
+            with self.assertRaises(ToolError) as caught:
+                tools.save_report({"status": "ok"})
+        self.assertEqual(str(caught.exception), "This tool needs an active chat context")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run

@@ -15,6 +15,7 @@ from unittest import mock
 
 from mcp import Client
 
+from mcp_server import reports as report_module
 from mcp_server import tasks as task_module
 from mcp_server import web_search
 from mcp_server.server import MCPServer
@@ -65,7 +66,7 @@ class InProcessMcpTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("operation", calculate.input_schema.get("properties", {}))
         self.assertTrue(calculate.description)
 
-    async def test_all_seven_tools_are_listed(self):
+    async def test_all_nine_tools_are_listed(self):
         server = self._server()
         async with Client(server.app) as client:
             result = await client.list_tools()
@@ -74,9 +75,11 @@ class InProcessMcpTest(unittest.IsolatedAsyncioTestCase):
             names,
             [
                 "calculate",
+                "digest_search_results",
                 "get_latest_search_run",
                 "get_server_info",
                 "list_search_tasks",
+                "save_report",
                 "schedule_search_task",
                 "search_web",
                 "stop_search_task",
@@ -88,6 +91,15 @@ class InProcessMcpTest(unittest.IsolatedAsyncioTestCase):
         properties = schedule.input_schema.get("properties", {})
         self.assertIn("chat_id", properties)
         self.assertEqual(properties["max_results"].get("type"), "integer")
+        digest = next(
+            tool for tool in result.tools if tool.name == "digest_search_results"
+        )
+        self.assertEqual(
+            digest.input_schema.get("properties", {}).get("search_result", {}).get("type"),
+            "object",
+        )
+        save = next(tool for tool in result.tools if tool.name == "save_report")
+        self.assertIn("chat_id", save.input_schema.get("properties", {}))
 
     async def test_calculate_returns_a_structured_result(self):
         server = self._server()
@@ -304,6 +316,75 @@ class InProcessScheduledTaskTest(unittest.IsolatedAsyncioTestCase):
                 result = await client.call_tool(
                     "schedule_search_task",
                     {"query": "news", "interval_seconds": 60, "chat_id": ""},
+                )
+        self.assertTrue(_is_error(result))
+        self.assertIn("active chat context", _content_text(result))
+
+
+class InProcessReportCompositionTest(unittest.IsolatedAsyncioTestCase):
+    """The digest/save tools work through the real SDK surface."""
+
+    def _server(self) -> MCPServer:
+        return MCPServer(host="127.0.0.1", port=0)
+
+    def _service(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        database = Database(Path(tmp.name) / "reports.sqlite3")
+        ChatRepository(database).create_chat("Chat", chat_id="chat-1")
+        return report_module.ReportService(database)
+
+    async def test_digest_and_save_round_trip(self):
+        service = self._service()
+        server = self._server()
+        search_result = {
+            "query": "Kotlin news",
+            "count": 1,
+            "results": [
+                {
+                    "title": "Kotlin 1.9",
+                    "url": "https://kotlin.example.test/1",
+                    "description": "A release.",
+                }
+            ],
+            "more_results_available": False,
+            "note": web_search.SEARCH_NOTE,
+        }
+        with mock.patch.object(
+            report_module, "default_report_service", return_value=service
+        ):
+            async with Client(server.app) as client:
+                digested = await client.call_tool(
+                    "digest_search_results", {"search_result": search_result}
+                )
+                digest = _payload(digested)
+                saved = await client.call_tool(
+                    "save_report", {"digest": digest, "chat_id": "chat-1"}
+                )
+        self.assertEqual(digest["status"], "ok")
+        self.assertTrue(digest["digest_id"].startswith("d19-"))
+        self.assertFalse(_is_error(saved))
+        payload = _payload(saved)
+        self.assertTrue(payload["report_id"])
+        self.assertEqual(payload["source_count"], 1)
+
+    async def test_save_without_a_chat_context_is_a_controlled_error(self):
+        service = self._service()
+        server = self._server()
+        digest = report_module.build_digest(
+            {
+                "query": "x",
+                "results": [
+                    {"title": "t", "url": "https://a.test/1", "description": ""}
+                ],
+            }
+        )
+        with mock.patch.object(
+            report_module, "default_report_service", return_value=service
+        ):
+            async with Client(server.app) as client:
+                result = await client.call_tool(
+                    "save_report", {"digest": digest, "chat_id": ""}
                 )
         self.assertTrue(_is_error(result))
         self.assertIn("active chat context", _content_text(result))

@@ -1,9 +1,10 @@
 """SQLite access shared by the backend and the MCP server.
 
-One file holds chats, messages, tasks and runs. Connections are short-lived:
-every operation opens its own connection, sets the pragmas it needs and closes
-it again, so a connection is never shared between threads. ``WAL`` allows many
-readers and one writer, which is what two local processes on one machine need.
+One file holds chats, messages, tasks, runs and reports. Connections are
+short-lived: every operation opens its own connection, sets the pragmas it needs
+and closes it again, so a connection is never shared between threads. ``WAL``
+allows many readers and one writer, which is what two local processes on one
+machine need.
 
 Opening is lazy. Building an application, listing MCP tools or probing a server
 must not create the file: only the first real operation calls
@@ -21,7 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CONNECT_TIMEOUT_SECONDS = 5.0
 BUSY_TIMEOUT_MS = 5000
@@ -84,6 +85,19 @@ SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id, id)",
+    """
+    CREATE TABLE IF NOT EXISTS reports (
+      id           TEXT PRIMARY KEY,
+      chat_id      TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      topic        TEXT NOT NULL,
+      summary      TEXT NOT NULL,
+      sources_json TEXT NOT NULL,
+      digest_id    TEXT NOT NULL,
+      source_count INTEGER NOT NULL DEFAULT 0,
+      created_at   REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_reports_chat ON reports(chat_id, created_at)",
 )
 
 # Forward-only migrations keyed by the version they produce. A database whose
@@ -93,6 +107,21 @@ SCHEMA_STATEMENTS = (
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: (
         "ALTER TABLE tasks ADD COLUMN max_results INTEGER NOT NULL DEFAULT 0",
+    ),
+    3: (
+        """
+        CREATE TABLE IF NOT EXISTS reports (
+          id           TEXT PRIMARY KEY,
+          chat_id      TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+          topic        TEXT NOT NULL,
+          summary      TEXT NOT NULL,
+          sources_json TEXT NOT NULL,
+          digest_id    TEXT NOT NULL,
+          source_count INTEGER NOT NULL DEFAULT 0,
+          created_at   REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_reports_chat ON reports(chat_id, created_at)",
     ),
 }
 

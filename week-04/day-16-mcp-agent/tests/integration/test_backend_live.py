@@ -112,7 +112,7 @@ class HealthyBackendTest(unittest.TestCase):
         payload = httpx.get(f"{BACKEND_URL}/api/mcp/status", timeout=20.0).json()
         self.assertTrue(payload["connected"])
         self.assertTrue(payload["protocol_version"])
-        self.assertEqual(payload["tools_count"], 7)
+        self.assertEqual(payload["tools_count"], 9)
         self.assertEqual(payload["server"]["name"], "day-16-mcp-server")
 
     def test_tools_match_the_real_mcp_server(self):
@@ -124,7 +124,7 @@ class HealthyBackendTest(unittest.TestCase):
             sorted(tool["name"] for tool in payload["tools"]),
             sorted(tool.name for tool in tools),
         )
-        self.assertEqual(len(tools), 7)
+        self.assertEqual(len(tools), 9)
 
     def test_chats_crud_and_history(self):
         created = httpx.post(

@@ -40,6 +40,12 @@ RENDER_SNIPPET = r"""
     ul: container.querySelectorAll("ul").length,
     ol: container.querySelectorAll("ol").length,
     items: Array.from(container.querySelectorAll("li")).map((el) => el.textContent),
+    ordered_starts: Array.from(container.querySelectorAll("ol")).map(
+      (el) => el.start
+    ),
+    ordered_item_counts: Array.from(container.querySelectorAll("ol")).map(
+      (el) => el.querySelectorAll("li").length
+    ),
     literal_marker_count: markers ? markers.length : 0,
   };
 }
@@ -163,6 +169,46 @@ class MarkdownRendererDomTest(unittest.TestCase):
         self.assertEqual(result["ul"], 1)
         self.assertEqual(result["ol"], 1)
         self.assertEqual(result["items"], ["one", "two", "first", "second"])
+
+    def test_ordered_items_with_source_continuations_form_one_list(self):
+        result = self._render(
+            "1. First - one\n"
+            "   Source: https://a.test/1\n"
+            "2. Second - two\n"
+            "   Source: https://a.test/2\n"
+            "3. Third - three\n"
+            "   Source: https://a.test/3"
+        )
+        self.assertEqual(result["ol"], 1)
+        self.assertEqual(result["ordered_item_counts"], [3])
+        self.assertEqual(result["ordered_starts"], [1])
+        self.assertIn("Source: https://a.test/1", result["items"][0])
+        self.assertIn("Source: https://a.test/3", result["items"][2])
+
+    def test_blank_lines_between_ordered_items_form_one_loose_list(self):
+        result = self._render("1. one\n\n2. two\n\n3. three")
+        self.assertEqual(result["ol"], 1)
+        self.assertEqual(result["items"], ["one", "two", "three"])
+        self.assertEqual(result["ordered_starts"], [1])
+
+    def test_ordered_list_that_starts_at_three_sets_start(self):
+        result = self._render("3. third\n4. fourth")
+        self.assertEqual(result["ol"], 1)
+        self.assertEqual(result["ordered_starts"], [3])
+        self.assertEqual(result["items"], ["third", "fourth"])
+
+    def test_a_new_list_after_a_paragraph_is_separate(self):
+        result = self._render(
+            "1. one\n2. two\n\nSome paragraph\n\n1. alpha\n2. beta"
+        )
+        self.assertEqual(result["ol"], 2)
+        self.assertEqual(result["ordered_starts"], [1, 1])
+        self.assertEqual(result["items"], ["one", "two", "alpha", "beta"])
+
+    def test_unordered_list_with_continuation_is_one_list(self):
+        result = self._render("- one\n  continued\n- two")
+        self.assertEqual(result["ul"], 1)
+        self.assertEqual(result["items"], ["one\n  continued", "two"])
 
     def test_inline_code_and_italic(self):
         result = self._render("Use `**literal**` and *italic* and _also_")

@@ -58,6 +58,9 @@ class DefaultsTest(unittest.TestCase):
     def test_chat_context_window_defaults_to_twenty(self):
         self.assertEqual(self.settings.chat_context_messages, 20)
 
+    def test_tool_round_limit_defaults_to_five(self):
+        self.assertEqual(self.settings.max_tool_rounds, 5)
+
 
 class EnvironmentTest(unittest.TestCase):
     """Explicit environment variables win over the defaults."""
@@ -139,6 +142,28 @@ class EnvironmentTest(unittest.TestCase):
             resolve_settings(env={"AGENT_CHAT_CONTEXT_MESSAGES": "nope"}, dotenv=False)
             .chat_context_messages,
             20,
+        )
+
+    def test_max_tool_rounds_is_clamped(self):
+        self.assertEqual(
+            resolve_settings(env={"AGENT_MAX_TOOL_ROUNDS": "1"}, dotenv=False)
+            .max_tool_rounds,
+            2,
+        )
+        self.assertEqual(
+            resolve_settings(env={"AGENT_MAX_TOOL_ROUNDS": "99"}, dotenv=False)
+            .max_tool_rounds,
+            10,
+        )
+        self.assertEqual(
+            resolve_settings(env={"AGENT_MAX_TOOL_ROUNDS": "nope"}, dotenv=False)
+            .max_tool_rounds,
+            5,
+        )
+        self.assertEqual(
+            resolve_settings(env={"AGENT_MAX_TOOL_ROUNDS": "7"}, dotenv=False)
+            .max_tool_rounds,
+            7,
         )
 
 

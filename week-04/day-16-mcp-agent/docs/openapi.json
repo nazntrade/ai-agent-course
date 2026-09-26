@@ -327,6 +327,93 @@
         }
       }
     },
+    "/api/chats/{chat_id}/reports": {
+      "get": {
+        "summary": "Chat Reports",
+        "operationId": "chat_reports_api_chats__chat_id__reports_get",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chat Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatReportsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chats/{chat_id}/reports/{report_id}": {
+      "get": {
+        "summary": "Chat Report",
+        "operationId": "chat_report_api_chats__chat_id__reports__report_id__get",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chat Id"
+            }
+          },
+          {
+            "name": "report_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Report Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/chat/stream": {
       "post": {
         "summary": "Chat Stream",
@@ -523,6 +610,32 @@
         ],
         "title": "ChatRenameRequest",
         "description": "Payload of ``PATCH /api/chats/{chat_id}``."
+      },
+      "ChatReportsResponse": {
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "reports": {
+            "items": {
+              "$ref": "#/components/schemas/ReportInfo"
+            },
+            "type": "array",
+            "title": "Reports"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "chat_id"
+        ],
+        "title": "ChatReportsResponse",
+        "description": "The saved reports of one chat, newest first."
       },
       "ChatRequest": {
         "properties": {
@@ -764,6 +877,82 @@
         ],
         "title": "MessageInfo",
         "description": "One stored chat message."
+      },
+      "ReportDetail": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "source_count": {
+            "type": "integer",
+            "title": "Source Count",
+            "default": 0
+          },
+          "sources": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Sources"
+          }
+        },
+        "type": "object",
+        "required": [
+          "report_id",
+          "chat_id",
+          "topic",
+          "summary",
+          "created_at"
+        ],
+        "title": "ReportDetail",
+        "description": "One saved report with its plain-text summary and sources."
+      },
+      "ReportInfo": {
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "title": "Report Id"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "source_count": {
+            "type": "integer",
+            "title": "Source Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "report_id",
+          "topic",
+          "created_at"
+        ],
+        "title": "ReportInfo",
+        "description": "One saved report as shown in the Saved reports panel."
       },
       "ServerInfo": {
         "properties": {

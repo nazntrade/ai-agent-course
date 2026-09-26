@@ -88,6 +88,8 @@ class MCPServer:
         server.tool()(tools.list_search_tasks)
         server.tool()(tools.get_latest_search_run)
         server.tool()(tools.stop_search_task)
+        server.tool()(tools.digest_search_results)
+        server.tool()(tools.save_report)
         return server
 
     def _build_scheduler(self) -> TaskScheduler:

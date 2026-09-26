@@ -430,6 +430,18 @@ def run() -> int:
             + ("PASS" if tasks_tests.returncode == 0 else "FAIL")
         )
 
+        reports_tests = _run_unittest("tests.integration.test_reports_live", test_env)
+        print("--- integration: saved reports ---")
+        print(_tail(reports_tests.stdout or reports_tests.stderr))
+        report["reports_integration"] = {
+            "ok": reports_tests.returncode == 0,
+            "exit_code": reports_tests.returncode,
+        }
+        print(
+            "REPORTS_INTEGRATION_STATUS: "
+            + ("PASS" if reports_tests.returncode == 0 else "FAIL")
+        )
+
         # The restart checks run their own processes on private ports, so the
         # running smoke processes do not interfere.
         restart = _run(
@@ -455,12 +467,32 @@ def run() -> int:
         print(f"PERSISTENCE_RESTART_STATUS: {persistence_status}")
         print(f"SCHEDULER_RESTART_STATUS: {scheduler_status}")
 
+        reports_restart = _run(
+            [sys.executable, str(PROJECT_DIR / "harness" / "reports_restart.py")],
+            sanitized_env(),
+            INTEGRATION_TIMEOUT_SECONDS,
+        )
+        print("--- restart: saved reports ---")
+        print(_tail(reports_restart.stdout or reports_restart.stderr))
+        reports_restart_status = _status_from_output(
+            reports_restart.stdout, "REPORTS_RESTART_STATUS"
+        )
+        if reports_restart.returncode == 2:
+            reports_restart_status = "BLOCKED"
+        report["reports_restart"] = {
+            "exit_code": reports_restart.returncode,
+            "reports_restart_status": reports_restart_status,
+        }
+        print(f"REPORTS_RESTART_STATUS: {reports_restart_status}")
+
         ok = (
             mcp_tests.returncode == 0
             and backend_tests.returncode == 0
             and search_tests.returncode == 0
             and tasks_tests.returncode == 0
+            and reports_tests.returncode == 0
             and restart.returncode == 0
+            and reports_restart.returncode == 0
         )
         exit_code = EXIT_OK if ok else EXIT_FAIL
         return exit_code

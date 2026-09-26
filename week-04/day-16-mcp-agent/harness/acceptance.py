@@ -221,6 +221,56 @@ def run(ui: bool, live: bool) -> int:
         elif tasks.returncode != 0 or "FAIL" in (chats_ui_status, tasks_ui_status):
             exit_code = EXIT_FAIL
 
+        # The composition scenario drives three dependent tools from one message
+        # (search_web → digest_search_results → save_report) and checks that a
+        # plain search does not create a report, plus the Saved reports UI.
+        print("=== live composition E2E (real model + fake search + UI) ===")
+        composition_env = {"RUN_LIVE_LLM": "1"}
+        composition_env.update({key: os.environ.get(key) for key in BROWSER_ENV_KEYS})
+        composition = _run(
+            [
+                sys.executable,
+                str(PROJECT_DIR / "harness" / "live_e2e.py"),
+                "--scenario",
+                "composition",
+                "--ui",
+            ],
+            STEP_TIMEOUT_SECONDS,
+            composition_env,
+        )
+        print(composition.stdout or "")
+        print(composition.stderr or "")
+        composition_live_status = _status_from_output(
+            composition.stdout, "COMPOSITION_LIVE_STATUS"
+        )
+        composition_no_save_status = _status_from_output(
+            composition.stdout, "COMPOSITION_NO_SAVE_LIVE_STATUS"
+        )
+        reports_ui_status = _status_from_output(
+            composition.stdout, "REPORTS_UI_STATUS"
+        )
+        if composition.returncode == 2:
+            composition_live_status = "BLOCKED"
+        elif composition.returncode != 0:
+            composition_live_status = "FAIL"
+        report["steps"]["composition_live_e2e"] = {
+            "exit_code": composition.returncode,
+            "live_status": composition_live_status,
+            "no_save_status": composition_no_save_status,
+            "reports_ui_status": reports_ui_status,
+        }
+        print(f"COMPOSITION_LIVE_STATUS: {composition_live_status}")
+        print(f"COMPOSITION_NO_SAVE_LIVE_STATUS: {composition_no_save_status}")
+        print(f"REPORTS_UI_STATUS: {reports_ui_status}")
+        if composition.returncode == 2:
+            if exit_code == EXIT_OK:
+                exit_code = EXIT_PREREQUISITE
+        elif composition.returncode != 0 or "FAIL" in (
+            composition_no_save_status,
+            reports_ui_status,
+        ):
+            exit_code = EXIT_FAIL
+
     report["exit_code"] = exit_code
     report["status"] = {0: "pass", 1: "fail", 2: "prerequisite"}.get(exit_code, "fail")
     write_report(run_dir, report)

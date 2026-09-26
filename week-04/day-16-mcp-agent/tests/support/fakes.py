@@ -13,7 +13,7 @@ from agent.mcp_adapter import McpCallResult, McpError, McpStatus, McpTool
 
 
 def sample_tools():
-    """The seven tools the real server advertises, as value objects."""
+    """The nine tools the real server advertises, as value objects."""
     return [
         McpTool(
             name="calculate",
@@ -95,6 +95,29 @@ def sample_tools():
                     "chat_id": {"type": "string"},
                 },
                 "required": ["task_id"],
+            },
+        ),
+        McpTool(
+            name="digest_search_results",
+            title=None,
+            description="Turn a search_web result into a compact digest with sources.",
+            input_schema={
+                "type": "object",
+                "properties": {"search_result": {"type": "object"}},
+                "required": ["search_result"],
+            },
+        ),
+        McpTool(
+            name="save_report",
+            title=None,
+            description="Save a digest as a report of the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "digest": {"type": "object"},
+                    "chat_id": {"type": "string"},
+                },
+                "required": ["digest"],
             },
         ),
     ]

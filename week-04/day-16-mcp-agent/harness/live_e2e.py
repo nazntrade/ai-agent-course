@@ -63,8 +63,10 @@ ensure_paths()
 
 from agent.mcp_adapter import SdkMcpClient, inspect_tools  # noqa: E402
 from agent.settings import DEFAULT_MODEL_NAME  # noqa: E402
+from mcp_server.reports import build_digest  # noqa: E402
 from storage.chats import ChatRepository  # noqa: E402
 from storage.db import Database  # noqa: E402
+from storage.reports import ReportRepository  # noqa: E402
 from tests.support.fake_search import (  # noqa: E402
     FAKE_API_KEY,
     MANY_MARKER,
@@ -144,6 +146,42 @@ TASKS_SUMMARY_CHAIN = (
     ("model_request", {"phase": "tool_selection"}, ()),
     ("tool_selected", {"tool": TASKS_EXPECTED_TOOL_2}, ()),
     ("tool_completed", {"tool": TASKS_EXPECTED_TOOL_2, "ok": True}, ("result",)),
+    ("model_request", {"phase": "final_answer"}, ()),
+    ("request_done", {"ok": True}, ()),
+)
+
+# The composition scenario drives three dependent tools from one message:
+# search_web → digest_search_results → save_report, then the final answer.
+COMPOSITION_QUESTION = (
+    "Find news about Kotlin, make a short summary with sources and save it"
+)
+COMPOSITION_NO_SAVE_QUESTION = "Find news about Kotlin and tell me briefly"
+COMPOSITION_SEARCH_TOOL = "search_web"
+COMPOSITION_DIGEST_TOOL = "digest_search_results"
+COMPOSITION_SAVE_TOOL = "save_report"
+
+COMPOSITION_CHAIN = (
+    ("mcp_connect", {"ok": True}, ()),
+    ("mcp_list_tools", None, ()),
+    ("model_request", {"phase": "tool_selection"}, ()),
+    ("tool_selected", {"tool": COMPOSITION_SEARCH_TOOL}, ()),
+    ("tool_completed", {"tool": COMPOSITION_SEARCH_TOOL, "ok": True}, ("result",)),
+    ("tool_selected", {"tool": COMPOSITION_DIGEST_TOOL}, ()),
+    ("tool_completed", {"tool": COMPOSITION_DIGEST_TOOL, "ok": True}, ("result",)),
+    ("tool_selected", {"tool": COMPOSITION_SAVE_TOOL}, ()),
+    ("tool_completed", {"tool": COMPOSITION_SAVE_TOOL, "ok": True}, ("result",)),
+    ("model_request", {"phase": "final_answer"}, ()),
+    ("request_done", {"ok": True}, ()),
+)
+
+COMPOSITION_NO_SAVE_CHAIN = (
+    ("mcp_connect", {"ok": True}, ()),
+    ("mcp_list_tools", None, ()),
+    ("model_request", {"phase": "tool_selection"}, ()),
+    ("tool_selected", {"tool": COMPOSITION_SEARCH_TOOL}, ()),
+    ("tool_completed", {"tool": COMPOSITION_SEARCH_TOOL, "ok": True}, ("result",)),
+    ("tool_selected", {"tool": COMPOSITION_DIGEST_TOOL}, ()),
+    ("tool_completed", {"tool": COMPOSITION_DIGEST_TOOL, "ok": True}, ("result",)),
     ("model_request", {"phase": "final_answer"}, ()),
     ("request_done", {"ok": True}, ()),
 )
@@ -743,6 +781,17 @@ def run_ui_search_e2e(url: str, run_dir: Path, report: dict) -> str:
                 const linesOutside = Array.from(
                     document.querySelectorAll(".tool-line")
                 ).filter((line) => !line.closest("details.technical"));
+                // A numbered source answer must stay one ordered list: three or
+                // more items split across several <ol> elements is a rendering
+                // failure. A missing list is acceptable (ordered_items: 0).
+                const textElement = answer.querySelector(".text");
+                const orderedLists = textElement
+                    ? Array.from(textElement.querySelectorAll("ol"))
+                    : [];
+                const orderedItems = orderedLists.reduce(
+                    (total, list) => total + list.querySelectorAll("li").length,
+                    0
+                );
                 return {
                     answer: true,
                     details: !!details,
@@ -752,11 +801,17 @@ def run_ui_search_e2e(url: str, run_dir: Path, report: dict) -> str:
                     valid_anchor_count: valid.length,
                     hrefs: anchors.map((anchor) => anchor.getAttribute("href")),
                     tool_lines_outside: linesOutside.length,
+                    ordered_lists: orderedLists.length,
+                    ordered_items: orderedItems,
+                    ordered_starts: orderedLists.map((list) => list.start),
                     assistant_bubbles: bubbles.length,
                 };
             }"""
         )
         report["ui_checks"] = ui_checks
+        ordered_items = ui_checks.get("ordered_items", 0)
+        ordered_lists = ui_checks.get("ordered_lists", 0)
+        ordered_ok = ordered_items < 3 or ordered_lists == 1
         ui_ok = (
             bool(ui_checks.get("answer"))
             and bool(ui_checks.get("details"))
@@ -765,6 +820,7 @@ def run_ui_search_e2e(url: str, run_dir: Path, report: dict) -> str:
             and not ui_checks.get("loader")
             and ui_checks.get("anchor_count", 0) >= 2
             and ui_checks.get("valid_anchor_count", 0) >= 2
+            and ordered_ok
             and ui_checks.get("assistant_bubbles") == 1
             and not page_errors
         )
@@ -1199,6 +1255,173 @@ def run_ui_tasks_e2e(url: str, mcp_url: str, run_dir: Path, report: dict) -> str
             pass
 
 
+def run_ui_reports_e2e(url: str, db_path: Path, run_dir: Path, report: dict) -> str:
+    """Drive the Saved reports panel through the system browser; return status.
+
+    A deterministic report is seeded into the first chat through the storage
+    layer, then the panel must list it, open it lazily into plain text with real
+    anchors, survive a page reload, refresh on demand, show the empty state for a
+    chat without reports and switch back.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "BLOCKED"
+
+    shot = run_dir / "screenshots" / "12_reports.png"
+    manager = None
+    browser = None
+    page_errors: list = []
+    try:
+        chats = httpx.get(f"{url}/api/chats", timeout=20.0).json().get("chats", [])
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["reports_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    if not chats:
+        report["reports_ui_error"] = "there is no chat to attach the report to"
+        return "FAIL"
+    chat_id = chats[0]["id"]
+    # A chat is only a valid "empty state" counterpart if it has no reports.
+    other_chat_id = None
+    for chat in chats:
+        if chat["id"] == chat_id:
+            continue
+        try:
+            payload = httpx.get(
+                f"{url}/api/chats/{chat['id']}/reports", timeout=20.0
+            ).json()
+        except Exception:  # noqa: BLE001 - an unreadable chat is skipped
+            continue
+        if not payload.get("count"):
+            other_chat_id = chat["id"]
+            break
+
+    sources = [
+        {
+            "title": "Kotlin UI source one",
+            "url": "https://docs.example.test/ui/1",
+            "description": "First deterministic source.",
+        },
+        {
+            "title": "Kotlin UI source two",
+            "url": "https://docs.example.test/ui/2",
+            "description": "Second deterministic source.",
+        },
+    ]
+    repository = ReportRepository(Database(db_path))
+    if repository.count_reports(chat_id) == 0:
+        repository.insert_report(
+            chat_id,
+            topic="Kotlin UI report",
+            summary=(
+                "1. Kotlin UI source one - First deterministic source.\n"
+                "   Source: https://docs.example.test/ui/1\n"
+                "2. Kotlin UI source two - Second deterministic source.\n"
+                "   Source: https://docs.example.test/ui/2"
+            ),
+            sources=sources,
+            digest_id=build_digest(
+                {
+                    "query": "Kotlin UI report",
+                    "results": [
+                        {
+                            "title": source["title"],
+                            "url": source["url"],
+                            "description": source["description"],
+                        }
+                        for source in sources
+                    ],
+                }
+            )["digest_id"],
+        )
+
+    try:
+        manager = sync_playwright().start()
+        browser, channel = qa_browser.launch_browser(manager, headless=True)
+        report["ui_channel"] = channel
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.set_default_timeout(60000)
+        page = context.new_page()
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_selector("#chats-list .chat-item", timeout=30000)
+
+        def _select(chat_id_value):
+            page.click(
+                f'#chats-list .chat-item[data-chat-id="{chat_id_value}"] .chat-select'
+            )
+
+        _select(chat_id)
+        page.wait_for_selector("#reports-list .report-card", timeout=30000)
+
+        # Opening the card fetches the detail lazily and renders plain text.
+        page.click("#reports-list .report-card summary")
+        page.wait_for_selector("#reports-list .report-card .report-summary", timeout=15000)
+        summary_text = page.inner_text("#reports-list .report-card .report-summary")
+        anchors = page.locator(
+            '#reports-list .report-card .report-sources a[href^="https://docs.example.test/"]'
+        )
+        anchor_count = anchors.count()
+        open_ok = "Kotlin UI source" in summary_text and anchor_count >= 2
+
+        # The report survives a real page reload (F5).
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_selector("#chats-list .chat-item", timeout=30000)
+        _select(chat_id)
+        page.wait_for_selector("#reports-list .report-card", timeout=30000)
+        reload_ok = page.locator("#reports-list .report-card").count() >= 1
+
+        # Refresh re-reads the list without losing the card.
+        page.click("#reports-refresh-button")
+        page.wait_for_selector("#reports-list .report-card", timeout=30000)
+        refresh_ok = page.locator("#reports-list .report-card").count() >= 1
+
+        # A chat without reports shows the empty state and switches back.
+        switch_ok = True
+        if other_chat_id:
+            _select(other_chat_id)
+            try:
+                page.wait_for_function(
+                    "() => document.querySelector('#reports-list')"
+                    ".textContent.includes('No reports in this chat.')",
+                    timeout=8000,
+                )
+            except Exception:  # noqa: BLE001 - asserted as a failed switch below
+                switch_ok = False
+            _select(chat_id)
+            page.wait_for_selector("#reports-list .report-card", timeout=15000)
+
+        qa_browser.screenshot(page, shot)
+        context.close()
+        ok = open_ok and reload_ok and refresh_ok and switch_ok and not page_errors
+        report["reports_ui"] = {
+            "open": open_ok,
+            "anchor_count": anchor_count,
+            "reload": reload_ok,
+            "refresh": refresh_ok,
+            "switch": switch_ok,
+            "page_errors": page_errors,
+        }
+        return "PASS" if ok else "FAIL"
+    except qa_browser.PrerequisiteError as exc:
+        report["reports_ui_error"] = str(exc)
+        return "BLOCKED"
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["reports_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    finally:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            if manager is not None:
+                manager.stop()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
 def _create_chat(backend_url: str, title: str = "") -> str:
     """Create a chat through the real API and return its opaque id."""
     response = httpx.post(
@@ -1284,6 +1507,79 @@ def verify_task_summary_sse(events: list, expected_urls) -> dict:
     }
 
 
+def _tool_calls(events: list) -> list:
+    return [data.get("tool") for name, data in events if name == "tool_call"]
+
+
+def verify_composition_sse(events: list) -> dict:
+    """Check that one answer drove the three dependent tools in order."""
+    names = [name for name, _ in events]
+    errors = [data for name, data in events if name == "error"]
+    done = [data for name, data in events if name == "done"]
+    calls = _tool_calls(events)
+    results = [data for name, data in events if name == "tool_result"]
+    expected = [
+        COMPOSITION_SEARCH_TOOL,
+        COMPOSITION_DIGEST_TOOL,
+        COMPOSITION_SAVE_TOOL,
+    ]
+    sequence_ok = all(tool in calls for tool in expected) and (
+        calls.index(COMPOSITION_SEARCH_TOOL)
+        < calls.index(COMPOSITION_DIGEST_TOOL)
+        < calls.index(COMPOSITION_SAVE_TOOL)
+    )
+    results_ok = all(
+        any(result.get("tool") == tool and result.get("ok") for result in results)
+        for tool in expected
+    )
+    ok = not errors and bool(done) and sequence_ok and results_ok
+    return {
+        "ok": ok,
+        "events": names,
+        "calls": calls,
+        "sequence_ok": sequence_ok,
+        "results_ok": results_ok,
+        "errors": errors,
+    }
+
+
+def verify_no_save_sse(events: list) -> dict:
+    """Check that a plain search ran search_web + digest and saved nothing."""
+    names = [name for name, _ in events]
+    errors = [data for name, data in events if name == "error"]
+    done = [data for name, data in events if name == "done"]
+    calls = _tool_calls(events)
+    results = [data for name, data in events if name == "tool_result"]
+    required_ok = all(
+        tool in calls and any(
+            result.get("tool") == tool and result.get("ok") for result in results
+        )
+        for tool in (COMPOSITION_SEARCH_TOOL, COMPOSITION_DIGEST_TOOL)
+    )
+    save_absent = COMPOSITION_SAVE_TOOL not in calls
+    ok = not errors and bool(done) and required_ok and save_absent
+    return {
+        "ok": ok,
+        "events": names,
+        "calls": calls,
+        "required_ok": required_ok,
+        "save_absent": save_absent,
+        "errors": errors,
+    }
+
+
+def verify_tool_absent(records: list, request_id: str | None, tool_name: str) -> dict:
+    """Check that a tool was never selected in a request's trace."""
+    scoped = [
+        record
+        for record in records
+        if record.get("event") == "tool_selected"
+        and record.get("tool") == tool_name
+        and (request_id is None or record.get("request_id") == request_id)
+    ]
+    return {"ok": not scoped, "tool": tool_name}
+
+
 def _run_tasks_turns(
     backend_url: str, records_path: Path, run_dir: Path, report: dict, model_ready: bool
 ) -> str:
@@ -1335,20 +1631,126 @@ def _run_tasks_turns(
     return "PASS" if ok else "FAIL"
 
 
+def _run_composition_turns(
+    backend_url: str, records_path: Path, run_dir: Path, report: dict, model_ready: bool
+) -> tuple[str, str]:
+    """Run the LIVE composition turns and return ``(save_status, no_save_status)``."""
+    if not model_ready:
+        report["composition_live_reason"] = "no local OpenAI-compatible model"
+        return "BLOCKED", "BLOCKED"
+
+    chat_id = _create_chat(backend_url, "Composition live")
+    events = collect_sse(
+        f"{backend_url}/api/chat/stream",
+        {"chat_id": chat_id, "message": COMPOSITION_QUESTION},
+        timeout_s=1800.0,
+    )
+    sse = verify_composition_sse(events)
+    report["sse_composition"] = sse
+
+    listing = httpx.get(
+        f"{backend_url}/api/chats/{chat_id}/reports", timeout=20.0
+    ).json()
+    reports = listing.get("reports") or []
+    report_created = len(reports) >= 1
+    stored_urls: list = []
+    identity_ok = False
+    if report_created:
+        detail = httpx.get(
+            f"{backend_url}/api/chats/{chat_id}/reports/"
+            f"{reports[0]['report_id']}",
+            timeout=20.0,
+        ).json()
+        stored_urls = [source.get("url") for source in detail.get("sources", [])]
+        # Identity: the saved sources are exactly the deterministic tool URLs.
+        identity_ok = bool(stored_urls) and set(stored_urls) <= set(RESULT_URLS)
+    report["composition_report"] = {
+        "created": report_created,
+        "stored_urls": stored_urls,
+        "identity_ok": identity_ok,
+    }
+
+    records = read_trace(records_path)
+    ids = _request_ids(records)
+    trace = verify_trace(records, ids[-1] if ids else None, COMPOSITION_CHAIN)
+    tools_listed = verify_tools_listed(
+        records, ids[-1] if ids else None, COMPOSITION_SAVE_TOOL
+    )
+    report["composition_trace"] = trace
+    report["composition_tools_listed"] = tools_listed
+    save_ok = (
+        bool(sse["ok"])
+        and report_created
+        and identity_ok
+        and bool(trace["ok"])
+        and bool(tools_listed["ok"])
+    )
+    save_status = "PASS" if save_ok else "FAIL"
+
+    # Scenario B: a plain "find and tell me briefly" must not create a report.
+    chat_b = _create_chat(backend_url, "Composition no save")
+    events_b = collect_sse(
+        f"{backend_url}/api/chat/stream",
+        {"chat_id": chat_b, "message": COMPOSITION_NO_SAVE_QUESTION},
+        timeout_s=1800.0,
+    )
+    sse_b = verify_no_save_sse(events_b)
+    report["sse_composition_no_save"] = sse_b
+    listing_b = httpx.get(
+        f"{backend_url}/api/chats/{chat_b}/reports", timeout=20.0
+    ).json()
+    no_report_b = int(listing_b.get("count") or 0) == 0
+    records_b = read_trace(records_path)
+    ids_b = _request_ids(records_b)
+    trace_b = verify_trace(
+        records_b, ids_b[-1] if ids_b else None, COMPOSITION_NO_SAVE_CHAIN
+    )
+    save_absent = verify_tool_absent(
+        records_b, ids_b[-1] if ids_b else None, COMPOSITION_SAVE_TOOL
+    )
+    report["composition_no_save_trace"] = trace_b
+    report["composition_no_save_absent"] = save_absent
+    no_save_ok = (
+        bool(sse_b["ok"])
+        and no_report_b
+        and bool(trace_b["ok"])
+        and bool(save_absent["ok"])
+    )
+    no_save_status = "PASS" if no_save_ok else "FAIL"
+    return save_status, no_save_status
+
+
 def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     """Execute the live E2E scenario and return its exit code."""
     scenario = str(scenario or "arithmetic").strip().lower()
     is_search = scenario == "search"
     is_tasks = scenario == "tasks"
-    label = "live-e2e-search" if is_search else "live-e2e-tasks" if is_tasks else "live-e2e"
+    is_composition = scenario == "composition"
+    label = (
+        "live-e2e-search"
+        if is_search
+        else "live-e2e-tasks"
+        if is_tasks
+        else "live-e2e-composition"
+        if is_composition
+        else "live-e2e"
+    )
     question = (
-        SEARCH_QUESTION if is_search else TASKS_QUESTION_1 if is_tasks else QUESTION
+        SEARCH_QUESTION
+        if is_search
+        else TASKS_QUESTION_1
+        if is_tasks
+        else COMPOSITION_QUESTION
+        if is_composition
+        else QUESTION
     )
     chain = (
         SEARCH_TRACE_CHAIN
         if is_search
         else TASKS_SCHEDULE_CHAIN
         if is_tasks
+        else COMPOSITION_CHAIN
+        if is_composition
         else REQUIRED_TRACE_CHAIN
     )
 
@@ -1360,7 +1762,7 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     report: dict = {
         "scenario": label,
         "question": question,
-        "expected_answer": "" if (is_search or is_tasks) else EXPECTED_ANSWER,
+        "expected_answer": "" if (is_search or is_tasks or is_composition) else EXPECTED_ANSWER,
         "expected_tool": chain[3][1]["tool"],
         "ui_requested": bool(ui),
         "db": relative(db_path),
@@ -1377,7 +1779,7 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     model_ready = bool(model) and qa_local_llm.probe(
         config.base_url, api_key=config.api_key
     ) is not None
-    if not model_ready and not is_tasks:
+    if not model_ready and not (is_tasks or is_composition):
         print(
             "LIVE_LLM_STATUS: BLOCKED - no local OpenAI-compatible model is "
             "running and no launcher is configured "
@@ -1390,7 +1792,8 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         write_report(run_dir, report)
         print(f"RUN_DIR: {relative(run_dir)}")
         return EXIT_PREREQUISITE
-    # The tasks scenario still produces its UI statuses without a model.
+    # The tasks and composition scenarios still produce their UI statuses
+    # without a model.
 
     report["model"] = model
     report["model_ready"] = model_ready
@@ -1402,10 +1805,12 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     fake_search: FakeSearchServer | None = None
     cleanup: list = []
     exit_code = EXIT_FAIL
-    live_status = "BLOCKED" if is_tasks and not model_ready else "FAIL"
+    live_status = "BLOCKED" if (is_tasks or is_composition) and not model_ready else "FAIL"
     ui_status = "NOT_REQUESTED"
     chats_ui_status = "NOT_REQUESTED"
     tasks_ui_status = "NOT_REQUESTED"
+    reports_ui_status = "NOT_REQUESTED"
+    composition_no_save_status = "NOT_REQUESTED"
 
     try:
         mcp_env = {
@@ -1420,7 +1825,7 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         if is_tasks:
             # The scheduler must run soon so the summary turn has a stored run.
             mcp_env["MCP_TASK_TICK_SECONDS"] = "0.5"
-        if is_search or is_tasks:
+        if is_search or is_tasks or is_composition:
             fake_search = FakeSearchServer(0).start()
             report["fake_search"] = {"loopback_port": fake_search.port}
             # The key lives only in the MCP child process; the harness keeps the
@@ -1488,6 +1893,14 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             )
             print(f"TASKS_LIVE_STATUS: {live_status}")
             report["tasks_live_status"] = live_status
+        elif is_composition:
+            live_status, composition_no_save_status = _run_composition_turns(
+                backend_url, records_path, run_dir, report, model_ready
+            )
+            report["composition_live_status"] = live_status
+            report["composition_no_save_live_status"] = composition_no_save_status
+            print(f"COMPOSITION_LIVE_STATUS: {live_status}")
+            print(f"COMPOSITION_NO_SAVE_LIVE_STATUS: {composition_no_save_status}")
         else:
             events = collect_sse(
                 f"{backend_url}/api/chat/stream",
@@ -1558,6 +1971,12 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
                 ui_status = run_ui_search_e2e(backend_url, run_dir, report)
                 print(f"UI_E2E_STATUS: {ui_status}")
                 report["ui_e2e_status"] = ui_status
+            elif is_composition:
+                reports_ui_status = run_ui_reports_e2e(
+                    backend_url, db_path, run_dir, report
+                )
+                print(f"REPORTS_UI_STATUS: {reports_ui_status}")
+                report["reports_ui_status"] = reports_ui_status
             else:
                 ui_status = run_ui_e2e(backend_url, run_dir, report)
                 print(f"UI_E2E_STATUS: {ui_status}")
@@ -1570,6 +1989,10 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         else:
             exit_code = EXIT_FAIL
         if is_tasks and ui and "FAIL" in (chats_ui_status, tasks_ui_status):
+            exit_code = EXIT_FAIL
+        if is_composition and composition_no_save_status == "FAIL":
+            exit_code = EXIT_FAIL
+        if is_composition and ui and reports_ui_status == "FAIL":
             exit_code = EXIT_FAIL
         report["status"] = (
             "pass"
@@ -1596,6 +2019,10 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             report.setdefault("ui_e2e_status", ui_status)
             report.setdefault("chats_ui_status", chats_ui_status)
             report.setdefault("tasks_ui_status", tasks_ui_status)
+            report.setdefault("reports_ui_status", reports_ui_status)
+        if is_composition:
+            report.setdefault("composition_live_status", live_status)
+            report.setdefault("composition_no_save_live_status", composition_no_save_status)
         write_report(run_dir, report)
         print(f"RUN_DIR: {relative(run_dir)}")
 
@@ -1606,7 +2033,7 @@ def main(argv=None) -> int:
     parser.add_argument("--ui", action="store_true", help="also run the UI E2E")
     parser.add_argument(
         "--scenario",
-        choices=("arithmetic", "search", "tasks"),
+        choices=("arithmetic", "search", "tasks", "composition"),
         default=str(os.environ.get("LIVE_E2E_SCENARIO") or "arithmetic"),
         help="which live scenario to run (default: arithmetic)",
     )

@@ -15,7 +15,10 @@
   // A list marker needs trailing whitespace, so a line like "*italic*" stays a
   // paragraph instead of turning into a one-item list.
   var UNORDERED_RE = /^\s*[-*+]\s+(.*)$/;
-  var ORDERED_RE = /^\s*\d+[.)]\s+(.*)$/;
+  // The leading number is captured so an ordered list that starts at 3 can set
+  // its ``start`` attribute; later numbers are ignored and renumbered by the
+  // browser, which keeps a single list sequential.
+  var ORDERED_RE = /^\s*(\d+)[.)]\s+(.*)$/;
 
   function isWordChar(character) {
     return WORD_RE.test(character);
@@ -165,18 +168,59 @@
   }
 
   function appendList(parent, lines, start, tag) {
-    var pattern = tag === "ul" ? UNORDERED_RE : ORDERED_RE;
+    var ordered = tag === "ol";
+    var pattern = ordered ? ORDERED_RE : UNORDERED_RE;
+    var otherPattern = ordered ? UNORDERED_RE : ORDERED_RE;
     var list = document.createElement(tag);
     var index = start;
+    var currentItem = null;
+    var firstNumber = null;
+
+    function itemText(match) {
+      return ordered ? match[2] : match[1];
+    }
+
+    function addItem(match) {
+      var item = document.createElement("li");
+      parseInline(itemText(match), item);
+      list.appendChild(item);
+      currentItem = item;
+      if (ordered && firstNumber === null) {
+        firstNumber = parseInt(match[1], 10);
+      }
+    }
+
     while (index < lines.length) {
-      var match = pattern.exec(lines[index]);
-      if (!match) {
+      var line = lines[index];
+      var match = pattern.exec(line);
+      if (match) {
+        addItem(match);
+        index += 1;
+        continue;
+      }
+      if (line.trim() === "") {
+        // A single empty line keeps a loose list going only when the next line
+        // is another item of the same type; otherwise the list ends.
+        var next = lines[index + 1];
+        if (next !== undefined && pattern.test(next)) {
+          index += 1;
+          continue;
+        }
         break;
       }
-      var item = document.createElement("li");
-      parseInline(match[1], item);
-      list.appendChild(item);
+      if (otherPattern.test(line)) {
+        break;
+      }
+      // A continuation line belongs to the current item; the leading newline
+      // keeps the original line break in the text.
+      if (currentItem) {
+        parseInline("\n" + line, currentItem);
+      }
       index += 1;
+    }
+
+    if (ordered && firstNumber !== null && firstNumber > 1) {
+      list.start = firstNumber;
     }
     parent.appendChild(list);
     return index;

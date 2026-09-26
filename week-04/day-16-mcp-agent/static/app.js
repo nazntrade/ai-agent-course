@@ -31,6 +31,8 @@ const newChatButton = document.getElementById("new-chat-button");
 const chatLimitMessageEl = document.getElementById("chat-limit-message");
 const tasksListEl = document.getElementById("tasks-list");
 const tasksRefreshButton = document.getElementById("tasks-refresh-button");
+const reportsListEl = document.getElementById("reports-list");
+const reportsRefreshButton = document.getElementById("reports-refresh-button");
 
 // The selected chat is the only context a request may use. It is an opaque id
 // and is never written into visible text.
@@ -44,6 +46,7 @@ let selectionToken = 0;
 // handle so that starting the poll twice never creates a second interval.
 let tasksPollTimer = null;
 let tasksRequestInFlight = false;
+let reportsRequestInFlight = false;
 
 function addBubble(kind, text) {
   const bubble = document.createElement("div");
@@ -465,9 +468,10 @@ async function selectChat(chatId) {
   renderChatList();
   const token = ++selectionToken;
   try {
-    const [messagesResponse, tasksResponse] = await Promise.all([
+    const [messagesResponse, tasksResponse, reportsResponse] = await Promise.all([
       fetch(`${API_BASE}/api/chats/${chatId}/messages`),
       fetch(`${API_BASE}/api/chats/${chatId}/tasks`),
+      fetch(`${API_BASE}/api/chats/${chatId}/reports`),
     ]);
     if (token !== selectionToken) {
       return;
@@ -482,10 +486,16 @@ async function selectChat(chatId) {
       const payload = await tasksResponse.json();
       renderTasks(payload.tasks || []);
     }
+    reportsListEl.textContent = "";
+    if (reportsResponse.ok) {
+      const payload = await reportsResponse.json();
+      renderReports(payload.reports || []);
+    }
   } catch {
     if (token === selectionToken) {
       messagesEl.textContent = "";
       tasksListEl.textContent = "";
+      reportsListEl.textContent = "";
     }
   }
 }
@@ -590,8 +600,10 @@ async function deleteChat(chatId) {
       clearStoredChatId();
       messagesEl.textContent = "";
       tasksListEl.textContent = "";
+      reportsListEl.textContent = "";
     }
     await loadChats();
+    await loadReports();
   } catch {
     return;
   }
@@ -760,6 +772,142 @@ async function loadTasks() {
   }
 }
 
+// -- saved reports ---------------------------------------------------------
+
+function buildReportSource(item) {
+  const entry = document.createElement("li");
+  const url = String((item && item.url) || "");
+  const title = (item && item.title) || url;
+  if (/^https?:\/\//i.test(url)) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.textContent = title;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    entry.appendChild(anchor);
+  } else {
+    entry.textContent = title;
+  }
+  const description = (item && item.description) || "";
+  if (description) {
+    const detail = document.createElement("span");
+    detail.className = "report-source-desc";
+    detail.textContent = ` ${description}`;
+    entry.appendChild(detail);
+  }
+  return entry;
+}
+
+function renderReportDetail(card, report) {
+  const body = document.createElement("div");
+  body.className = "report-body";
+  const summary = document.createElement("p");
+  summary.className = "report-summary";
+  // The summary is untrusted plain text: textContent never interprets markup.
+  summary.textContent = report.summary || "";
+  body.appendChild(summary);
+  const list = document.createElement("ol");
+  list.className = "report-sources";
+  for (const source of report.sources || []) {
+    list.appendChild(buildReportSource(source));
+  }
+  if (list.childElementCount) {
+    body.appendChild(list);
+  }
+  card.appendChild(body);
+}
+
+async function loadReportDetail(card) {
+  if (card.dataset.loaded === "1") {
+    return;
+  }
+  card.dataset.loaded = "1";
+  const chatId = state.activeChatId;
+  const reportId = card.dataset.reportId;
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${chatId}/reports/${reportId}`
+    );
+    if (chatId !== state.activeChatId || !response.ok) {
+      return;
+    }
+    renderReportDetail(card, await response.json());
+  } catch {
+    return;
+  }
+}
+
+function buildReportCard(report) {
+  const card = document.createElement("details");
+  card.className = "report-card";
+  card.dataset.reportId = report.report_id;
+
+  const summary = document.createElement("summary");
+  const topic = document.createElement("span");
+  topic.className = "report-topic";
+  topic.textContent = report.topic || "";
+  const meta = document.createElement("span");
+  meta.className = "report-meta";
+  const count = Number(report.source_count) || 0;
+  meta.textContent = `Saved ${formatTimestamp(report.created_at)} · ${count} source(s)`;
+  summary.appendChild(topic);
+  summary.appendChild(meta);
+  card.appendChild(summary);
+
+  // The full report is fetched lazily on the first open.
+  card.addEventListener("toggle", () => {
+    if (card.open) {
+      loadReportDetail(card);
+    }
+  });
+  return card;
+}
+
+function renderReports(reports) {
+  reportsListEl.textContent = "";
+  if (!reports.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No reports in this chat.";
+    reportsListEl.appendChild(empty);
+    return;
+  }
+  for (const report of reports) {
+    reportsListEl.appendChild(buildReportCard(report));
+  }
+}
+
+async function loadReports() {
+  const chatId = state.activeChatId;
+  if (!chatId) {
+    reportsListEl.textContent = "";
+    return;
+  }
+  if (reportsRequestInFlight) {
+    return;
+  }
+  reportsRequestInFlight = true;
+  const token = selectionToken;
+  try {
+    const response = await fetch(`${API_BASE}/api/chats/${chatId}/reports`);
+    if (token !== selectionToken || chatId !== state.activeChatId) {
+      return;
+    }
+    if (!response.ok) {
+      reportsListEl.textContent = "";
+      return;
+    }
+    const payload = await response.json();
+    renderReports(payload.reports || []);
+  } catch {
+    if (token === selectionToken && chatId === state.activeChatId) {
+      reportsListEl.textContent = "";
+    }
+  } finally {
+    reportsRequestInFlight = false;
+  }
+}
+
 // Idempotent: a second call while the timer already runs is a no-op.
 function startTasksPolling() {
   if (tasksPollTimer !== null) {
@@ -804,6 +952,8 @@ async function send() {
     inputEl.focus();
   }
   await refreshChats();
+  // A saved report appears after the answer finished, without a page reload.
+  await loadReports();
 }
 
 function pill(ok, label) {
@@ -959,6 +1109,8 @@ newChatButton.addEventListener("click", async () => {
 });
 
 tasksRefreshButton.addEventListener("click", loadTasks);
+
+reportsRefreshButton.addEventListener("click", loadReports);
 
 refreshButton.addEventListener("click", refreshStatus);
 

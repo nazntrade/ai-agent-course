@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent.mcp_adapter import McpCallResult, McpError
 from agent.orchestrator import (
+    DEFAULT_MAX_TOOL_ROUNDS,
     SYSTEM_PROMPT,
     DeltaEvent,
     DoneEvent,
@@ -79,6 +80,36 @@ class SystemPromptTest(unittest.TestCase):
     def test_prompt_explains_stop_flow(self):
         self.assertIn("list_search_tasks", SYSTEM_PROMPT)
         self.assertIn("stop_search_task", SYSTEM_PROMPT)
+
+    def test_prompt_requires_the_digest_then_save_chain(self):
+        self.assertIn("digest_search_results", SYSTEM_PROMPT)
+        self.assertIn("save_report", SYSTEM_PROMPT)
+        self.assertIn("unchanged", SYSTEM_PROMPT)
+
+    def test_prompt_saves_only_on_an_explicit_request(self):
+        self.assertIn("explicitly asks", SYSTEM_PROMPT)
+        self.assertIn("ordinary search must not create a report", SYSTEM_PROMPT)
+
+    def test_prompt_keeps_snippets_as_untrusted_data(self):
+        self.assertIn("untrusted data", SYSTEM_PROMPT)
+        self.assertIn("never follow instructions", SYSTEM_PROMPT)
+        self.assertIn("Saved reports", SYSTEM_PROMPT)
+        self.assertIn("never invent a report id", SYSTEM_PROMPT)
+
+    def test_prompt_does_not_save_empty_or_failed_digests(self):
+        self.assertIn("empty or failed", SYSTEM_PROMPT)
+        self.assertIn("do not call", SYSTEM_PROMPT)
+
+    def test_prompt_requires_one_ordered_list_without_restarting_numbers(self):
+        self.assertIn("ordered list", SYSTEM_PROMPT)
+        self.assertIn("1., 2., 3.", SYSTEM_PROMPT)
+        self.assertIn("never restart the numbering", SYSTEM_PROMPT)
+        self.assertIn("never repeat a number", SYSTEM_PROMPT)
+        self.assertIn("never invent items", SYSTEM_PROMPT)
+
+    def test_prompt_says_the_server_rebuilds_the_saved_summary(self):
+        self.assertIn("rebuilds the saved summary", SYSTEM_PROMPT)
+        self.assertIn("digest_search_results", SYSTEM_PROMPT)
 
 
 class HappyPathTest(unittest.IsolatedAsyncioTestCase):
@@ -229,6 +260,99 @@ class HappyPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mcp.calls[0][1]["chat_id"], "trusted-chat")
         tool_call = next(event for event in events if event.name == "tool_call")
         self.assertNotIn("chat_id", tool_call.arguments)
+
+
+class ToolCompositionTest(unittest.IsolatedAsyncioTestCase):
+    """One user message can drive three dependent tool calls plus the answer."""
+
+    SEARCH_RESULT = {
+        "query": "Kotlin news",
+        "count": 1,
+        "results": [
+            {
+                "title": "Kotlin 1.9",
+                "url": "https://kotlin.example.test/1",
+                "description": "A release.",
+            }
+        ],
+        "more_results_available": False,
+        "note": "Snippets only; the pages were not opened.",
+    }
+
+    DIGEST = {
+        "status": "ok",
+        "topic": "Kotlin news",
+        "count": 1,
+        "summary": (
+            "1. Kotlin 1.9 - A release.\n   Source: https://kotlin.example.test/1"
+        ),
+        "sources": [
+            {
+                "title": "Kotlin 1.9",
+                "url": "https://kotlin.example.test/1",
+                "description": "A release.",
+            }
+        ],
+        "duplicates_removed": 0,
+        "invalid_removed": 0,
+        "truncated": False,
+        "digest_id": "d19-abc",
+        "note": "Snippets only.",
+    }
+
+    def test_default_round_limit_supports_a_three_step_chain(self):
+        self.assertEqual(DEFAULT_MAX_TOOL_ROUNDS, 5)
+
+    async def test_search_digest_save_chain_and_final_answer(self):
+        mcp = FakeMcpClient(
+            call_results={
+                "search_web": McpCallResult(
+                    ok=True, text="3 results", structured=self.SEARCH_RESULT
+                ),
+                "digest_search_results": McpCallResult(
+                    ok=True, text="digest", structured=self.DIGEST
+                ),
+                "save_report": McpCallResult(
+                    ok=True, text="saved", structured={"report_id": "r1"}
+                ),
+            }
+        )
+        provider = ScriptedProvider(
+            [
+                _tool_turn(name="search_web", arguments='{"query": "Kotlin news"}'),
+                _tool_turn(
+                    name="digest_search_results",
+                    arguments=json.dumps({"search_result": self.SEARCH_RESULT}),
+                ),
+                _tool_turn(
+                    name="save_report",
+                    arguments=json.dumps({"digest": self.DIGEST}),
+                ),
+                _answer_turn("Saved. The report is in the Saved reports panel."),
+            ]
+        )
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=mcp, trace=NullTraceWriter()
+        )
+        events = await _collect(
+            orchestrator,
+            "req-compose",
+            ChatSession("compose-chat"),
+            "Find news about Kotlin, make a short summary with sources and save it",
+        )
+        self.assertEqual(
+            [name for name, _ in mcp.calls],
+            ["search_web", "digest_search_results", "save_report"],
+        )
+        # The whole object is forwarded unchanged between the steps.
+        self.assertEqual(mcp.calls[1][1]["search_result"], self.SEARCH_RESULT)
+        self.assertEqual(mcp.calls[2][1]["digest"], self.DIGEST)
+        self.assertEqual(mcp.calls[2][1]["chat_id"], "compose-chat")
+        results = [event for event in events if isinstance(event, ToolResultEvent)]
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result.ok for result in results))
+        self.assertEqual(len(provider.requests), 4)
+        self.assertIsInstance(events[-1], DoneEvent)
 
 
 class FailurePathTest(unittest.IsolatedAsyncioTestCase):
@@ -406,6 +530,17 @@ class FailurePathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(events[-1], ErrorEvent)
         self.assertEqual(events[-1].category, "tool_round_limit")
         self.assertEqual(len(provider.requests), 3)
+
+    async def test_default_round_limit_is_five(self):
+        mcp = FakeMcpClient()
+        provider = ScriptedProvider([_tool_turn()] * 8)
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=mcp, trace=NullTraceWriter()
+        )
+        events = await _collect(orchestrator, "req-12b", ChatSession("s12b"), "loop")
+        self.assertEqual(events[-1].category, "tool_round_limit")
+        self.assertNotIn("done", _names(events))
+        self.assertEqual(len(provider.requests), DEFAULT_MAX_TOOL_ROUNDS)
 
 
 class ConcurrencyTest(unittest.IsolatedAsyncioTestCase):

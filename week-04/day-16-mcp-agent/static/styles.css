@@ -509,3 +509,62 @@ details.tools summary {
   margin-top: 0.2rem;
   word-break: break-word;
 }
+
+/* Saved reports panel: one collapsible card per report of the selected chat. */
+.reports {
+  margin-top: 1rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.75rem;
+}
+
+.reports-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.report-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  background: var(--panel-2);
+}
+
+.report-card summary {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.report-topic {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.report-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.report-summary {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+
+.report-sources {
+  margin: 0.35rem 0 0;
+  padding-left: 1rem;
+  font-size: 0.82rem;
+}
+
+.report-sources li {
+  margin-top: 0.2rem;
+  word-break: break-word;
+}
+
+.report-source-desc {
+  color: var(--muted);
+}

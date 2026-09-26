@@ -113,7 +113,7 @@ class ScheduledTasksLiveTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(POLL_SECONDS)
         return payload
 
-    async def test_seven_tools_include_the_task_tools(self):
+    async def test_nine_tools_include_the_task_tools(self):
         status, tools = await inspect_tools(MCP_URL, connect_timeout_s=10.0)
         self.assertTrue(status.connected, msg=str(status.error))
         names = sorted(tool.name for tool in tools)
@@ -121,9 +121,11 @@ class ScheduledTasksLiveTest(unittest.IsolatedAsyncioTestCase):
             names,
             [
                 "calculate",
+                "digest_search_results",
                 "get_latest_search_run",
                 "get_server_info",
                 "list_search_tasks",
+                "save_report",
                 "schedule_search_task",
                 "search_web",
                 "stop_search_task",

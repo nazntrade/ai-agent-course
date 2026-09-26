@@ -53,6 +53,9 @@ class OpenApiSnapshotTest(unittest.TestCase):
             "/api/chats/{chat_id}/messages",
             "/api/chats/{chat_id}/clear",
             "/api/chats/{chat_id}/tasks",
+            # Day 19: saved reports of a chat.
+            "/api/chats/{chat_id}/reports",
+            "/api/chats/{chat_id}/reports/{report_id}",
         ):
             self.assertIn(path, paths)
 

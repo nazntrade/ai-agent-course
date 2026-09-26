@@ -9,14 +9,20 @@ import sys
 import unittest
 
 from harness.live_e2e import (
+    COMPOSITION_CHAIN,
+    COMPOSITION_NO_SAVE_CHAIN,
+    COMPOSITION_SAVE_TOOL,
     SEARCH_TRACE_CHAIN,
     TASKS_EXPECTED_TOOL_1,
     TASKS_SCHEDULE_CHAIN,
     TASKS_SUMMARY_CHAIN,
     key_is_isolated,
+    verify_composition_sse,
+    verify_no_save_sse,
     verify_search_sse,
     verify_task_schedule_sse,
     verify_task_summary_sse,
+    verify_tool_absent,
     verify_tools_listed,
     verify_trace,
 )
@@ -304,11 +310,13 @@ class TasksHarnessVerificationTest(unittest.TestCase):
 
     TOOL_NAMES = [
         "calculate",
-        "get_server_info",
-        "search_web",
-        "schedule_search_task",
-        "list_search_tasks",
+        "digest_search_results",
         "get_latest_search_run",
+        "get_server_info",
+        "list_search_tasks",
+        "save_report",
+        "schedule_search_task",
+        "search_web",
         "stop_search_task",
     ]
 
@@ -320,7 +328,7 @@ class TasksHarnessVerificationTest(unittest.TestCase):
             {
                 "event": "mcp_list_tools",
                 "request_id": "r1",
-                "tools_count": 7,
+                "tools_count": 9,
                 "tool_names": TasksHarnessVerificationTest.TOOL_NAMES,
             },
             {"event": "model_request", "request_id": "r1", "phase": "tool_selection"},
@@ -415,6 +423,121 @@ class TasksHarnessVerificationTest(unittest.TestCase):
         text = "CHATS_UI_STATUS: PASS\nCHATS_UI_STATUS: FAIL - broken\n"
         self.assertEqual(_status_from_output(text, "CHATS_UI_STATUS"), "FAIL")
         self.assertEqual(_status_from_output("", "CHATS_UI_STATUS"), "UNKNOWN")
+
+
+class CompositionHarnessVerificationTest(unittest.TestCase):
+    """The composition scenario's trace chains and SSE checks (D19-10/D19-16)."""
+
+    @staticmethod
+    def _records() -> list:
+        return [
+            {"event": "request_start", "request_id": "r1"},
+            {"event": "mcp_connect", "request_id": "r1", "ok": True},
+            {
+                "event": "mcp_list_tools",
+                "request_id": "r1",
+                "tools_count": 9,
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "tool_selection"},
+            {"event": "tool_selected", "request_id": "r1", "tool": "search_web"},
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "tool": "search_web",
+                "ok": True,
+                "result": {"query": "kotlin", "count": 3},
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "r1",
+                "tool": "digest_search_results",
+            },
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "tool": "digest_search_results",
+                "ok": True,
+                "result": {"status": "ok", "count": 3},
+            },
+            {"event": "tool_selected", "request_id": "r1", "tool": "save_report"},
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "tool": "save_report",
+                "ok": True,
+                "result": {"report_id": "r1"},
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "final_answer"},
+            {"event": "request_done", "request_id": "r1", "ok": True},
+        ]
+
+    def test_composition_chain_passes(self):
+        result = verify_trace(self._records(), "r1", COMPOSITION_CHAIN)
+        self.assertTrue(result["ok"], msg=result)
+
+    def test_composition_chain_rejects_a_missing_step(self):
+        records = self._records()
+        records = [
+            record
+            for record in records
+            if record.get("tool") != "digest_search_results"
+        ]
+        self.assertFalse(verify_trace(records, "r1", COMPOSITION_CHAIN)["ok"])
+
+    def test_no_save_chain_rejects_the_save_tool(self):
+        records = self._records()
+        # The ordered chain is a subsequence check, so the direct guard is the
+        # absent-tool check: save_report must never be selected.
+        self.assertFalse(verify_tool_absent(records, "r1", COMPOSITION_SAVE_TOOL)["ok"])
+        without_save = [
+            record for record in records if record.get("tool") != "save_report"
+        ]
+        self.assertTrue(
+            verify_trace(without_save, "r1", COMPOSITION_NO_SAVE_CHAIN)["ok"]
+        )
+        self.assertTrue(
+            verify_tool_absent(without_save, "r1", COMPOSITION_SAVE_TOOL)["ok"]
+        )
+
+    def test_composition_sse_requires_the_three_calls_in_order(self):
+        events = [
+            ("tool_call", {"tool": "search_web", "arguments": {"query": "kotlin"}}),
+            (
+                "tool_result",
+                {"tool": "search_web", "ok": True, "summary": "3 results"},
+            ),
+            ("tool_call", {"tool": "digest_search_results", "arguments": {}}),
+            (
+                "tool_result",
+                {"tool": "digest_search_results", "ok": True, "summary": "ok"},
+            ),
+            ("tool_call", {"tool": "save_report", "arguments": {}}),
+            (
+                "tool_result",
+                {"tool": "save_report", "ok": True, "summary": "saved"},
+            ),
+            ("delta", {"text": "Saved. See the Saved reports panel."}),
+            ("done", {"ok": True}),
+        ]
+        self.assertTrue(verify_composition_sse(events)["ok"])
+        events[4] = ("tool_call", {"tool": "save_report", "arguments": {}})
+        events[5] = (
+            "tool_result",
+            {"tool": "save_report", "ok": False, "summary": "boom"},
+        )
+        self.assertFalse(verify_composition_sse(events)["ok"])
+
+    def test_no_save_sse_rejects_a_save_call(self):
+        events = [
+            ("tool_call", {"tool": "search_web"}),
+            ("tool_result", {"tool": "search_web", "ok": True}),
+            ("tool_call", {"tool": "digest_search_results"}),
+            ("tool_result", {"tool": "digest_search_results", "ok": True}),
+            ("done", {"ok": True}),
+        ]
+        self.assertTrue(verify_no_save_sse(events)["ok"])
+        events.insert(4, ("tool_call", {"tool": "save_report"}))
+        self.assertFalse(verify_no_save_sse(events)["ok"])
 
 
 class KeyIsolationTest(unittest.TestCase):
@@ -552,6 +675,38 @@ class HarnessEntryPointTest(unittest.TestCase):
         completed = self._run("live_e2e.py", argv=("--scenario", "tasks", "--help"))
         self.assertNotIn("ModuleNotFoundError", completed.stderr)
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_live_e2e_accepts_the_composition_scenario_option(self):
+        completed = self._run(
+            "live_e2e.py", argv=("--scenario", "composition", "--help")
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_reports_real_live_blocks_without_explicit_opt_in(self):
+        completed = self._run(
+            "reports_real_live.py", extra_env={"REPORTS_REAL_ALLOW": ""}
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+        self.assertIn("REPORTS_REAL_STATUS: BLOCKED", completed.stdout)
+
+    def test_reports_restart_script_runs_from_a_file_path(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            busy_port = sock.getsockname()[1]
+            completed = self._run(
+                "reports_restart.py",
+                extra_env={
+                    "REPORTS_RESTART_MCP_PORT": str(busy_port),
+                    "REPORTS_RESTART_BACKEND_PORT": str(_free_port()),
+                    "REPORTS_RESTART_STUB_PORT": str(_free_port()),
+                },
+            )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+        self.assertIn("PREREQUISITE", completed.stdout)
 
     def test_tavily_live_blocks_without_explicit_opt_in(self):
         completed = self._run(
