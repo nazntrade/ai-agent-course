@@ -81,7 +81,19 @@ SYSTEM_PROMPT = (
     "(1., 2., 3.): keep a single sequence and never restart the numbering in the "
     "middle, never repeat a number and never invent items the tools did not return. "
     "CRITICAL: if the user's message contains 'save' or 'report', you must call "
-    "'save_report' once, after 'digest_search_results', and before your final answer."
+    "'save_report' once, after 'digest_search_results', and before your final answer. "
+    "TWO MCP SERVERS: server A owns 'search_web', 'schedule_search_task', "
+    "'list_search_tasks', 'get_latest_search_run', 'stop_search_task' and the report "
+    "tools; server B owns 'create_notification_watch', 'list_notification_watches', "
+    "'evaluate_run', 'send_notification', 'get_delivery_status' and "
+    "'stop_notification_watch'. Never call a tool of one server from the other: pass "
+    "the whole structured result of a server A tool as the argument of a server B "
+    "tool. To watch news, first schedule or read the search in A "
+    "('schedule_search_task'/'get_latest_search_run'), then create the watch with "
+    "'create_notification_watch' in B, compare the run with 'evaluate_run', and send "
+    "with 'send_notification' only when it returned 'should_notify' true. Never claim "
+    "a notification was delivered unless 'send_notification' returned the status "
+    "'sent' or 'duplicate'."
 )
 
 DEFAULT_MAX_TOOL_ROUNDS = 5
@@ -89,6 +101,7 @@ DEFAULT_MAX_TOOL_ROUNDS = 5
 CATEGORY_MCP_UNAVAILABLE = "mcp_unavailable"
 CATEGORY_MCP_TIMEOUT = "mcp_timeout"
 CATEGORY_INVALID_TOOL_ARGUMENTS = "invalid_tool_arguments"
+CATEGORY_TOOL_NOT_ALLOWED = "tool_not_allowed"
 CATEGORY_TOOL_ROUND_LIMIT = "tool_round_limit"
 CATEGORY_INTERNAL = "internal"
 
@@ -132,15 +145,23 @@ class DeltaEvent(ChatEvent):
 
 @dataclass
 class ToolCallEvent(ChatEvent):
-    """The model asked for a tool call."""
+    """The model asked for a tool call.
+
+    ``server`` is present only when the owning server is known (a hub client);
+    the legacy single-server stream stays byte-compatible with days 16-19.
+    """
 
     tool: str
     arguments: dict
     round: int
+    server: str | None = None
     name = "tool_call"
 
     def payload(self) -> dict:
-        return {"tool": self.tool, "arguments": self.arguments, "round": self.round}
+        payload = {"tool": self.tool, "arguments": self.arguments, "round": self.round}
+        if self.server is not None:
+            payload["server"] = self.server
+        return payload
 
 
 @dataclass
@@ -151,15 +172,19 @@ class ToolResultEvent(ChatEvent):
     ok: bool
     summary: str
     duration_ms: int
+    server: str | None = None
     name = "tool_result"
 
     def payload(self) -> dict:
-        return {
+        payload = {
             "tool": self.tool,
             "ok": self.ok,
             "summary": self.summary,
             "duration_ms": self.duration_ms,
         }
+        if self.server is not None:
+            payload["server"] = self.server
+        return payload
 
 
 @dataclass
@@ -250,22 +275,43 @@ class Orchestrator:
         self._max_tool_rounds = max(int(max_tool_rounds), 1)
 
     async def run(
-        self, request_id: str, session: ChatSession, user_message: str
+        self,
+        request_id: str,
+        session: ChatSession,
+        user_message: str,
+        *,
+        trigger: str = "chat",
+        watch_id: str | None = None,
+        system_prompt: str | None = None,
+        allowed_tools=None,
+        on_tool_result=None,
+        require_result=None,
     ) -> AsyncIterator[ChatEvent]:
-        """Yield the events of one request for ``session``."""
+        """Yield the events of one request for ``session``.
+
+        The chat and the background monitor share this one loop. The monitor
+        passes ``trigger="monitor"``, a ``watch_id``, a synthetic
+        ``system_prompt``, a restricted ``allowed_tools`` set and a
+        ``require_result`` predicate; an incomplete monitor turn is recorded as
+        ``monitor_incomplete`` instead of a successful ``request_done``.
+        """
         started = time.monotonic()
+        allowed = None if allowed_tools is None else {str(name) for name in allowed_tools}
 
         async with session.lock:
             # The context window is read under the per-chat lock so two requests
             # of one chat cannot interleave their history.
             history = list(session.history())
-            self._trace.write(
-                "request_start",
-                request_id=request_id,
-                chat_id=session.chat_id,
-                context_messages=len(history),
-                message_chars=len(user_message or ""),
-            )
+            start_fields: dict = {
+                "request_id": request_id,
+                "chat_id": session.chat_id,
+                "trigger": str(trigger),
+                "context_messages": len(history),
+                "message_chars": len(user_message or ""),
+            }
+            if watch_id is not None:
+                start_fields["watch_id"] = str(watch_id)
+            self._trace.write("request_start", **start_fields)
             yield StatusEvent(request_id, "accepted")
 
             # A missing model configuration is a controlled failure detected
@@ -289,13 +335,20 @@ class Orchestrator:
                 if isinstance(event, ErrorEvent):
                     return
             tools = loaded.get("tools") or []
+            if allowed is not None:
+                # A monitor turn offers the model only the restricted subset.
+                tools = [tool for tool in tools if tool.name in allowed]
             openai_tools = tool_schema.to_openai_tools(
                 tools, hidden_properties=tool_schema.HIDDEN_INJECTED_ARGUMENTS
             )
             schema_by_name = {tool.name: tool.input_schema for tool in tools}
+            server_by_name = {
+                tool.name: tool.server for tool in tools if getattr(tool, "server", None)
+            }
+            outcomes: dict = {}
 
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
                 *history,
                 {"role": "user", "content": str(user_message)},
             ]
@@ -373,7 +426,16 @@ class Orchestrator:
                 )
 
                 async for event in self._run_tools(
-                    request_id, round_index, ordered, schema_by_name, messages, session
+                    request_id,
+                    round_index,
+                    ordered,
+                    schema_by_name,
+                    messages,
+                    session,
+                    server_by_name=server_by_name,
+                    allowed_tools=allowed,
+                    on_tool_result=on_tool_result,
+                    outcomes=outcomes,
                 ):
                     if isinstance(event, ErrorEvent):
                         yield event
@@ -393,6 +455,19 @@ class Orchestrator:
                 )
                 yield ErrorEvent(request_id, CATEGORY_TOOL_ROUND_LIMIT, message)
                 return
+
+            # A monitor turn is complete only when its required outcome was
+            # observed: the caller (the monitor) decides and names the reason.
+            if require_result is not None:
+                reason = require_result(outcomes)
+                if reason:
+                    self._trace.write(
+                        "monitor_incomplete",
+                        request_id=request_id,
+                        watch_id=watch_id,
+                        reason=str(reason),
+                    )
+                    return
 
             total_ms = _millis(started)
             done_fields: dict = {
@@ -418,11 +493,18 @@ class Orchestrator:
     async def _load_tools(self, request_id: str, loaded: dict) -> AsyncIterator:
         """Yield progress/error events and store the MCP tools in ``loaded``.
 
-        One :meth:`McpClient.probe` call does the handshake and the full
-        ``tools/list`` in a single session, so a request opens exactly one MCP
-        connection instead of two.
+        A hub client (day 20) advertises ``probe_servers`` and is probed as a
+        whole: one ``mcp_connect`` per server and one aggregated
+        ``mcp_list_tools``. A legacy single client keeps the original single
+        probe, so days 16-19 stay byte-compatible.
         """
         yield StatusEvent(request_id, "mcp_connecting")
+        probe_servers = getattr(self._mcp, "probe_servers", None)
+        if callable(probe_servers):
+            async for event in self._load_tools_from_hub(request_id, loaded, probe_servers):
+                yield event
+            return
+
         started = time.monotonic()
         status, tools = await self._mcp.probe()
         probe_ms = _millis(started)
@@ -465,6 +547,71 @@ class Orchestrator:
         )
         loaded["tools"] = tools
 
+    async def _load_tools_from_hub(
+        self, request_id: str, loaded: dict, probe_servers
+    ) -> AsyncIterator:
+        """Probe every hub server and aggregate the tools of the live ones."""
+        primary = str(getattr(self._mcp, "primary_label", "A") or "A")
+        started = time.monotonic()
+        probes = await probe_servers()
+        probe_ms = _millis(started)
+
+        primary_probe = next(
+            (probe for probe in probes if str(probe.label) == primary), None
+        )
+        if primary_probe is None and probes:
+            primary_probe = probes[0]
+
+        for probe in probes:
+            status = probe.status
+            self._trace.write(
+                "mcp_connect",
+                request_id=request_id,
+                server=probe.label,
+                ok=bool(status.connected),
+                protocol_version=status.protocol_version,
+                server_name=status.server_name,
+                duration_ms=probe_ms,
+            )
+
+        if primary_probe is None or not primary_probe.status.connected:
+            status = primary_probe.status if primary_probe is not None else None
+            error = status.error if status is not None else None
+            category = (
+                CATEGORY_MCP_TIMEOUT
+                if error is not None and error.category == "timeout"
+                else CATEGORY_MCP_UNAVAILABLE
+            )
+            message = (
+                error.message
+                if error is not None
+                else "The MCP server is unavailable"
+            )
+            self._trace.write(
+                "request_error",
+                request_id=request_id,
+                category=category,
+                message=message,
+            )
+            yield ErrorEvent(request_id, category, message)
+            return
+
+        all_tools = []
+        per_server: dict = {}
+        for probe in probes:
+            per_server[str(probe.label)] = len(probe.tools)
+            all_tools.extend(probe.tools)
+        self._trace.write(
+            "mcp_list_tools",
+            request_id=request_id,
+            ok=True,
+            tools_count=len(all_tools),
+            per_server=per_server,
+            tool_names=[tool.name for tool in all_tools],
+            duration_ms=probe_ms,
+        )
+        loaded["tools"] = all_tools
+
     async def _run_tools(
         self,
         request_id: str,
@@ -473,12 +620,55 @@ class Orchestrator:
         schema_by_name: dict,
         messages: list,
         session,
+        *,
+        server_by_name: dict | None = None,
+        allowed_tools=None,
+        on_tool_result=None,
+        outcomes: dict | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Run every tool call of one round, feeding results back to the model."""
+        server_by_name = server_by_name or {}
         for call in calls:
             name = call["name"] or ""
             raw_arguments = call["arguments"] or "{}"
             call_id = call["id"] or f"call_{name or 'unknown'}"
+            server = server_by_name.get(name)
+
+            # A monitor turn offers a restricted subset; a call outside it is
+            # refused before it reaches any MCP server.
+            if allowed_tools is not None and name not in allowed_tools:
+                message = f"The tool '{name}' is not available in this run"
+                self._trace.write(
+                    "tool_selected",
+                    request_id=request_id,
+                    tool=name,
+                    arguments={},
+                    round=round_index,
+                    ok=False,
+                    **({"server": server} if server else {}),
+                )
+                self._trace.write(
+                    "tool_completed",
+                    request_id=request_id,
+                    tool=name,
+                    ok=False,
+                    result=message,
+                    duration_ms=0,
+                    **({"server": server} if server else {}),
+                )
+                yield ToolCallEvent(name, {}, round_index, server)
+                yield ToolResultEvent(name, False, message, 0, server)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": json.dumps(
+                            {"error": message, "category": CATEGORY_TOOL_NOT_ALLOWED},
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+                continue
 
             schema = schema_by_name.get(name)
             try:
@@ -497,6 +687,7 @@ class Orchestrator:
                     arguments={},
                     round=round_index,
                     ok=False,
+                    **({"server": server} if server else {}),
                 )
                 self._trace.write(
                     "tool_completed",
@@ -505,9 +696,10 @@ class Orchestrator:
                     ok=False,
                     result=message,
                     duration_ms=0,
+                    **({"server": server} if server else {}),
                 )
-                yield ToolCallEvent(name, {}, round_index)
-                yield ToolResultEvent(name, False, message, 0)
+                yield ToolCallEvent(name, {}, round_index, server)
+                yield ToolResultEvent(name, False, message, 0, server)
                 messages.append(
                     {
                         "role": "tool",
@@ -527,8 +719,9 @@ class Orchestrator:
                 tool=name,
                 arguments=ui_arguments,
                 round=round_index,
+                **({"server": server} if server else {}),
             )
-            yield ToolCallEvent(name, ui_arguments, round_index)
+            yield ToolCallEvent(name, ui_arguments, round_index, server)
 
             started = time.monotonic()
             try:
@@ -546,6 +739,7 @@ class Orchestrator:
                     ok=False,
                     result=exc.message,
                     duration_ms=_millis(started),
+                    **({"server": server} if server else {}),
                 )
                 self._trace.write(
                     "request_error",
@@ -553,7 +747,7 @@ class Orchestrator:
                     category=category,
                     message=exc.message,
                 )
-                yield ToolResultEvent(name, False, exc.message, _millis(started))
+                yield ToolResultEvent(name, False, exc.message, _millis(started), server)
                 yield ErrorEvent(request_id, category, exc.message)
                 return
 
@@ -566,8 +760,13 @@ class Orchestrator:
                 ok=bool(result.ok),
                 result=result.structured if result.structured is not None else summary,
                 duration_ms=duration_ms,
+                **({"server": server} if server else {}),
             )
-            yield ToolResultEvent(name, bool(result.ok), summary, duration_ms)
+            if outcomes is not None:
+                outcomes[name] = result
+            if on_tool_result is not None:
+                on_tool_result(name, result)
+            yield ToolResultEvent(name, bool(result.ok), summary, duration_ms, server)
             messages.append(
                 {
                     "role": "tool",

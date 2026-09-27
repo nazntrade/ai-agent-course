@@ -28,6 +28,16 @@ DEFAULT_MCP_SERVER_PORT = 8765
 DEFAULT_MCP_CONNECT_TIMEOUT_SECONDS = 10.0
 DEFAULT_MCP_CALL_TIMEOUT_SECONDS = 30.0
 
+# Server B (notifier MCP server, day 20). The backend only points at B; the
+# Telegram token and recipient stay with the B process and are never read here.
+DEFAULT_MCP_NOTIFIER_URL = "http://127.0.0.1:8766/mcp"
+DEFAULT_MCP_NOTIFIER_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_MCP_NOTIFIER_CALL_TIMEOUT_SECONDS = 5.0
+DEFAULT_NOTIFIER_MONITOR_ENABLED = True
+DEFAULT_NOTIFIER_MONITOR_TICK_SECONDS = 30
+NOTIFIER_MONITOR_TICK_MIN = 1
+NOTIFIER_MONITOR_TICK_MAX = 3600
+
 DEFAULT_BACKEND_HOST = "127.0.0.1"
 DEFAULT_BACKEND_PORT = 8600
 DEFAULT_TRACE_PATH = "logs/trace.jsonl"
@@ -88,6 +98,16 @@ def _to_int_clamped(value, default: int, low: int, high: int) -> int:
     return min(max(parsed, low), high)
 
 
+def _to_bool(value, default: bool) -> bool:
+    """Parse a boolean flag; a missing/blank value keeps the default."""
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text not in ("0", "false", "no", "off")
+
+
 def resolve_db_path(environment) -> Path:
     """Resolve ``AGENT_DB_PATH``, defaulting to ``data/day18.sqlite3``."""
     raw = str(environment.get("AGENT_DB_PATH") or "").strip()
@@ -115,6 +135,16 @@ class Settings:
     mcp_server_port: int = DEFAULT_MCP_SERVER_PORT
     mcp_connect_timeout_seconds: float = DEFAULT_MCP_CONNECT_TIMEOUT_SECONDS
     mcp_call_timeout_seconds: float = DEFAULT_MCP_CALL_TIMEOUT_SECONDS
+
+    mcp_notifier_url: str = DEFAULT_MCP_NOTIFIER_URL
+    mcp_notifier_connect_timeout_seconds: float = (
+        DEFAULT_MCP_NOTIFIER_CONNECT_TIMEOUT_SECONDS
+    )
+    mcp_notifier_call_timeout_seconds: float = (
+        DEFAULT_MCP_NOTIFIER_CALL_TIMEOUT_SECONDS
+    )
+    notifier_monitor_enabled: bool = DEFAULT_NOTIFIER_MONITOR_ENABLED
+    notifier_monitor_tick_seconds: int = DEFAULT_NOTIFIER_MONITOR_TICK_SECONDS
 
     backend_host: str = DEFAULT_BACKEND_HOST
     backend_port: int = DEFAULT_BACKEND_PORT
@@ -180,11 +210,24 @@ def resolve_settings(env=None, *, dotenv=True, env_path=None) -> Settings:
         f"http://{backend_host}:{backend_port}",
     )
 
+    # An explicit empty ``MCP_NOTIFIER_URL`` disables server B instead of
+    # falling back to the default: the hub then reports the slot as
+    # ``not_configured`` without probing it. A missing variable keeps the default.
+    if "MCP_NOTIFIER_URL" in environment:
+        mcp_notifier_url = str(environment.get("MCP_NOTIFIER_URL") or "").strip()
+    else:
+        mcp_notifier_url = DEFAULT_MCP_NOTIFIER_URL
+
     return Settings(
         model_base_url=_clean(
             environment.get("AGENT_MODEL_BASE_URL"), DEFAULT_MODEL_BASE_URL
         ),
-        model_name=_clean(environment.get("AGENT_MODEL_NAME"), DEFAULT_MODEL_NAME),
+        model_name=_clean(
+            environment.get("AGENT_MODEL_NAME"),
+            _clean(
+                environment.get("AGENT_LOCAL_MODEL_DEFAULT_NAME"), DEFAULT_MODEL_NAME
+            ),
+        ),
         model_api_key_env=model_api_key_env,
         model_timeout_seconds=_to_float(
             environment.get("AGENT_MODEL_TIMEOUT_SECONDS"), DEFAULT_MODEL_TIMEOUT_SECONDS
@@ -204,6 +247,25 @@ def resolve_settings(env=None, *, dotenv=True, env_path=None) -> Settings:
         ),
         mcp_call_timeout_seconds=_to_float(
             environment.get("MCP_CALL_TIMEOUT_SECONDS"), DEFAULT_MCP_CALL_TIMEOUT_SECONDS
+        ),
+        mcp_notifier_url=mcp_notifier_url,
+        mcp_notifier_connect_timeout_seconds=_to_float(
+            environment.get("MCP_NOTIFIER_CONNECT_TIMEOUT_SECONDS"),
+            DEFAULT_MCP_NOTIFIER_CONNECT_TIMEOUT_SECONDS,
+        ),
+        mcp_notifier_call_timeout_seconds=_to_float(
+            environment.get("MCP_NOTIFIER_CALL_TIMEOUT_SECONDS"),
+            DEFAULT_MCP_NOTIFIER_CALL_TIMEOUT_SECONDS,
+        ),
+        notifier_monitor_enabled=_to_bool(
+            environment.get("NOTIFIER_MONITOR_ENABLED"),
+            DEFAULT_NOTIFIER_MONITOR_ENABLED,
+        ),
+        notifier_monitor_tick_seconds=_to_int_clamped(
+            environment.get("NOTIFIER_MONITOR_TICK_SECONDS"),
+            DEFAULT_NOTIFIER_MONITOR_TICK_SECONDS,
+            NOTIFIER_MONITOR_TICK_MIN,
+            NOTIFIER_MONITOR_TICK_MAX,
         ),
         backend_host=backend_host,
         backend_port=backend_port,
@@ -233,4 +295,4 @@ def resolve_settings(env=None, *, dotenv=True, env_path=None) -> Settings:
 
 def load_settings() -> Settings:
     """Resolve settings from the real process environment and ``.env``."""
-    return resolve_settings()
+    return resolve_settings(dotenv=os.environ.get("AGENT_LOAD_DOTENV") != "0")

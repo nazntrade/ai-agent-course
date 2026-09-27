@@ -72,6 +72,10 @@ def _backend_env(port: int, mcp_url: str, model_url: str, db_path: Path, run_dir
             "BACKEND_HOST": "127.0.0.1",
             "BACKEND_PORT": str(port),
             "MCP_SERVER_URL": mcp_url,
+            # This restart check exercises the legacy A-only path: an empty
+            # notifier URL leaves server B unconfigured, so the backend never
+            # probes an unrelated process that may own the default port.
+            "MCP_NOTIFIER_URL": "",
             "AGENT_MODEL_BASE_URL": model_url,
             "AGENT_MODEL_NAME": MODEL_ID,
             "AGENT_MODEL_API_KEY_ENV": "LOCAL_LLM_API_KEY",

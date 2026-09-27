@@ -30,6 +30,9 @@ CATEGORY_TIMEOUT = "timeout"
 CATEGORY_PROTOCOL = "protocol"
 CATEGORY_INVALID_RESPONSE = "invalid_response"
 CATEGORY_TOOL_ERROR = "tool_error"
+# A configured server slot that has no endpoint (for example an empty
+# ``MCP_NOTIFIER_URL``): the hub reports it without ever opening a connection.
+CATEGORY_NOT_CONFIGURED = "not_configured"
 
 CATEGORIES = (
     CATEGORY_UNREACHABLE,
@@ -37,6 +40,7 @@ CATEGORIES = (
     CATEGORY_PROTOCOL,
     CATEGORY_INVALID_RESPONSE,
     CATEGORY_TOOL_ERROR,
+    CATEGORY_NOT_CONFIGURED,
 )
 
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -63,12 +67,18 @@ class McpError(Exception):
 
 @dataclass(frozen=True)
 class McpTool:
-    """One tool advertised by the MCP server."""
+    """One tool advertised by the MCP server.
+
+    ``server`` labels the owning server when the tool comes from an
+    :class:`agent.mcp_hub.McpHub`; a legacy single-server client leaves it
+    ``None``, so days 16-19 keep working unchanged.
+    """
 
     name: str
     title: str | None
     description: str
     input_schema: dict
+    server: str | None = None
 
 
 @dataclass(frozen=True)

@@ -29,7 +29,7 @@ def main(argv=None) -> int:
             flush=True,
         )
         return EXIT_PREREQUISITE
-    app = create_app(settings)
+    app = create_app(settings, enable_monitor=True)
     uvicorn.run(
         app,
         host=settings.backend_host,

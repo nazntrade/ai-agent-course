@@ -461,6 +461,7 @@ def run() -> int:
                     "AGENT_MODEL_NAME": DEFAULT_MODEL_NAME,
                     "AGENT_MODEL_API_KEY_ENV": "LOCAL_LLM_API_KEY",
                     "LOCAL_LLM_API_KEY": "local-e2e",
+                    "AGENT_LOAD_DOTENV": "0",
                     "AGENT_MODEL_TIMEOUT_SECONDS": "30",
                     "AGENT_TRACE_PATH": str(trace_path),
                     "AGENT_LOG_LEVEL": "INFO",

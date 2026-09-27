@@ -124,7 +124,8 @@ setup.bat
    `AGENT_MODEL_API_KEY_ENV` не переопределён).
 3. Не добавлять `.env` в Git: он уже указан в `.gitignore`; в репозитории хранится только
    `.env.example` без настоящих значений. Настоящий `.env` создаёт и заполняет только пользователь.
-4. Запустить локальную модель Qwen (`127.0.0.1:8080/v1`).
+4. Запустить локальную Gemma с API-id `gemma-4-26B-A4B-it-UD-IQ4_XS`
+   на `127.0.0.1:8080/v1` (либо явно задать адрес и имя другой модели).
 5. Запустить `run_app.bat`.
 
 Backend до первого обращения к модели проверяет обязательную конфигурацию. Если `.env` отсутствует
@@ -140,7 +141,7 @@ Backend до первого обращения к модели проверяе�
 | Переменная | Назначение | Значение по умолчанию |
 | --- | --- | --- |
 | `AGENT_MODEL_BASE_URL` | OpenAI-compatible endpoint локальной модели | `http://127.0.0.1:8080/v1` |
-| `AGENT_MODEL_NAME` | Имя модели | `qwen3.8-27b-local` |
+| `AGENT_MODEL_NAME` | Имя модели; явное значение имеет приоритет | для `run_app.bat`: `gemma-4-26B-A4B-it-UD-IQ4_XS`; без локального скрипта: `qwen3.8-27b-local` |
 | `AGENT_MODEL_API_KEY_ENV` | Имя переменной с ключом модели | `LOCAL_LLM_API_KEY` |
 | `LOCAL_LLM_API_KEY` | Значение ключа (placeholder для локального сервера) | `local-e2e` |
 | `AGENT_MODEL_TIMEOUT_SECONDS` | Таймаут обращения к модели | `120` |
@@ -156,14 +157,20 @@ Backend до первого обращения к модели проверяе�
 Только для harness: `RUN_LIVE_MCP`, `RUN_LIVE_LLM`, `RUN_UI_E2E`, `MCP_TEST_PORT`,
 `BACKEND_TEST_PORT`.
 
-Канонический id модели для Day 16 — `qwen3.8-27b-local` (значение по умолчанию в
-`agent/settings.py` и в `.env.example`). Приложение и harness всегда запрашивают именно его;
-имя модели из локального конфига общей QA-инфраструктуры фиксируется только как диагностическое
-поле `qa_model_configured` и как requested model не используется. Trace различает requested
+Исходный id модели для сценария Day 16 — `qwen3.8-27b-local`: он остаётся
+резервным значением приложения вне локального `run_app.bat`, а также тестового
+harness, если модель не переопределена. Локальный запуск приложения теперь по умолчанию
+запрашивает `gemma-4-26B-A4B-it-UD-IQ4_XS`; явный `AGENT_MODEL_NAME` из окружения
+или `.env` имеет приоритет. В `.env.example` поле `AGENT_MODEL_NAME` оставлено пустым:
+при копировании образца на другой сервер это не закрепляет Gemma за VPS.
+Имя модели из локального конфига общей QA-инфраструктуры
+фиксируется только как диагностическое поле `qa_model_configured` и как requested model
+не используется. Trace различает requested
 (configured) и server-reported имя модели: при расхождении пишется событие `model_reported`
 с обоими значениями, а поле `reported_model` попадает в `request_done`. Если в вашем реальном
-`.env` осталось старое имя, измените переменную `AGENT_MODEL_NAME` на `qwen3.8-27b-local`
-(значение ключа не показывайте и не коммитьте).
+`.env` осталось `qwen3.8-27b-local`, для ручного запуска с Gemma измените только
+`AGENT_MODEL_NAME` на `gemma-4-26B-A4B-it-UD-IQ4_XS` (значение ключа не показывайте
+и не коммитьте).
 
 ### Команды запуска
 
@@ -184,7 +191,7 @@ run_app.bat tools      :: discovery CLI по MCP
 SETUP:        setup.bat                    (создать .venv и поставить зависимости)
 UNIT:         test.bat                     (unit + in-process MCP, без сети)
 MCP SMOKE:    smoke_test.bat               (реальный MCP по HTTP + реальный backend + CLI)
-LIVE LLM E2E: test.bat live                (нужен локальный Qwen)
+LIVE LLM E2E: test.bat live                (модель из тестового профиля или локальная по умолчанию)
 LIVE + UI:    test.bat live ui             (плюс Playwright и системный браузер)
 NEGATIVE UI:  .venv\Scripts\python.exe harness\mcp_unavailable_e2e.py
                                            (ручной standalone-запуск: реальный Chrome/Edge,
@@ -197,6 +204,26 @@ REGRESSION:   qa\run_local_e2e.bat TESTS   (из корня репозитори
 
 Артефакты каждого прогона harness: `.runs/<timestamp>-<label>/` — `trace.jsonl`,
 `mcp_server.log`, `backend.log`, `report.json`, `screenshots/`.
+
+Если команда `test.bat live [ui]` или `test.bat acceptance` запущена агентом через
+AI-SERVER Control Center, тестовый harness получает выбранную в панели модель через
+`AI_TEST_MODEL_*` (например, DeepSeek Flash); требование локальной Qwen в этом режиме
+нет. Итоговую модель проверяйте по `TEST_MODEL_STATUS` и `test_model` в отчёте.
+При самостоятельном запуске `.bat` вне панели её выбор не наследуется: `test.bat`
+без аргументов запускает unit-тесты без модели, а `live` и `acceptance` используют
+локальную QA-конфигурацию (`QA_LOCAL_LLM_*` или `qa/local.llm.local.json`) и при
+отсутствии переопределения запрашивают `qwen3.8-27b-local`.
+
+`run_app.bat` запускает само приложение, а не тестовый harness. Для него модель
+определяют `AGENT_MODEL_BASE_URL` и `AGENT_MODEL_NAME` из окружения или локального
+`.env` (окружение имеет приоритет); если значения не заданы, используются
+`http://127.0.0.1:8080/v1` и локальный вариант по умолчанию
+`gemma-4-26B-A4B-it-UD-IQ4_XS`. Без `run_app.bat` резервное значение остаётся
+`qwen3.8-27b-local`, поэтому VPS и другие способы запуска не меняются. Выбор
+модели тестов в панели на эти настройки не влияет. Сам `run_app.bat` сервер
+модели не запускает: Gemma должна уже отвечать на выбранном endpoint под указанным
+API-id. Загрузка Gemma в Control Center сама по себе не задаёт для отдельного
+`run_app.bat` адрес, имя API-модели и ключ её сервера.
 
 ### Фактически проверенные версии
 
@@ -915,3 +942,289 @@ save_report` с `identity_ok: true`, `save_report` принят первым в�
   отличающиеся лишь fragment'ом или завершающим `/`, схлопываются в первый — это осознанное
   решение, а не побочный эффект.
 - Ограничение на размер истории не менялось; prune ограничивает только число отчётов (100 на чат).
+
+## День 20. Оркестрация нескольких MCP-серверов
+
+### Задача дня
+
+Собрать мониторинг, в котором участвуют **два независимых MCP-сервера**, а агент
+сам проводит данные между ними:
+
+```
+пользователь → агент (LLM) → хост (backend) → McpHub
+                                                ├─ Server A (mcp_server, 8765)      : поиск и прогоны (день 18)
+                                                └─ Server B (notifier_server, 8766) : подписки и Telegram
+```
+
+Пользователь пишет в чате: «Каждые три часа проверяй новые материалы о релизах игр
+Xbox. Если появился новый подходящий материал, пришли мне краткое сообщение со
+ссылкой в Telegram. Также присылай сводку по расписанию, даже когда подходящих
+новостей нет».
+
+* **Server A** — существующий `python -m mcp_server` (порт 8765). По расписанию
+  ищет и сохраняет прогоны, как в дне 18. Инструменты и контракты дней 16–19 не
+  изменены.
+* **Server B** — новый отдельный MCP-сервер `python -m notifier_server`
+  (порт 8766, свой `/mcp`, свой `tools/list`, своя БД). Проверяет, появился ли в
+  результате A подходящий пункт, и отправляет уведомление в Telegram.
+* Агент подключён к **обоим** серверам, **сам выбирает** инструменты, передаёт
+  структурированные данные из A в B и инициирует отправку.
+* В UI и в trace видно, какой инструмент **какого сервера** и в каком порядке
+  вызван.
+
+**Запрет прямого A→B.** Ни один инструмент A не вызывает B (и наоборот) внутри
+себя: передача идёт только через модель в цикле `Orchestrator`, а цепочка видна в
+trace и SSE.
+
+### Что реализовано
+
+| Файл | Назначение |
+| --- | --- |
+| `notifier_server/` (`__init__`, `config`, `db`, `repository`, `watches`, `telegram`, `tools`, `server`, `__main__`) | Сервер B: 6 инструментов, своя БД (`watches`/`seen_items`/`deliveries`), критерий, baseline, дедуп, единственная сетевая граница `telegram.py` |
+| `agent/mcp_hub.py` | `McpHub` над двумя серверами: `probe_servers()` (параллельно) / `probe_server(label)`, протокольные методы A-first, маршрутизация `call_tool` по имени |
+| `agent/monitor.py` | host-side монитор: фоновая работа без браузера, тот же `Orchestrator` с `trigger=monitor` |
+| `agent/notifier_client.py` | host→B чтение подписок/доставок для API/UI |
+| `agent/mcp_adapter.py` | необязательное поле `McpTool.server` (default `None`) и категория `not_configured` |
+| `agent/orchestrator.py` | `server` в trace/SSE, per-server `mcp_connect`, агрегированный `mcp_list_tools.per_server`, `trigger`, `monitor_incomplete` |
+| `agent/server.py` | hub из A и B, `GET /api/mcp/servers`, `GET /api/chats/{id}/watches`, `create_app(..., enable_monitor=False)` |
+| `agent/__main__.py` | запуск монитора в реальном процессе backend (`enable_monitor=True`) |
+| `agent/settings.py` | `MCP_NOTIFIER_URL`, `NOTIFIER_MONITOR_ENABLED`, `NOTIFIER_MONITOR_TICK_SECONDS` (не читает `TELEGRAM_*`) |
+| `static/index.html`, `static/app.js`, `static/styles.css` | `MCP status` для двух серверов, `[A]`/`[B]` в `Technical details`, панель `Notification watches` |
+| `.env.example` | переменные сервера B и Telegram (без настоящих значений) |
+| `tests/*`, `tests/integration/test_notifier_live.py`, `harness/notifier_restart.py`, `harness/notifier_real_live.py`, `harness/live_e2e.py`, `harness/acceptance.py` | UNIT/INT/RESTART/LIVE/UI и opt-in REAL |
+| `docs/specs/day-20-multi-mcp-orchestration/{SPEC,PLAN,ACCEPTANCE}.md` | спецификация, план и критерии (D20-01…D20-29) |
+
+Все `.bat` (доверенные точки входа) **не изменялись**: проверки встроены в
+существующие `test.bat`, `smoke_test.bat`, `test.bat acceptance` через `harness/`.
+
+### Контракт инструментов сервера B (6)
+
+`chat_id` инжектится хостом и скрыт от модели; сервер отвергает пустой/чужой
+`chat_id`.
+
+| Инструмент | Контракт |
+| --- | --- |
+| `create_notification_watch(query, keywords, exclude, interval_seconds, summary_interval_seconds, source_task_id, chat_id)` | создаёт подписку: что отслеживать, **явный** критерий и расписания; первый чек — точка отсчёта (`next_check_at = now`); критерий и расписание сохраняются и возвращаются |
+| `list_notification_watches(chat_id)` | подписки чата с состоянием, расписанием и последней доставкой |
+| `evaluate_run(watch_id, run, chat_id)` | принимает **весь** результат `get_latest_search_run` A; возвращает `{status, new_items, matched_count, known_count, is_baseline, should_notify, note}`; `error`/`empty`/`pending` — честно; malformed/чужой watch → structured `error`/`unknown_watch` без исключения; ничего не отправляет и не пишет seen-set (кроме baseline) |
+| `send_notification(watch_id, chat_id, kind, items)` | **единственная** точка отправки и записи seen/доставки; идемпотентно по `(watch_id, kind, period_key)`; статусы `sent`/`not_required`/`duplicate`/`failed`/`not_configured` |
+| `get_delivery_status(watch_id, chat_id)` | последние доставки со статусами |
+| `stop_notification_watch(watch_id, chat_id)` | идемпотентная остановка |
+
+### Критерий, baseline и дедупликация
+
+* **Критерий «подходящий»** (`keywords`, опц. `exclude`) — детерминированный:
+  item подходит, если любой keyword входит подстрокой в `title` или `description`
+  без учёта регистра; `exclude` исключает. Заголовки/сниппеты — недоверенные
+  данные: критерий их только сравнивает.
+* **Расписания:** `interval_seconds` — как часто проверяется подписка;
+  `summary_interval_seconds` — как часто допускается регулярная сводка
+  (`kind="summary"`).
+* **Первый прогон — точка отсчёта (baseline).** Первый `evaluate_run` со
+  `status in {"ok","empty"}` помечает подходящие items как seen и **ничего не
+  рассылает**; `pending`/`error` baseline не поглощают.
+* **Дедупликация.** `period_key` для `new_items` — **контентный** (хэш множества
+  отпечатков), поэтому два разных новых материала в одном периоде дают разные
+  ключи и **две доставки**; временной период применяется только к `summary`.
+  `duplicate` возвращается только при уже отправленной (`status='sent'`) доставке;
+  `failed`/`not_configured` повторяются через `UPDATE` той же строки. Повтор
+  результата, повторная обработка прогона и перезапуск сервисов дублей не создают.
+* **Только последний прогон.** `get_latest_search_run` отдаёт только последний
+  прогон; сравнение «что нового» решает персистентное seen-множество B. Накопленные
+  за простой промежуточные прогоны сознательно **не «догоняются»** (no backfill):
+  items, бывшие только в промежуточных прогонах и исчезнувшие к моменту проверки,
+  пропускаются. Это осознанное ограничение (SPEC §14).
+
+### Межсерверная цепочка в trace
+
+Пример фактической цепочки чата (схематично):
+
+```
+request_start(trigger=chat)
+mcp_connect(server=A, ok=True) → mcp_connect(server=B, ok=True)
+mcp_list_tools(tools_count=15, per_server={"A":9,"B":6}, tool_names=[...])
+model_request(phase=tool_selection, tools_offered=15)
+tool_selected(server=A, tool=get_latest_search_run) → tool_completed(server=A, ok=True)
+tool_selected(server=B, tool=evaluate_run)           → tool_completed(server=B, ok=True)
+tool_selected(server=B, tool=send_notification)      → tool_completed(server=B, ok=True, result={status:"sent"})
+model_request(phase=final_answer) → request_done(ok=True)
+```
+
+Фоновый ход отличается `trigger=monitor` и `watch_id`; неполный ход вместо
+`request_done` пишет `monitor_incomplete{watch_id, reason}` и не объявляет успех.
+
+### Переменные окружения (день 20)
+
+Секреты Telegram читает **только** процесс B; backend, модель, UI и trace их не
+видят.
+
+| Переменная | Назначение | По умолчанию |
+| --- | --- | --- |
+| `MCP_NOTIFIER_URL` | Endpoint сервера B; пусто → слот B отключён, A работает | `http://127.0.0.1:8766/mcp` |
+| `MCP_NOTIFIER_HOST` / `MCP_NOTIFIER_PORT` | Адрес, на котором слушает B (есть legacy-fallback `NOTIFIER_HOST`/`NOTIFIER_PORT`) | `127.0.0.1` / `8766` |
+| `NOTIFIER_DB_PATH` | Отдельная БД B (вне БД A) | `<project>/data/day20-notifier.sqlite3` |
+| `TELEGRAM_BOT_TOKEN` | Токен бота; пусто → `not_configured`, без сети | (пусто) |
+| `TELEGRAM_CHAT_ID` | Получатель, привязан к настроенному пользователю (не аргумент инструмента) | (пусто) |
+| `NOTIFIER_TELEGRAM_API_BASE_URL` | База Telegram Bot API; в тестах — loopback-фейк | `https://api.telegram.org` |
+| `NOTIFIER_MONITOR_ENABLED` | Фоновый монитор | `1` |
+| `NOTIFIER_MONITOR_TICK_SECONDS` | Период тика монитора, clamp 1…3600 | `30` |
+| `NOTIFIER_LOAD_DOTENV` | `0` — B не читает `.env` (harness/тесты) | `1` |
+
+### Команды запуска
+
+```
+setup.bat                                  :: создать .venv и поставить зависимости
+.venv\Scripts\python.exe -m notifier_server :: Сервер B (отдельное окно/процесс)
+run_app.bat                                :: Сервер A + backend + UI в браузере
+```
+
+`run_app.bat` запускает A и backend (монитор живёт в backend), но не запускает B —
+B стартует отдельным процессом, как и задумано (на VPS — отдельный сервис).
+
+### Команды проверок (день 20)
+
+```
+UNIT:         test.bat                     (unit + in-process MCP; без сети)
+INT+RESTART:  smoke_test.bat               (реальные A и B, реальный HTTP,
+                                            loopback-фейк Telegram;
+                                            NOTIFIER_INTEGRATION_STATUS,
+                                            NOTIFIER_RESTART_STATUS, MCP_PROBE_REGRESSION)
+LIVE+UI:      test.bat acceptance          (реальная локальная модель:
+                                            NOTIFICATIONS_LIVE_STATUS,
+                                            NOTIFICATIONS_MONITOR_LIVE_STATUS,
+                                            NOTIFIER_SERVERS_UI_STATUS,
+                                            NOTIFICATION_UI_STATUS)
+REAL Telegram: .venv\Scripts\python.exe harness\notifier_real_live.py
+               (ручной opt-in, только с NOTIFIER_REAL_ALLOW=1)
+```
+
+Автотесты изолированы от внешней сети: поиск — loopback-фейк
+`tests/support/fake_search.py`, Telegram — loopback-фейк
+`tests/support/fake_telegram.py`; реальные Tavily и Telegram автоматически не
+вызываются.
+
+### Результаты проверок (фактические)
+
+| Проверка | Команда | Результат |
+| --- | --- | --- |
+| UNIT | `test.bat` | `UNIT_STATUS: PASS` — 731 тест, 62 skipped |
+| INT + RESTART | `smoke_test.bat` | `MCP_PROBE_REGRESSION: PASS (posts=4)`, `NOTIFIER_INTEGRATION_STATUS: PASS`, `NOTIFIER_RESTART_STATUS: PASS`, а также `MCP/BACKEND/SEARCH/TASKS/REPORTS_INTEGRATION_STATUS`, `PERSISTENCE/SCHEDULER/REPORTS_RESTART_STATUS` — PASS |
+| LIVE + UI | `test.bat acceptance` (независимый прогон Tester) | **exit 0**, все статусы PASS: `LIVE_LLM_STATUS`, `SEARCH_LIVE_STATUS`, `TASKS_LIVE_STATUS`, `CHATS_UI_STATUS`, `TASKS_UI_STATUS`, `COMPOSITION_LIVE_STATUS`, `COMPOSITION_NO_SAVE_LIVE_STATUS`, `REPORTS_UI_STATUS`, `NOTIFICATIONS_LIVE_STATUS`, `NOTIFIER_SERVERS_UI_STATUS`, `NOTIFICATION_UI_STATUS`, `NOTIFICATIONS_MONITOR_LIVE_STATUS`; `NOTIFIER_REAL_STATUS: BLOCKED` (нет opt-in). В более раннем прогоне Developer агрегированный exit 1 дали **пре-существующие** флейки LIVE дней 17/19 (`SEARCH_LIVE_STATUS`, `COMPOSITION_LIVE_STATUS`) — см. «Ограничения» |
+| REAL Telegram | ручной `harness\notifier_real_live.py` | `NOTIFIER_REAL_STATUS: BLOCKED` (нет opt-in/ключа) |
+| REAL Tavily | ручной opt-in (день 17/18/19) | `BLOCKED` (не вызывается автоматикой) |
+| VPS | ручной чек-лист (ниже) | не выполнялся |
+
+Разница 731 теста в `test.bat` и 702 в unit-шаге `test.bat acceptance` (29 тестов)
+объяснима и не является пропуском тестов дня 20: компонент acceptance запускает
+unit-набор через `sanitized_env()` без браузерных путей, поэтому три DOM-класса
+(`MarkdownRendererDomTest` и др.) пропускаются целиком — `731 − 29 = 702`, число
+skipped растёт 62 → 65 (по одному на класс). Все модули дня 20 выполняются в обоих
+прогонах. Замечание Tester о расхождении счётчиков этим закрывается.
+
+Проверка Tester (независимая приёмка): `test.bat`, `smoke_test.bat` и
+`test.bat acceptance` запущены заново; результаты совпали, `TEST_STATUS: PASS`.
+Подтверждены два раздельных сервера со своими `tools/list` (A=9, B=6), отсутствие
+прямого A→B, trace-цепочка с полем `server`, baseline без рассылки, дедупликация
+(повтор того же материала — без второго сообщения; два разных материала в одном
+периоде — две доставки), сохранение состояния после рестарта, B-down ветки без 5xx,
+безопасность Telegram и регрессии дней 16–19. Единственные `BLOCKED`-пункты —
+D20-23 (реальный Telegram), реальный Tavily и VPS.
+
+### Локальная модель в LIVE-прогонах
+
+LIVE-шаги дня 20 проходили на **`AGENT_MODEL_NAME=qwen3.8-27b-local`**
+(OpenAI-compatible, loopback `127.0.0.1:8080`). Это **не** модель ролей в
+Control Center — это отдельная настройка проверяемого приложения.
+`MODEL_CHECK_KIND: LOCAL`; `LOCAL_MODEL_START: PASS`, `LOCAL_MODEL_INFERENCE: PASS`,
+`LOCAL_SCENARIO_TEST: PASS`. Фактические токены/скорость — н/д (локальный endpoint
+их не отдаёт harness'у). В чат-сценарии `send_notification.status=sent`, а payload
+фейкового Telegram содержит URL из `tests/support/fake_search.py::RESULT_URLS`; в
+monitor-сценарии первый чек — baseline без отправки, затем второй тик даёт `sent`.
+
+### Сценарий демонстрации и короткий сценарий видео
+
+1. `setup.bat`; в одном окне запустить **сервер B**
+   (`.venv\Scripts\python.exe -m notifier_server`), затем `run_app.bat`.
+2. В браузере: блок `MCP status` показывает **два** сервера (A и B) со статусом и
+   списком инструментов.
+3. В чате: `Every three hours check new materials about Xbox game releases. If a
+   new matching item appears, send me a short message with a link in Telegram.
+   Also send a scheduled summary even when there is no matching news.`
+   Модель вызывает инструменты A (`schedule_search_task`, `get_latest_search_run`)
+   и B (`create_notification_watch`, `evaluate_run`); под ответом в
+   `Technical details` видны строки `[A]` и `[B]` в правильном порядке.
+4. Дождаться нового прогона A: при появлении подходящего материала B отправляет
+   одно сообщение в Telegram со ссылкой; в панели `Notification watches` виден
+   статус доставки (`sent`).
+5. Повторить прогон того же материала: доставки **нет** (состояние
+   `duplicate`/`not_required`), второй сообщение не приходит.
+6. Показать, что фоновая работа идёт при закрытом браузере, а после
+   перезапуска сервисов подписки, seen-множество и доставки на месте.
+
+Короткий сценарий видео: два сервера в статусе → новый прогон → вызовы
+инструментов A и B в `Technical details` → сообщение в Telegram → повторный прогон
+того же материала без дубля.
+
+### Команды локальной проверки
+
+```
+cd week-04\day-16-mcp-agent
+setup.bat
+test.bat
+smoke_test.bat
+test.bat acceptance        (нужна тестовая модель и системный браузер)
+run_app.bat                (плюс отдельно .venv\Scripts\python.exe -m notifier_server)
+```
+
+Для живой отправки в Telegram: заполнить в локальном `.env` `TELEGRAM_BOT_TOKEN` и
+`TELEGRAM_CHAT_ID` (значения не показывать и не коммитить), перезапустить сервер B
+и сначала **начать диалог с ботом** в Telegram, затем отправить в чат
+`/start`-эквивалент через приложение (бот не может инициировать диалог первым).
+
+### Чек-лист VPS-деплоя (только для оператора; VPS не изменялся)
+
+1. Запустить третий сервис B (`notifier_server`) под process manager с
+   `Restart=always`, отдельный порт 8766 (или иной через `MCP_NOTIFIER_PORT`).
+2. `NOTIFIER_DB_PATH` — абсолютный путь вне деплой-каталога (например
+   `/var/lib/day16/day20-notifier.sqlite3`), каталог принадлежит пользователю
+   сервиса.
+3. `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` — только в окружении сервиса B
+   (`EnvironmentFile`), права файла ограничены.
+4. `MCP_NOTIFIER_URL` в backend-юните указывает на loopback-порт B.
+5. Проверить `/api/mcp/servers`: A и B `connected`; при остановке B — `connected:false`,
+   без 5xx.
+6. Убедиться, что деплой A/backend не требует изменений (A не переписывался).
+7. Резервное копирование БД B отдельно от БД A.
+
+### Ограничения дня 20
+
+* **Реальный Telegram не проверялся** автоматикой: нужен opt-in
+  (`NOTIFIER_REAL_ALLOW=1`) и явное разрешение пользователя;
+  `harness/notifier_real_live.py` без opt-in даёт `NOTIFIER_REAL_STATUS: BLOCKED`.
+  Реальный Tavily по-прежнему `BLOCKED`.
+* **Пре-существующая флейкость LIVE дней 17/19.** `SEARCH_LIVE_STATUS` падал,
+  когда модель писала preamble-`delta` до `tool_call` (старый строгий верификатор
+  дня 17), а `COMPOSITION_LIVE_STATUS` — когда модель дважды вызывала `search_web`
+  (`tool_round_limit`). В независимом приёмочном прогоне Tester оба статуса PASS;
+  это поведение модели, не детерминизм кода дня 20. Стабилизация — отдельная
+  задача.
+* **LIVE-шаги дня 20 тоже зависят от модели.** За исторические прогоны дня 20
+  наблюдались отдельные FAIL `NOTIFICATIONS_LIVE_STATUS` (1 из 4) и
+  `NOTIFICATIONS_MONITOR_LIVE_STATUS` (2 из 4) при недетерминированном выборе
+  инструментов; в итоговом приёмочном прогоне Tester — PASS. Правило безопасности
+  (dedup/baseline) от модели не зависит и проверяется UNIT/INT.
+* **Тема в автоматике.** Детерминированный фейковый поиск возвращает
+  Python-документацию, а не Xbox-материалы, поэтому автотесты проверяют цепочку и
+  доставку на фиксированных ссылках; Xbox — пользовательский демо-прогон (при
+  настроенном Tavily).
+* **Только последний прогон A.** Накопленные за простой промежуточные прогоны не
+  «догоняются»; items, исчезнувшие из последнего прогона, пропускаются (SPEC §14).
+* **Provenance A→B не подтверждается.** Данные из A в B идут через модель; B не
+  может доказать их происхождение. Компенсация — LIVE PASS проверяет payload
+  фейкового Telegram, а не текст модели.
+* Выбор инструментов реальной локальной моделью не детерминирован; промпт требует
+  порядок и monitor-промпт задаёт подмножество инструментов, но фактическое
+  следование проверяется LIVE.
+* **VPS не разворачивался**; чек-лист выше выполняет оператор.
+* Многопользовательской изоляции и нескольких получателей Telegram нет
+  (однопользовательский прототип, как и ранее).

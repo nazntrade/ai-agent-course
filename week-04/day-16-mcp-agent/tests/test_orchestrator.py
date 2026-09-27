@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.mcp_adapter import McpCallResult, McpError
+from agent.mcp_adapter import McpCallResult, McpError, McpTool
+from agent.mcp_hub import McpHub
 from agent.orchestrator import (
     DEFAULT_MAX_TOOL_ROUNDS,
     SYSTEM_PROMPT,
@@ -16,6 +17,7 @@ from agent.orchestrator import (
     DoneEvent,
     ErrorEvent,
     Orchestrator,
+    ToolCallEvent,
     ToolResultEvent,
 )
 from agent.provider import Finished, ModelError, TextDelta, ToolCallDelta
@@ -35,8 +37,11 @@ def _answer_turn(text="The result is 391."):
     return [TextDelta(text), Finished(finish_reason="stop")]
 
 
-async def _collect(orchestrator, request_id, session, message):
-    return [event async for event in orchestrator.run(request_id, session, message)]
+async def _collect(orchestrator, request_id, session, message, **kwargs):
+    return [
+        event
+        async for event in orchestrator.run(request_id, session, message, **kwargs)
+    ]
 
 
 def _names(events):
@@ -594,6 +599,259 @@ class ConcurrencyTest(unittest.IsolatedAsyncioTestCase):
             await task
         await asyncio.sleep(0.05)
         self.assertFalse(session.lock.locked())
+
+
+class MultiServerAndMonitorTest(unittest.IsolatedAsyncioTestCase):
+    """Day 20: server labels in the trace/SSE and the monitor run contract."""
+
+    def _b_tools(self):
+        return [
+            McpTool(
+                name="evaluate_run",
+                title=None,
+                description="Compare a run with a watch.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            McpTool(
+                name="send_notification",
+                title=None,
+                description="Send a notification.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ]
+
+    def _hub(self, *, a=None, b=None):
+        a_client = a or FakeMcpClient()
+        b_client = b or FakeMcpClient(tools=self._b_tools())
+        hub = McpHub(
+            [("A", a_client, "127.0.0.1:8765"), ("B", b_client, "127.0.0.1:8766")],
+            primary="A",
+        )
+        return hub, a_client, b_client
+
+    def _records(self, trace_path):
+        return [
+            json.loads(line)
+            for line in trace_path.read_text(encoding="utf-8").splitlines()
+        ]
+
+    async def test_hub_records_per_server_connect_and_aggregated_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            b = FakeMcpClient(
+                tools=self._b_tools(),
+                call_results={
+                    "evaluate_run": McpCallResult(
+                        ok=True, text="", structured={"should_notify": False}
+                    )
+                },
+            )
+            hub, _a, _b = self._hub(b=b)
+            provider = ScriptedProvider(
+                [
+                    _tool_turn(name="evaluate_run", arguments="{}"),
+                    _answer_turn("Done."),
+                ]
+            )
+            orchestrator = Orchestrator(
+                provider=provider, mcp_client=hub, trace=TraceWriter(trace_path)
+            )
+            events = await _collect(
+                orchestrator, "req-hub", ChatSession("chat-hub"), "watch it"
+            )
+
+            connects = [r for r in self._records(trace_path) if r["event"] == "mcp_connect"]
+            self.assertEqual(sorted(r["server"] for r in connects), ["A", "B"])
+            listed = [
+                r for r in self._records(trace_path) if r["event"] == "mcp_list_tools"
+            ]
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["per_server"], {"A": 9, "B": 2})
+            self.assertEqual(listed[0]["tools_count"], 11)
+
+            selected = [
+                r for r in self._records(trace_path) if r["event"] == "tool_selected"
+            ]
+            self.assertEqual(selected[0]["server"], "B")
+            call = next(event for event in events if isinstance(event, ToolCallEvent))
+            self.assertEqual(call.server, "B")
+            result = next(event for event in events if isinstance(event, ToolResultEvent))
+            self.assertEqual(result.server, "B")
+            self.assertEqual(call.payload()["server"], "B")
+
+    async def test_legacy_client_has_no_server_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            mcp = FakeMcpClient()
+            provider = ScriptedProvider([_tool_turn(), _answer_turn()])
+            orchestrator = Orchestrator(
+                provider=provider, mcp_client=mcp, trace=TraceWriter(trace_path)
+            )
+            events = await _collect(orchestrator, "req-legacy", ChatSession("s-legacy"), "23*17")
+            call = next(event for event in events if isinstance(event, ToolCallEvent))
+            result = next(event for event in events if isinstance(event, ToolResultEvent))
+            self.assertNotIn("server", call.payload())
+            self.assertNotIn("server", result.payload())
+            selected = [
+                r for r in self._records(trace_path) if r["event"] == "tool_selected"
+            ]
+            self.assertNotIn("server", selected[0])
+            connects = [
+                r for r in self._records(trace_path) if r["event"] == "mcp_connect"
+            ]
+            self.assertNotIn("server", connects[0])
+
+    async def test_monitor_trigger_watch_id_and_system_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            provider = ScriptedProvider([_answer_turn("checked")])
+            orchestrator = Orchestrator(
+                provider=provider,
+                mcp_client=FakeMcpClient(),
+                trace=TraceWriter(trace_path),
+            )
+            events = await _collect(
+                orchestrator,
+                "req-mon",
+                ChatSession("m-chat"),
+                "tick",
+                trigger="monitor",
+                watch_id="w1",
+                system_prompt="MONITOR PROMPT",
+            )
+            start = self._records(trace_path)[0]
+            self.assertEqual(start["event"], "request_start")
+            self.assertEqual(start["trigger"], "monitor")
+            self.assertEqual(start["watch_id"], "w1")
+            self.assertEqual(
+                provider.requests[0]["messages"][0]["content"], "MONITOR PROMPT"
+            )
+            self.assertEqual(events[-1].payload()["request_id"], "req-mon")
+
+    async def test_require_result_writes_monitor_incomplete_instead_of_done(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            provider = ScriptedProvider([_answer_turn("nothing")])
+            orchestrator = Orchestrator(
+                provider=provider,
+                mcp_client=FakeMcpClient(),
+                trace=TraceWriter(trace_path),
+            )
+            events = await _collect(
+                orchestrator,
+                "req-inc",
+                ChatSession("m-chat"),
+                "tick",
+                trigger="monitor",
+                watch_id="w7",
+                require_result=lambda outcomes: "evaluate_run_absent",
+            )
+            records = self._records(trace_path)
+            events_names = [r["event"] for r in records]
+            self.assertIn("monitor_incomplete", events_names)
+            self.assertNotIn("request_done", events_names)
+            incomplete = next(
+                r for r in records if r["event"] == "monitor_incomplete"
+            )
+            self.assertEqual(incomplete["watch_id"], "w7")
+            self.assertEqual(incomplete["reason"], "evaluate_run_absent")
+            self.assertFalse(any(isinstance(event, DoneEvent) for event in events))
+
+    async def test_complete_monitor_turn_records_done(self):
+        from agent.monitor import monitor_result_incomplete
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            a = FakeMcpClient(
+                call_results={
+                    "get_latest_search_run": McpCallResult(
+                        ok=True, text="", structured={"status": "empty", "results": []}
+                    )
+                }
+            )
+            b = FakeMcpClient(
+                tools=self._b_tools(),
+                call_results={
+                    "evaluate_run": McpCallResult(
+                        ok=True, text="", structured={"should_notify": False}
+                    )
+                },
+            )
+            hub, _a, _b = self._hub(a=a, b=b)
+            provider = ScriptedProvider(
+                [
+                    _tool_turn(name="get_latest_search_run", arguments="{}"),
+                    _tool_turn(name="evaluate_run", arguments="{}"),
+                    _answer_turn("complete"),
+                ]
+            )
+            orchestrator = Orchestrator(
+                provider=provider, mcp_client=hub, trace=TraceWriter(trace_path)
+            )
+            events = await _collect(
+                orchestrator,
+                "req-complete",
+                ChatSession("m-chat"),
+                "tick",
+                trigger="monitor",
+                watch_id="w2",
+                require_result=monitor_result_incomplete,
+            )
+            events_names = [r["event"] for r in self._records(trace_path)]
+            self.assertIn("request_done", events_names)
+            self.assertNotIn("monitor_incomplete", events_names)
+            self.assertIsInstance(events[-1], DoneEvent)
+
+    async def test_allowed_tools_limits_offered_tools_and_blocks_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            mcp = FakeMcpClient()
+            provider = ScriptedProvider(
+                [
+                    _tool_turn(name="search_web", arguments='{"query": "x"}'),
+                    _answer_turn("I did not search."),
+                ]
+            )
+            orchestrator = Orchestrator(
+                provider=provider, mcp_client=mcp, trace=TraceWriter(trace_path)
+            )
+            events = await _collect(
+                orchestrator,
+                "req-allowed",
+                ChatSession("s-allowed"),
+                "only calculate",
+                allowed_tools={"calculate"},
+            )
+            offered = [
+                tool["function"]["name"] for tool in provider.requests[0]["tools"]
+            ]
+            self.assertEqual(offered, ["calculate"])
+            self.assertEqual(mcp.calls, [])
+            results = [event for event in events if isinstance(event, ToolResultEvent)]
+            self.assertEqual(len(results), 1)
+            self.assertFalse(results[0].ok)
+            selected = [
+                r for r in self._records(trace_path) if r["event"] == "tool_selected"
+            ]
+            self.assertFalse(selected[0].get("ok", True))
+            self.assertIsInstance(events[-1], DoneEvent)
+
+    async def test_on_tool_result_callback_receives_every_result(self):
+        captured = []
+        provider = ScriptedProvider([_tool_turn(), _answer_turn()])
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=FakeMcpClient(), trace=NullTraceWriter()
+        )
+        await _collect(
+            orchestrator,
+            "req-cb",
+            ChatSession("s-cb"),
+            "23*17",
+            on_tool_result=lambda name, result: captured.append((name, result)),
+        )
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][0], "calculate")
+        self.assertTrue(captured[0][1].ok)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual run

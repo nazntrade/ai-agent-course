@@ -19,6 +19,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -27,6 +28,9 @@ from pydantic import BaseModel, Field
 
 from agent.chats import ChatError, ChatService, MAX_CHATS
 from agent.mcp_adapter import McpClient, SdkMcpClient
+from agent.mcp_hub import McpHub, ServerProbe
+from agent.monitor import NotifierMonitor
+from agent.notifier_client import NotifierClient, NotifierUnavailable
 from agent.orchestrator import ErrorEvent, Orchestrator
 from agent.provider import OpenAICompatibleProvider
 from agent.sessions import SessionRegistry
@@ -104,6 +108,39 @@ class McpToolsResponse(BaseModel):
     count: int = 0
     protocol_version: str | None = None
     server: ServerInfo | None = None
+    error: ErrorInfo | None = None
+
+
+class ServerEntry(BaseModel):
+    """One MCP server of the hub as exposed to the frontend."""
+
+    label: str
+    endpoint: str | None = None
+    connected: bool = False
+    protocol_version: str | None = None
+    server: ServerInfo | None = None
+    tools_count: int = 0
+    error: ErrorInfo | None = None
+
+
+class McpServersResponse(BaseModel):
+    """Both MCP servers read through a single ``probe_servers()`` call."""
+
+    servers: list[ServerEntry] = Field(default_factory=list)
+    checked_at: float
+
+
+class ChatWatchesResponse(BaseModel):
+    """The notification watches and deliveries of one chat, read from server B.
+
+    ``available`` is false when B is unreachable or not configured; that is a
+    successful HTTP response, never a 5xx.
+    """
+
+    chat_id: str
+    available: bool
+    watches: list[dict] = Field(default_factory=list)
+    deliveries: list[dict] = Field(default_factory=list)
     error: ErrorInfo | None = None
 
 
@@ -300,12 +337,66 @@ def build_provider(settings: Settings) -> OpenAICompatibleProvider:
     )
 
 
-def build_mcp_client(settings: Settings) -> SdkMcpClient:
-    """Create the MCP client from settings."""
-    return SdkMcpClient(
+def build_mcp_client(settings: Settings) -> McpHub:
+    """Build the day-20 MCP hub from server A and server B.
+
+    An empty ``MCP_NOTIFIER_URL`` keeps the B slot but leaves it without a
+    client, so the hub reports it as ``not_configured`` without probing it.
+    """
+    a_client = SdkMcpClient(
         settings.mcp_server_url,
         connect_timeout_s=settings.mcp_connect_timeout_seconds,
         call_timeout_s=settings.mcp_call_timeout_seconds,
+    )
+    notifier_url = str(settings.mcp_notifier_url or "").strip()
+    if notifier_url:
+        b_client: McpClient | None = SdkMcpClient(
+            notifier_url,
+            connect_timeout_s=settings.mcp_notifier_connect_timeout_seconds,
+            call_timeout_s=settings.mcp_notifier_call_timeout_seconds,
+        )
+    else:
+        b_client = None
+    servers = [
+        ("A", a_client, _endpoint_label(settings.mcp_server_url)),
+        ("B", b_client, _endpoint_label(notifier_url)),
+    ]
+    return McpHub(servers, primary="A")
+
+
+def _endpoint_label(url: str) -> str:
+    """Return the loopback ``host:port`` of an endpoint, never a full URL."""
+    try:
+        split = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    host = split.hostname or ""
+    if not host:
+        return ""
+    return f"{host}:{split.port}" if split.port else host
+
+
+def _endpoint_for(client, label: str, settings: Settings) -> str | None:
+    get_endpoint = getattr(client, "endpoint_for", None)
+    if callable(get_endpoint):
+        value = get_endpoint(label)
+        if value:
+            return value
+    if label == "A":
+        return _endpoint_label(settings.mcp_server_url) or None
+    if label == "B":
+        return _endpoint_label(settings.mcp_notifier_url) or None
+    return None
+
+
+def build_notifier_client(mcp_client, settings: Settings) -> NotifierClient:
+    """Build the read-only host→B client from the hub's B slot."""
+    client = None
+    client_for = getattr(mcp_client, "client_for", None)
+    if callable(client_for):
+        client = client_for("B")
+    return NotifierClient(
+        client, timeout_s=settings.mcp_notifier_call_timeout_seconds
     )
 
 
@@ -317,13 +408,17 @@ def create_app(
     sessions: SessionRegistry | None = None,
     trace: TraceWriter | None = None,
     chat_service: ChatService | None = None,
+    notifier: NotifierClient | None = None,
+    enable_monitor: bool = False,
 ) -> FastAPI:
     """Build the FastAPI application.
 
-    ``provider``, ``mcp_client``, ``sessions``, ``trace`` and ``chat_service``
-    can be injected so the API can be tested without a model, an MCP server, a
-    trace file or the shared database file. The default chat service opens the
-    database lazily: building the application never creates the file.
+    ``provider``, ``mcp_client``, ``sessions``, ``trace``, ``chat_service`` and
+    ``notifier`` can be injected so the API can be tested without a model, an MCP
+    server, a trace file or the shared database file. ``create_app`` itself has no
+    network or background side effect: the monitor starts only when
+    ``enable_monitor`` is true (and ``NOTIFIER_MONITOR_ENABLED`` is not off) and
+    the application lifespan actually runs.
     """
     resolved = settings or load_settings()
     log_level = getattr(logging, resolved.log_level, logging.INFO)
@@ -333,8 +428,27 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_application: FastAPI):
-        yield
-        trace.close()
+        monitor = None
+        if enable_monitor and resolved.notifier_monitor_enabled:
+            monitor = NotifierMonitor(
+                chats=app.state.chats,
+                notifier=app.state.notifier,
+                tick_seconds=resolved.notifier_monitor_tick_seconds,
+                orchestrator_factory=lambda: Orchestrator(
+                    provider=app.state.provider,
+                    mcp_client=app.state.mcp_client,
+                    trace=app.state.trace,
+                    max_tool_rounds=resolved.max_tool_rounds,
+                ),
+                session_registry=app.state.sessions,
+            )
+            await monitor.start()
+        try:
+            yield
+        finally:
+            if monitor is not None:
+                await monitor.stop()
+            trace.close()
 
     app = FastAPI(
         title="Day 16 MCP Agent",
@@ -351,6 +465,9 @@ def create_app(
     app.state.sessions = sessions or SessionRegistry()
     app.state.chats = chat_service or ChatService(Database(resolved.db_path))
     app.state.trace = trace
+    app.state.notifier = notifier or build_notifier_client(
+        app.state.mcp_client, resolved
+    )
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -399,6 +516,62 @@ def create_app(
             protocol_version=status.protocol_version,
             server=_server_info(status),
             error=None,
+        )
+
+    @app.get("/api/mcp/servers", response_model=McpServersResponse)
+    async def mcp_servers() -> McpServersResponse:
+        client = app.state.mcp_client
+        # Exactly one probe_servers() call: it probes every server in parallel.
+        prober = getattr(client, "probe_servers", None)
+        if callable(prober):
+            probes: list[ServerProbe] = await prober()
+        else:  # pragma: no cover - a single-client injection falls back to A
+            status, tools = await client.probe()
+            probes = [ServerProbe("A", status, tools)]
+        entries = [
+            ServerEntry(
+                label=str(probe.label),
+                endpoint=_endpoint_for(client, str(probe.label), resolved),
+                connected=bool(probe.status.connected),
+                protocol_version=probe.status.protocol_version,
+                server=_server_info(probe.status),
+                tools_count=int(probe.status.tools_count),
+                error=_error_info(probe.status.error),
+            )
+            for probe in probes
+        ]
+        return McpServersResponse(servers=entries, checked_at=time.time())
+
+    @app.get("/api/chats/{chat_id}/watches", response_model=ChatWatchesResponse)
+    async def chat_watches(chat_id: str) -> ChatWatchesResponse:
+        try:
+            exists = app.state.chats.chat_exists(chat_id)
+        except StorageError:
+            raise _storage_http_error() from None
+        # The chat check happens before any contact with server B.
+        if not exists:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "category": "chat_not_found",
+                    "message": "The chat was not found",
+                },
+            )
+        notifier = app.state.notifier
+        try:
+            watches_payload = await notifier.list_watches(chat_id)
+            deliveries_payload = await notifier.list_deliveries(chat_id)
+        except NotifierUnavailable as exc:
+            return ChatWatchesResponse(
+                chat_id=chat_id,
+                available=False,
+                error=ErrorInfo(category=exc.category, message=exc.message),
+            )
+        return ChatWatchesResponse(
+            chat_id=chat_id,
+            available=True,
+            watches=list(watches_payload.get("watches") or []),
+            deliveries=list(deliveries_payload.get("deliveries") or []),
         )
 
     @app.get("/api/chats", response_model=ChatListResponse)

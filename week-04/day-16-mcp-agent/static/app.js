@@ -33,6 +33,8 @@ const tasksListEl = document.getElementById("tasks-list");
 const tasksRefreshButton = document.getElementById("tasks-refresh-button");
 const reportsListEl = document.getElementById("reports-list");
 const reportsRefreshButton = document.getElementById("reports-refresh-button");
+const watchesListEl = document.getElementById("watches-list");
+const watchesRefreshButton = document.getElementById("watches-refresh-button");
 
 // The selected chat is the only context a request may use. It is an opaque id
 // and is never written into visible text.
@@ -47,6 +49,7 @@ let selectionToken = 0;
 let tasksPollTimer = null;
 let tasksRequestInFlight = false;
 let reportsRequestInFlight = false;
+let watchesRequestInFlight = false;
 
 function addBubble(kind, text) {
   const bubble = document.createElement("div");
@@ -164,6 +167,12 @@ function technicalLine(bubble, text, bad) {
   line.textContent = text;
   details.appendChild(line);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// The owning server of a tool event, e.g. "[A] ". A legacy single-server stream
+// carries no server field, so the technical line stays exactly as on days 16-19.
+function serverTag(data) {
+  return data && data.server ? `[${data.server}] ` : "";
 }
 
 function addSystem(text) {
@@ -298,19 +307,23 @@ async function sendMessage(message, bubble) {
         if (event === "delta") {
           appendText(data.text);
         } else if (event === "tool_call") {
-          setStage(bubble, `Calling ${data.tool}…`);
+          setStage(bubble, `Calling ${serverTag(data)}${data.tool}…`);
           if (data.tool === WEB_SEARCH_TOOL) {
             showSearchSpinner(bubble);
           }
           const args = JSON.stringify(data.arguments || {});
-          technicalLine(bubble, `MCP tool call: ${data.tool} ${args}`, false);
+          technicalLine(
+            bubble,
+            `MCP tool call: ${serverTag(data)}${data.tool} ${args}`,
+            false
+          );
         } else if (event === "tool_result") {
           if (data.tool === WEB_SEARCH_TOOL) {
             hideSearchSpinner(bubble);
           }
           technicalLine(
             bubble,
-            `${data.tool} ${data.ok ? "returned" : "failed"}: ${data.summary}`,
+            `${serverTag(data)}${data.tool} ${data.ok ? "returned" : "failed"}: ${data.summary}`,
             !data.ok
           );
         } else if (event === "status") {
@@ -468,11 +481,13 @@ async function selectChat(chatId) {
   renderChatList();
   const token = ++selectionToken;
   try {
-    const [messagesResponse, tasksResponse, reportsResponse] = await Promise.all([
-      fetch(`${API_BASE}/api/chats/${chatId}/messages`),
-      fetch(`${API_BASE}/api/chats/${chatId}/tasks`),
-      fetch(`${API_BASE}/api/chats/${chatId}/reports`),
-    ]);
+    const [messagesResponse, tasksResponse, reportsResponse, watchesResponse] =
+      await Promise.all([
+        fetch(`${API_BASE}/api/chats/${chatId}/messages`),
+        fetch(`${API_BASE}/api/chats/${chatId}/tasks`),
+        fetch(`${API_BASE}/api/chats/${chatId}/reports`),
+        fetch(`${API_BASE}/api/chats/${chatId}/watches`),
+      ]);
     if (token !== selectionToken) {
       return;
     }
@@ -491,11 +506,16 @@ async function selectChat(chatId) {
       const payload = await reportsResponse.json();
       renderReports(payload.reports || []);
     }
+    watchesListEl.textContent = "";
+    if (watchesResponse.ok) {
+      renderWatches(await watchesResponse.json());
+    }
   } catch {
     if (token === selectionToken) {
       messagesEl.textContent = "";
       tasksListEl.textContent = "";
       reportsListEl.textContent = "";
+      watchesListEl.textContent = "";
     }
   }
 }
@@ -601,6 +621,7 @@ async function deleteChat(chatId) {
       messagesEl.textContent = "";
       tasksListEl.textContent = "";
       reportsListEl.textContent = "";
+      watchesListEl.textContent = "";
     }
     await loadChats();
     await loadReports();
@@ -908,6 +929,117 @@ async function loadReports() {
   }
 }
 
+// -- notification watches --------------------------------------------------
+
+function watchDelivery(watch, deliveries) {
+  // The delivery status always comes from server B, never from the model text.
+  const last = watch && watch.last_delivery;
+  if (last && last.status) {
+    return last;
+  }
+  const list = Array.isArray(deliveries) ? deliveries : [];
+  return list.find((item) => item && item.watch_id === watch.watch_id) || null;
+}
+
+function buildWatchCard(watch, deliveries) {
+  const card = document.createElement("div");
+  card.className = "watch-card";
+
+  const head = document.createElement("div");
+  head.className = "watch-head";
+  const query = document.createElement("span");
+  query.className = "watch-query";
+  query.textContent = watch.query || "";
+  const status = document.createElement("span");
+  status.className = `pill ${watch.status === "active" ? "ok" : "warn"}`;
+  status.textContent = watch.status || "";
+  head.appendChild(query);
+  head.appendChild(status);
+  card.appendChild(head);
+
+  const keywords = Array.isArray(watch.keywords) ? watch.keywords.join(", ") : "";
+  const criteria = document.createElement("div");
+  criteria.className = "watch-meta";
+  criteria.textContent = `Matches: ${keywords || "(none)"}`;
+  card.appendChild(criteria);
+
+  const schedule = document.createElement("div");
+  schedule.className = "watch-meta";
+  schedule.textContent = `Checked every ${formatInterval(watch.interval_seconds)} · next ${
+    watch.next_check_at || "unknown"
+  }`;
+  card.appendChild(schedule);
+
+  const delivery = watchDelivery(watch, deliveries);
+  const deliveryLine = document.createElement("div");
+  deliveryLine.className = "watch-delivery";
+  if (delivery) {
+    deliveryLine.textContent = `Last delivery: ${delivery.status || "unknown"}`;
+    if (delivery.status !== "sent" && delivery.status !== "duplicate") {
+      deliveryLine.classList.add("bad");
+    }
+  } else {
+    deliveryLine.textContent = "No delivery yet.";
+  }
+  card.appendChild(deliveryLine);
+  return card;
+}
+
+function renderWatches(payload) {
+  watchesListEl.textContent = "";
+  if (!payload || payload.available === false) {
+    const unavailable = document.createElement("p");
+    unavailable.className = "muted";
+    const category =
+      payload && payload.error ? payload.error.category : "unavailable";
+    unavailable.textContent = `The notification service is unavailable (${category}).`;
+    watchesListEl.appendChild(unavailable);
+    return;
+  }
+  const watches = Array.isArray(payload.watches) ? payload.watches : [];
+  const deliveries = Array.isArray(payload.deliveries) ? payload.deliveries : [];
+  if (!watches.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No notification watches in this chat.";
+    watchesListEl.appendChild(empty);
+    return;
+  }
+  for (const watch of watches) {
+    watchesListEl.appendChild(buildWatchCard(watch, deliveries));
+  }
+}
+
+async function loadWatches() {
+  const chatId = state.activeChatId;
+  if (!chatId) {
+    watchesListEl.textContent = "";
+    return;
+  }
+  if (watchesRequestInFlight) {
+    return;
+  }
+  watchesRequestInFlight = true;
+  const token = selectionToken;
+  try {
+    const response = await fetch(`${API_BASE}/api/chats/${chatId}/watches`);
+    if (token !== selectionToken || chatId !== state.activeChatId) {
+      return;
+    }
+    if (!response.ok) {
+      watchesListEl.textContent = "";
+      return;
+    }
+    renderWatches(await response.json());
+  } catch {
+    if (token === selectionToken && chatId === state.activeChatId) {
+      watchesListEl.textContent = "";
+    }
+  } finally {
+    watchesRequestInFlight = false;
+  }
+}
+
 // Idempotent: a second call while the timer already runs is a no-op.
 function startTasksPolling() {
   if (tasksPollTimer !== null) {
@@ -1010,18 +1142,14 @@ async function refreshStatus() {
   mcpStatusEl.appendChild(
     Object.assign(document.createElement("p"), {
       className: "muted",
-      textContent: "Checking the MCP server…",
+      textContent: "Checking the MCP servers…",
     })
   );
-  let status = null;
-  let tools = null;
+  let payload = null;
   try {
-    const [statusResponse, toolsResponse] = await Promise.all([
-      fetch(`${API_BASE}/api/mcp/status`),
-      fetch(`${API_BASE}/api/mcp/tools`),
-    ]);
-    status = statusResponse.ok ? await statusResponse.json() : null;
-    tools = toolsResponse.ok ? await toolsResponse.json() : null;
+    // One request; the backend probes both servers once for the whole answer.
+    const response = await fetch(`${API_BASE}/api/mcp/servers`);
+    payload = response.ok ? await response.json() : null;
   } catch (error) {
     mcpStatusEl.textContent = "";
     mcpStatusEl.appendChild(
@@ -1031,53 +1159,54 @@ async function refreshStatus() {
   }
 
   mcpStatusEl.textContent = "";
-  if (!status) {
+  const servers = payload && Array.isArray(payload.servers) ? payload.servers : [];
+  if (!servers.length) {
     mcpStatusEl.appendChild(
       textNode("The backend did not answer the MCP status request.")
     );
     return;
   }
 
-  mcpStatusEl.appendChild(
-    statusRow(
-      "Connection",
-      pill(status.connected, status.connected ? "connected" : "disconnected")
-    )
-  );
-  if (status.protocol_version) {
-    mcpStatusEl.appendChild(
-      statusRow("Protocol version", textNode(status.protocol_version))
-    );
-  }
-  if (status.server) {
-    mcpStatusEl.appendChild(
+  for (const server of servers) {
+    const card = document.createElement("div");
+    card.className = "status-server";
+    card.appendChild(
       statusRow(
-        "Server",
-        textNode(
-          `${status.server.name || "unknown"} ${status.server.version || ""}`.trim()
-        )
+        `Server ${server.label}`,
+        pill(server.connected, server.connected ? "connected" : "disconnected")
       )
     );
-  }
-  mcpStatusEl.appendChild(
-    statusRow("Tools count", textNode(String(status.tools_count ?? 0)))
-  );
-  if (status.error) {
-    mcpStatusEl.appendChild(
-      statusRow("Error", textNode(`${status.error.category}: ${status.error.message}`))
+    if (server.endpoint) {
+      card.appendChild(statusRow("Endpoint", textNode(server.endpoint)));
+    }
+    if (server.protocol_version) {
+      card.appendChild(
+        statusRow("Protocol version", textNode(server.protocol_version))
+      );
+    }
+    if (server.server) {
+      card.appendChild(
+        statusRow(
+          "Server",
+          textNode(
+            `${server.server.name || "unknown"} ${server.server.version || ""}`.trim()
+          )
+        )
+      );
+    }
+    card.appendChild(
+      statusRow("Tools count", textNode(String(server.tools_count ?? 0)))
     );
+    if (server.error) {
+      card.appendChild(
+        statusRow(
+          "Error",
+          textNode(`${server.error.category}: ${server.error.message}`)
+        )
+      );
+    }
+    mcpStatusEl.appendChild(card);
   }
-
-  const list = tools && tools.tools ? tools.tools : [];
-  const details = document.createElement("details");
-  details.className = "tools";
-  const summary = document.createElement("summary");
-  summary.textContent = `Tools (${list.length})`;
-  details.appendChild(summary);
-  const container = document.createElement("div");
-  renderTools(container, list);
-  details.appendChild(container);
-  mcpStatusEl.appendChild(details);
 }
 
 formEl.addEventListener("submit", (event) => {
@@ -1111,6 +1240,8 @@ newChatButton.addEventListener("click", async () => {
 tasksRefreshButton.addEventListener("click", loadTasks);
 
 reportsRefreshButton.addEventListener("click", loadReports);
+
+watchesRefreshButton.addEventListener("click", loadWatches);
 
 refreshButton.addEventListener("click", refreshStatus);
 

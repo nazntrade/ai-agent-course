@@ -6,6 +6,8 @@ cd /d "%~dp0"
 
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+rem Local-only fallback; an explicit AGENT_MODEL_NAME from the environment or .env wins.
+set "AGENT_LOCAL_MODEL_DEFAULT_NAME=gemma-4-26B-A4B-it-UD-IQ4_XS"
 
 set "VENV_DIR=.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"

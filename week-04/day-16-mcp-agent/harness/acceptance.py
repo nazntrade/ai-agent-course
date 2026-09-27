@@ -24,8 +24,14 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from harness.qa_bridge import PROJECT_DIR
-from harness.processes import sanitized_env
+from harness.processes import PrerequisiteError, sanitized_env
 from harness.run_dir import create_run_dir, relative, write_report
+from harness.test_profile import (
+    load_model_profile,
+    probe_model,
+    redact_report,
+    tavily_opt_in,
+)
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -41,7 +47,7 @@ BROWSER_ENV_KEYS = ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "HOMEDR
 
 
 def _run(command: list, timeout: float, extra_env: dict | None = None):
-    return subprocess.run(
+    completed = subprocess.run(
         [str(item) for item in command],
         cwd=str(PROJECT_DIR),
         env=sanitized_env(extra_env),
@@ -51,6 +57,11 @@ def _run(command: list, timeout: float, extra_env: dict | None = None):
         errors="replace",
         timeout=timeout,
     )
+    for key, value in (extra_env or {}).items():
+        if key.endswith("API_KEY") and value:
+            completed.stdout = completed.stdout.replace(str(value), "[redacted]")
+            completed.stderr = completed.stderr.replace(str(value), "[redacted]")
+    return completed
 
 
 def _status_from_output(text: str, prefix: str) -> str:
@@ -69,10 +80,48 @@ def _status_from_output(text: str, prefix: str) -> str:
     return value
 
 
-def run(ui: bool, live: bool) -> int:
-    """Run the acceptance steps in order."""
-    run_dir = create_run_dir("acceptance")
-    report: dict = {"scenario": "acceptance", "steps": {}}
+def _prepare_live_model(profile, run_dir, report: dict, owner: dict) -> dict:
+    """Select a panel-owned endpoint or start one legacy local launcher."""
+    if profile is not None:
+        report["test_model"] = profile.public_details()
+        if not probe_model(profile):
+            raise PrerequisiteError(
+                "selected test model is unavailable or does not match its GGUF"
+            )
+        print(
+            "TEST_MODEL_STATUS: READY "
+            f"({profile.kind}, {profile.name}, {profile.base_url})"
+        )
+        child_env = profile.child_environment()
+        if profile.kind == "remote":
+            child_env["AI_TEST_MODEL_PARENT_READY"] = "1"
+        return child_env
+
+    from harness.live_e2e import ensure_local_model
+
+    config, model, launcher = ensure_local_model(run_dir, report)
+    owner["launcher"] = launcher
+    if not model:
+        raise PrerequisiteError("the default local test model is unavailable")
+    report["test_model"] = {
+        "kind": "local",
+        "name": model,
+        "base_url": config.base_url,
+    }
+    print(f"TEST_MODEL_STATUS: READY (local, {model}, {config.base_url})")
+    return {}
+
+
+def _run_steps(
+    ui: bool,
+    live: bool,
+    report: dict,
+    profile,
+    tavily_enabled: bool,
+    run_dir,
+    owner: dict,
+) -> int:
+    """Run unit/MCP checks before preparing the selected live model."""
     exit_code = EXIT_OK
 
     print("=== unit tests ===")
@@ -125,11 +174,15 @@ def run(ui: bool, live: bool) -> int:
         elif smoke.returncode == 2:
             exit_code = EXIT_PREREQUISITE
 
+        model_env = _prepare_live_model(profile, run_dir, report, owner)
+
         print("=== live model E2E ===")
         command = [sys.executable, str(PROJECT_DIR / "harness" / "live_e2e.py")]
         if ui:
             command.append("--ui")
-        e2e = _run(command, STEP_TIMEOUT_SECONDS, {"RUN_LIVE_LLM": "1"})
+        e2e = _run(
+            command, STEP_TIMEOUT_SECONDS, {"RUN_LIVE_LLM": "1", **model_env}
+        )
         print(e2e.stdout or "")
         print(e2e.stderr or "")
         report["steps"]["live_e2e"] = {"exit_code": e2e.returncode}
@@ -144,7 +197,7 @@ def run(ui: bool, live: bool) -> int:
         # missing system browser yields ``UI_E2E_STATUS: BLOCKED`` and does not
         # fail acceptance, because the live_e2e exit code is the LLM verdict.
         print("=== live search E2E (real model + fake search API) ===")
-        search_env = {"RUN_LIVE_LLM": "1"}
+        search_env = {"RUN_LIVE_LLM": "1", **model_env}
         search_env.update({key: os.environ.get(key) for key in BROWSER_ENV_KEYS})
         search = _run(
             [
@@ -184,7 +237,7 @@ def run(ui: bool, live: bool) -> int:
         # panel is seeded through the real MCP tool and the message history
         # through the storage layer.
         print("=== live tasks E2E (real model + fake search + UI) ===")
-        tasks_env = {"RUN_LIVE_LLM": "1"}
+        tasks_env = {"RUN_LIVE_LLM": "1", **model_env}
         tasks_env.update({key: os.environ.get(key) for key in BROWSER_ENV_KEYS})
         tasks = _run(
             [
@@ -225,7 +278,7 @@ def run(ui: bool, live: bool) -> int:
         # (search_web → digest_search_results → save_report) and checks that a
         # plain search does not create a report, plus the Saved reports UI.
         print("=== live composition E2E (real model + fake search + UI) ===")
-        composition_env = {"RUN_LIVE_LLM": "1"}
+        composition_env = {"RUN_LIVE_LLM": "1", **model_env}
         composition_env.update({key: os.environ.get(key) for key in BROWSER_ENV_KEYS})
         composition = _run(
             [
@@ -271,10 +324,191 @@ def run(ui: bool, live: bool) -> int:
         ):
             exit_code = EXIT_FAIL
 
-    report["exit_code"] = exit_code
-    report["status"] = {0: "pass", 1: "fail", 2: "prerequisite"}.get(exit_code, "fail")
-    write_report(run_dir, report)
-    print(f"RUN_DIR: {relative(run_dir)}")
+        # The day-20 notification scenario drives the real model across two real
+        # MCP servers (A and B). Server B's Telegram and server A's paid search
+        # API are replaced by loopback fakes; the UI shows both servers and the
+        # watches panel.
+        print("=== live notifications E2E (real model + A+B + fakes + UI) ===")
+        notifications_env = {"RUN_LIVE_LLM": "1", **model_env}
+        notifications_env.update(
+            {key: os.environ.get(key) for key in BROWSER_ENV_KEYS}
+        )
+        notifications = _run(
+            [
+                sys.executable,
+                str(PROJECT_DIR / "harness" / "live_e2e.py"),
+                "--scenario",
+                "notifications",
+                "--ui",
+            ],
+            STEP_TIMEOUT_SECONDS,
+            notifications_env,
+        )
+        print(notifications.stdout or "")
+        print(notifications.stderr or "")
+        notifications_live = _status_from_output(
+            notifications.stdout, "NOTIFICATIONS_LIVE_STATUS"
+        )
+        notifier_servers_ui = _status_from_output(
+            notifications.stdout, "NOTIFIER_SERVERS_UI_STATUS"
+        )
+        notification_ui = _status_from_output(
+            notifications.stdout, "NOTIFICATION_UI_STATUS"
+        )
+        if notifications.returncode == 2:
+            notifications_live = "BLOCKED"
+        elif notifications.returncode != 0 and notifications_live == "UNKNOWN":
+            notifications_live = "FAIL"
+        report["steps"]["notifications_live_e2e"] = {
+            "exit_code": notifications.returncode,
+            "notifications_live": notifications_live,
+            "servers_ui": notifier_servers_ui,
+            "notification_ui": notification_ui,
+        }
+        print(f"NOTIFICATIONS_LIVE_STATUS: {notifications_live}")
+        print(f"NOTIFIER_SERVERS_UI_STATUS: {notifier_servers_ui}")
+        print(f"NOTIFICATION_UI_STATUS: {notification_ui}")
+        if notifications.returncode == 2:
+            if exit_code == EXIT_OK:
+                exit_code = EXIT_PREREQUISITE
+        elif notifications.returncode != 0 or "FAIL" in (
+            notifier_servers_ui,
+            notification_ui,
+        ):
+            exit_code = EXIT_FAIL
+
+        # The monitor channel is its own LIVE run: it needs the backend monitor
+        # enabled with a short tick, so it cannot share the chat scenario's
+        # backend window.
+        print("=== monitor LIVE E2E (real model + A+B + fakes) ===")
+        monitor = _run(
+            [
+                sys.executable,
+                str(PROJECT_DIR / "harness" / "live_e2e.py"),
+                "--scenario",
+                "notifications-monitor",
+            ],
+            STEP_TIMEOUT_SECONDS,
+            {"RUN_LIVE_LLM": "1", **model_env},
+        )
+        print(monitor.stdout or "")
+        print(monitor.stderr or "")
+        monitor_live = _status_from_output(
+            monitor.stdout, "NOTIFICATIONS_MONITOR_LIVE_STATUS"
+        )
+        if monitor.returncode == 2:
+            monitor_live = "BLOCKED"
+        elif monitor.returncode != 0 and monitor_live == "UNKNOWN":
+            monitor_live = "FAIL"
+        report["steps"]["notifications_monitor_live_e2e"] = {
+            "exit_code": monitor.returncode,
+            "monitor_live": monitor_live,
+        }
+        print(f"NOTIFICATIONS_MONITOR_LIVE_STATUS: {monitor_live}")
+        if monitor.returncode == 2:
+            if exit_code == EXIT_OK:
+                exit_code = EXIT_PREREQUISITE
+        elif monitor.returncode != 0:
+            exit_code = EXIT_FAIL
+
+        if tavily_enabled:
+            print("=== real Tavily E2E (opt-in model + MCP + search) ===")
+            tavily = _run(
+                [
+                    sys.executable,
+                    str(PROJECT_DIR / "harness" / "live_e2e.py"),
+                    "--scenario",
+                    "tavily",
+                ],
+                STEP_TIMEOUT_SECONDS,
+                {
+                    "RUN_LIVE_LLM": "1",
+                    **model_env,
+                    "AI_TEST_TAVILY_ENABLED": "1",
+                    "AI_TEST_TAVILY_API_KEY": os.environ["AI_TEST_TAVILY_API_KEY"],
+                },
+            )
+            print(tavily.stdout or "")
+            print(tavily.stderr or "")
+            tavily_status = _status_from_output(tavily.stdout, "TAVILY_STATUS")
+            if tavily.returncode == EXIT_PREREQUISITE:
+                tavily_status = "BLOCKED"
+                if exit_code == EXIT_OK:
+                    exit_code = EXIT_PREREQUISITE
+            elif tavily.returncode != EXIT_OK:
+                tavily_status = "FAIL"
+                exit_code = EXIT_FAIL
+            report["steps"]["tavily_live_e2e"] = {
+                "exit_code": tavily.returncode,
+                "tavily_status": tavily_status,
+            }
+            print(f"TAVILY_STATUS: {tavily_status}")
+        else:
+            report["tavily_status"] = "NOT_REQUESTED"
+
+        # The only real external delivery is opt-in: without
+        # NOTIFIER_REAL_ALLOW=1 the harness reports BLOCKED and acceptance stays
+        # green. An explicit operator opt-in is forwarded to allow the one call.
+        print("=== real Telegram delivery (opt-in) ===")
+        real = _run(
+            [sys.executable, str(PROJECT_DIR / "harness" / "notifier_real_live.py")],
+            STEP_TIMEOUT_SECONDS,
+            {"NOTIFIER_REAL_ALLOW": os.environ.get("NOTIFIER_REAL_ALLOW")},
+        )
+        print(real.stdout or "")
+        print(real.stderr or "")
+        notifier_real = _status_from_output(real.stdout, "NOTIFIER_REAL_STATUS")
+        if real.returncode == 2:
+            notifier_real = "BLOCKED"
+        elif real.returncode != 0:
+            notifier_real = "FAIL"
+            exit_code = EXIT_FAIL
+        report["steps"]["notifier_real_live"] = {
+            "exit_code": real.returncode,
+            "notifier_real": notifier_real,
+        }
+        print(f"NOTIFIER_REAL_STATUS: {notifier_real}")
+
+    return exit_code
+
+
+def run(ui: bool, live: bool) -> int:
+    """Validate one local test profile and own one launcher for the live run."""
+    run_dir = create_run_dir("acceptance")
+    report: dict = {"scenario": "acceptance", "steps": {}}
+    owner: dict = {"launcher": None}
+    exit_code = EXIT_FAIL
+    try:
+        profile = load_model_profile(os.environ)
+        tavily_enabled = tavily_opt_in(os.environ)
+        exit_code = _run_steps(
+            ui, live, report, profile, tavily_enabled, run_dir, owner
+        )
+    except PrerequisiteError as exc:
+        print(f"TEST_MODEL_STATUS: BLOCKED - {exc}")
+        report["reason"] = str(exc)
+        exit_code = EXIT_PREREQUISITE
+    finally:
+        if owner["launcher"] is not None:
+            report["model_launcher_stop"] = owner["launcher"].stop()
+        report["exit_code"] = exit_code
+        report["status"] = {
+            EXIT_OK: "pass",
+            EXIT_FAIL: "fail",
+            EXIT_PREREQUISITE: "blocked",
+        }[exit_code]
+        write_report(
+            run_dir,
+            redact_report(
+                report,
+                (
+                    os.environ.get("AI_TEST_MODEL_API_KEY"),
+                    os.environ.get("AI_TEST_TAVILY_API_KEY"),
+                    os.environ.get("AI_TEST_MODEL_PATH"),
+                ),
+            ),
+        )
+        print(f"RUN_DIR: {relative(run_dir)}")
     return exit_code
 
 

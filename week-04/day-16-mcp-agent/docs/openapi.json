@@ -60,6 +60,63 @@
         }
       }
     },
+    "/api/mcp/servers": {
+      "get": {
+        "summary": "Mcp Servers",
+        "operationId": "mcp_servers_api_mcp_servers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpServersResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chats/{chat_id}/watches": {
+      "get": {
+        "summary": "Chat Watches",
+        "operationId": "chat_watches_api_chats__chat_id__watches_get",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chat Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatWatchesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/chats": {
       "get": {
         "summary": "List Chats",
@@ -686,6 +743,51 @@
         "title": "ChatTasksResponse",
         "description": "The scheduled tasks of one chat."
       },
+      "ChatWatchesResponse": {
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "watches": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Watches"
+          },
+          "deliveries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Deliveries"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "chat_id",
+          "available"
+        ],
+        "title": "ChatWatchesResponse",
+        "description": "The notification watches and deliveries of one chat, read from server B.\n\n``available`` is false when B is unreachable or not configured; that is a\nsuccessful HTTP response, never a 5xx."
+      },
       "ErrorInfo": {
         "properties": {
           "category": {
@@ -741,6 +843,27 @@
         ],
         "title": "HealthResponse",
         "description": "Liveness of the backend process."
+      },
+      "McpServersResponse": {
+        "properties": {
+          "servers": {
+            "items": {
+              "$ref": "#/components/schemas/ServerEntry"
+            },
+            "type": "array",
+            "title": "Servers"
+          },
+          "checked_at": {
+            "type": "number",
+            "title": "Checked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "checked_at"
+        ],
+        "title": "McpServersResponse",
+        "description": "Both MCP servers read through a single ``probe_servers()`` call."
       },
       "McpStatusResponse": {
         "properties": {
@@ -953,6 +1076,72 @@
         ],
         "title": "ReportInfo",
         "description": "One saved report as shown in the Saved reports panel."
+      },
+      "ServerEntry": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "connected": {
+            "type": "boolean",
+            "title": "Connected",
+            "default": false
+          },
+          "protocol_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Version"
+          },
+          "server": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServerInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tools_count": {
+            "type": "integer",
+            "title": "Tools Count",
+            "default": 0
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "title": "ServerEntry",
+        "description": "One MCP server of the hub as exposed to the frontend."
       },
       "ServerInfo": {
         "properties": {

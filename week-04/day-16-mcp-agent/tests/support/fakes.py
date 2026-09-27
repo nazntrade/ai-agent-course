@@ -123,6 +123,111 @@ def sample_tools():
     ]
 
 
+def notifier_tools():
+    """The six tools server B (the notifier) advertises, as value objects."""
+    return [
+        McpTool(
+            name="create_notification_watch",
+            title=None,
+            description="Create a Telegram notification watch for the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "keywords": {"type": "array"},
+                    "exclude": {"type": "array"},
+                    "interval_seconds": {"type": "integer"},
+                    "summary_interval_seconds": {"type": "integer"},
+                    "source_task_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                },
+                "required": ["query", "keywords"],
+            },
+        ),
+        McpTool(
+            name="list_notification_watches",
+            title=None,
+            description="List the notification watches of the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {"chat_id": {"type": "string"}},
+            },
+        ),
+        McpTool(
+            name="evaluate_run",
+            title=None,
+            description="Compare a scheduled-search result with a watch criterion.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "watch_id": {"type": "string"},
+                    "run": {"type": "object"},
+                    "chat_id": {"type": "string"},
+                },
+                "required": ["watch_id", "run"],
+            },
+        ),
+        McpTool(
+            name="send_notification",
+            title=None,
+            description="Send the matching items of a watch to Telegram.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "watch_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "items": {"type": "array"},
+                },
+                "required": ["watch_id"],
+            },
+        ),
+        McpTool(
+            name="get_delivery_status",
+            title=None,
+            description="Report the recent deliveries of a watch or a chat.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "watch_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                },
+            },
+        ),
+        McpTool(
+            name="stop_notification_watch",
+            title=None,
+            description="Stop a notification watch of the current chat.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "watch_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                },
+                "required": ["watch_id"],
+            },
+        ),
+    ]
+
+
+def notifier_call_results(watches=None, deliveries=None):
+    """Structured results for the two host→B read tools."""
+    return {
+        "list_notification_watches": McpCallResult(
+            ok=True,
+            text="watches",
+            structured=watches if watches is not None else {"count": 0, "watches": []},
+        ),
+        "get_delivery_status": McpCallResult(
+            ok=True,
+            text="deliveries",
+            structured=(
+                deliveries if deliveries is not None else {"count": 0, "deliveries": []}
+            ),
+        ),
+    }
+
+
 class FakeMcpClient:
     """A scripted ``McpClient``."""
 

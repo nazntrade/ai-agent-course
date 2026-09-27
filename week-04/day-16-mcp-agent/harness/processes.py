@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -112,10 +113,13 @@ class ManagedProcess:
     name: str
     args: list
     cwd: Path
-    env: dict
+    env: dict = field(repr=False)
     log_path: Path = None
+    redact_values: tuple[str, ...] = field(default_factory=tuple, repr=False)
     _process: object = field(default=None, init=False, repr=False)
     _handle: object = field(default=None, init=False, repr=False)
+    _pump_thread: object = field(default=None, init=False, repr=False)
+    _redaction_error: bool = field(default=False, init=False, repr=False)
 
     @property
     def pid(self):
@@ -135,16 +139,50 @@ class ManagedProcess:
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
                 subprocess, "CREATE_NO_WINDOW", 0
             )
+        redact_output = bool(self._handle and any(self.redact_values))
         self._process = subprocess.Popen(
             [str(item) for item in self.args],
             cwd=str(self.cwd),
             env=self.env,
-            stdout=self._handle or subprocess.DEVNULL,
+            stdout=subprocess.PIPE if redact_output else self._handle or subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
             creationflags=creationflags,
             shell=False,
         )
+        if redact_output:
+            self._pump_thread = threading.Thread(
+                target=self._pump_redacted_output,
+                args=(self._process.stdout,),
+                name=f"{self.name}-redacted-log",
+                daemon=True,
+            )
+            self._pump_thread.start()
         return self
+
+    def _pump_redacted_output(self, stream) -> None:
+        """Redact secret-bearing lines before the first write to a run artifact."""
+        secrets = sorted(
+            {str(value) for value in self.redact_values if value},
+            key=len,
+            reverse=True,
+        )
+        try:
+            for raw_line in stream:
+                line = raw_line.decode("utf-8", "replace")
+                for secret in secrets:
+                    line = line.replace(secret, "[redacted]")
+                try:
+                    self._handle.write(line)
+                    self._handle.flush()
+                except (OSError, ValueError):
+                    self._redaction_error = True
+        except (OSError, ValueError):
+            self._redaction_error = True
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                self._redaction_error = True
 
     def tail_log(self, limit: int = 4000) -> str:
         """Return the tail of the captured log."""
@@ -172,7 +210,17 @@ class ManagedProcess:
                     process.wait(timeout=timeout)
                 except Exception:  # noqa: BLE001 - best effort
                     pass
+        if self._pump_thread is not None:
+            self._pump_thread.join(timeout=5.0)
+            if self._pump_thread.is_alive():
+                self._redaction_error = True
+                if process.stdout is not None:
+                    process.stdout.close()
+                self._pump_thread.join(timeout=1.0)
+            self._pump_thread = None
         result["stopped"] = process.poll() is not None
+        if self.redact_values:
+            result["redaction_ok"] = not self._redaction_error
         self._process = None
         if self._handle is not None:
             try:

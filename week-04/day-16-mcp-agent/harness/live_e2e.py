@@ -29,6 +29,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # The .bat entry points run this file directly (``python harness\live_e2e.py``),
 # which puts ``harness\`` on sys.path instead of the project root. Add the root
@@ -58,6 +59,12 @@ from harness.processes import (
     wait_tcp,
 )
 from harness.run_dir import create_run_dir, relative, write_report
+from harness.test_profile import (
+    load_model_profile,
+    probe_model,
+    redact_report,
+    tavily_opt_in,
+)
 
 ensure_paths()
 
@@ -68,11 +75,13 @@ from storage.chats import ChatRepository  # noqa: E402
 from storage.db import Database  # noqa: E402
 from storage.reports import ReportRepository  # noqa: E402
 from tests.support.fake_search import (  # noqa: E402
+    EMPTY_MARKER,
     FAKE_API_KEY,
     MANY_MARKER,
     RESULT_URLS,
     FakeSearchServer,
 )
+from tests.support.fake_telegram import FakeTelegramServer  # noqa: E402
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -80,9 +89,16 @@ EXIT_PREREQUISITE = 2
 
 DEFAULT_MCP_TEST_PORT = 8767
 DEFAULT_BACKEND_TEST_PORT = 8602
+DEFAULT_NOTIFIER_TEST_PORT = 8769
 
 MCP_READY_TIMEOUT_SECONDS = 45.0
 BACKEND_READY_TIMEOUT_SECONDS = 60.0
+# The watch is checked at ``interval_seconds=60``; the second due tick starts
+# about a minute after the baseline and the monitor turn then needs several model
+# rounds (read the run, evaluate, send). The delivery window must cover the wait
+# for the due tick plus that turn.
+MONITOR_BASELINE_TIMEOUT_SECONDS = 120.0
+MONITOR_DELIVERY_TIMEOUT_SECONDS = 210.0
 
 QUESTION = "What is 23 multiplied by 17?"
 EXPECTED_ANSWER = "391"
@@ -186,9 +202,87 @@ COMPOSITION_NO_SAVE_CHAIN = (
     ("request_done", {"ok": True}, ()),
 )
 
+# The day-20 notification scenarios drive the model across two MCP servers:
+# server A (``mcp_server``: search and scheduled runs) and server B
+# (``notifier_server``: watches and Telegram delivery). Both are real processes;
+# the paid search API and Telegram are replaced by loopback fakes.
+NOTIFICATIONS_SCENARIO = "notifications"
+NOTIFICATIONS_MONITOR_SCENARIO = "notifications-monitor"
+NOTIFIER_SERVER_NAME = "day-20-notifier"
+
+A_TOOL_NAMES = frozenset(
+    {
+        "search_web",
+        "schedule_search_task",
+        "list_search_tasks",
+        "get_latest_search_run",
+        "stop_search_task",
+        "digest_search_results",
+        "save_report",
+    }
+)
+B_TOOL_NAMES = frozenset(
+    {
+        "create_notification_watch",
+        "list_notification_watches",
+        "evaluate_run",
+        "send_notification",
+        "get_delivery_status",
+        "stop_notification_watch",
+    }
+)
+DELIVERED_STATUSES = frozenset({"sent", "duplicate"})
+
+WATCH_QUERY = "python documentation"
+WATCH_KEYWORDS = ["python"]
+
+# The literal Xbox topic of the day-20 example is not representable by the
+# deterministic search fake (it always answers with Python-documentation links),
+# so the LIVE scenario monitors that fixture topic; the observable behaviour —
+# a real A→B tool chain with a Telegram-shaped delivery — is the same.
+NOTIFICATIONS_SETUP_QUESTION = (
+    "Please set up a Telegram notification watch for the official Python "
+    "documentation. Read the latest saved search run of this chat and use the "
+    "keyword 'python'. Compare the run with the watch now, but do not send "
+    "anything yet: this first check is only the starting point."
+)
+NOTIFICATIONS_CHECK_QUESTION = (
+    "Now check that notification watch again and send me any new matching "
+    "items in Telegram."
+)
+NOTIFICATIONS_UI_QUESTION = (
+    "Read the latest saved search run of this chat and create a Telegram "
+    "notification watch for the official Python documentation with the keyword "
+    "'python', then check it once."
+)
+
 NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 # Bare http(s) URLs of the streamed answer, for the search-source diagnostics.
 URL_RE = re.compile(r"""https?://[^\s)\]"'>]+""", re.IGNORECASE)
+
+
+def _redact_test_secrets(value, *secrets) -> str:
+    text = str(value or "")
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "[redacted]")
+    return text
+
+
+def _write_safe_report(run_dir: Path, report: dict, *extra_secrets) -> None:
+    """Filter nested provider diagnostics before persisting a test report."""
+    write_report(
+        run_dir,
+        redact_report(
+            report,
+            (
+                os.environ.get("AI_TEST_MODEL_API_KEY"),
+                os.environ.get("AI_TEST_TAVILY_API_KEY"),
+                os.environ.get("AI_TEST_MODEL_PATH"),
+                *extra_secrets,
+            ),
+        ),
+    )
 
 
 def _mcp_ready(url: str, timeout: float) -> bool:
@@ -206,13 +300,24 @@ def _mcp_ready(url: str, timeout: float) -> bool:
     return False
 
 
-def ensure_local_model(run_dir: Path, report: dict):
+def ensure_local_model(run_dir: Path, report: dict, test_profile=None):
     """Return ``(config, requested_model, launcher)`` with a live local model.
 
     The requested model id is always the project canonical one
     (``agent.settings.DEFAULT_MODEL_NAME``); the id from the QA config is only
     recorded as ``qa_model_configured`` and never sent as the requested model.
     """
+    if test_profile is not None:
+        config = qa_config.LocalLlmConfig(
+            base_url=test_profile.base_url,
+            model=test_profile.name,
+            api_key=test_profile.api_key,
+            source="AI_TEST_MODEL_*",
+        )
+        report["test_model"] = test_profile.public_details()
+        report["local_llm"] = {"started_by_harness": False}
+        return config, test_profile.name, None
+
     config = qa_config.load_config()
     report["local_llm"] = {
         "source": config.source,
@@ -466,8 +571,8 @@ def verify_tools_listed(records: list, request_id: str | None, tool_name: str) -
     return {"ok": tool_name in names, "tool": tool_name, "tool_names": names}
 
 
-def verify_search_sse(events: list, expected_urls) -> dict:
-    """Check the SSE order and that the answer cites at least two tool links."""
+def verify_search_sse(events: list, expected_urls, *, minimum_urls: int = 2) -> dict:
+    """Check SSE order and citations to URLs returned by the search tool."""
     names = [name for name, _ in events]
     text = "".join(
         str(data.get("text") or "") for name, data in events if name == "delta"
@@ -499,7 +604,7 @@ def verify_search_sse(events: list, expected_urls) -> dict:
         and ordered("tool_call", "tool_result")
         and ordered("tool_result", "delta")
         and ordered("delta", "done")
-        and len(found) >= 2
+        and len(found) >= minimum_urls
     )
     return {
         "ok": ok,
@@ -507,6 +612,94 @@ def verify_search_sse(events: list, expected_urls) -> dict:
         "urls_found": found,
         "urls_observed": observed,
         "url_count": len(found),
+        "text_chars": len(text),
+        "errors": errors,
+        "done": done,
+    }
+
+
+def search_result_urls(records: list) -> list[str]:
+    """Return genuine HTTP result URLs from a completed search tool call."""
+    for record in records:
+        if (
+            record.get("event") != "tool_completed"
+            or record.get("tool") != "search_web"
+            or record.get("ok") is not True
+        ):
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+            continue
+        return [
+            item["url"]
+            for item in result["results"]
+            if isinstance(item, dict)
+            and isinstance(item.get("url"), str)
+            and item["url"].startswith(("https://", "http://"))
+        ]
+    return []
+
+
+def verify_real_search_sse(events: list, records: list) -> dict:
+    """Verify real search without claiming redacted trace URLs match citations."""
+    names = [name for name, _ in events]
+    text = "".join(
+        str(data.get("text") or "") for name, data in events if name == "delta"
+    )
+    errors = [data for name, data in events if name == "error"]
+    done = [data for name, data in events if name == "done"]
+    result_count = 0
+    for record in records:
+        if (
+            record.get("event") == "tool_completed"
+            and record.get("tool") == "search_web"
+            and record.get("ok") is True
+        ):
+            result = record.get("result")
+            count = result.get("count") if isinstance(result, dict) else None
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                result_count = count
+                break
+
+    answer_urls = set()
+    for match in URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;!?:")
+        try:
+            parsed = urlsplit(url)
+            _port = parsed.port
+        except ValueError:
+            continue
+        if (
+            parsed.scheme.lower() in ("http", "https")
+            and parsed.hostname
+            and "." in parsed.hostname
+            and not parsed.username
+            and not parsed.password
+        ):
+            answer_urls.add(url)
+
+    def ordered(first: str, second: str) -> bool:
+        try:
+            return names.index(first) < names.index(second)
+        except ValueError:
+            return False
+
+    ok = (
+        result_count > 0
+        and bool(answer_urls)
+        and not errors
+        and bool(done)
+        and ordered("tool_call", "tool_result")
+        and ordered("tool_result", "delta")
+        and ordered("delta", "done")
+    )
+    return {
+        "ok": ok,
+        "events": names,
+        "answer_urls": sorted(answer_urls),
+        "answer_url_count": len(answer_urls),
+        "search_result_count": result_count,
+        "source_url_match": "unverified_trace_redacted",
         "text_chars": len(text),
         "errors": errors,
         "done": done,
@@ -1422,6 +1615,185 @@ def run_ui_reports_e2e(url: str, db_path: Path, run_dir: Path, report: dict) -> 
             pass
 
 
+def run_ui_notifier_servers_e2e(url: str, run_dir: Path, report: dict) -> str:
+    """Check that ``MCP status`` lists both servers (D20-16/D20-22)."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "BLOCKED"
+
+    shot = run_dir / "screenshots" / "20_notifier_servers.png"
+    manager = None
+    browser = None
+    page_errors: list = []
+    try:
+        manager = sync_playwright().start()
+        browser, channel = qa_browser.launch_browser(manager, headless=True)
+        report["ui_channel"] = channel
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.set_default_timeout(60000)
+        page = context.new_page()
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_function(
+            "() => document.querySelectorAll('#mcp-status .status-server').length >= 2",
+            timeout=60000,
+        )
+        checks = page.evaluate(
+            """() => {
+                const cards = Array.from(
+                    document.querySelectorAll('#mcp-status .status-server')
+                );
+                const texts = cards.map((card) => card.textContent || '');
+                return {
+                    count: cards.length,
+                    labels: texts.map((text) =>
+                        text.includes('Server A') ? 'A'
+                        : text.includes('Server B') ? 'B' : '?'
+                    ),
+                    pills: cards.map((card) =>
+                        (card.querySelector('.pill')?.textContent || '').trim()
+                    ),
+                };
+            }"""
+        )
+        report["notifier_servers_ui"] = checks
+        labels = checks.get("labels") or []
+        ok = checks.get("count", 0) >= 2 and "A" in labels and "B" in labels
+        qa_browser.screenshot(page, shot)
+        context.close()
+        return "PASS" if ok and not page_errors else "FAIL"
+    except qa_browser.PrerequisiteError as exc:
+        report["notifier_servers_ui_error"] = str(exc)
+        return "BLOCKED"
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["notifier_servers_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    finally:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            if manager is not None:
+                manager.stop()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
+def run_ui_notification_e2e(
+    url: str, run_dir: Path, report: dict, chat_id: str | None
+) -> str:
+    """Check the watches panel and the ``[A]``/``[B]`` technical lines (D20-16).
+
+    The panel is read for the chat the LIVE turn created its watch in, so the
+    card and its delivery status come from server B. The technical lines are
+    produced by one real streamed turn through the browser: history alone would
+    not carry them, because the collapsed block is built during streaming.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "BLOCKED"
+
+    shot = run_dir / "screenshots" / "21_notification_watches.png"
+    manager = None
+    browser = None
+    page_errors: list = []
+    try:
+        manager = sync_playwright().start()
+        browser, channel = qa_browser.launch_browser(manager, headless=True)
+        report["ui_channel"] = channel
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        context.set_default_timeout(60000)
+        page = context.new_page()
+
+        def on_page_error(error):
+            page_errors.append(f"{type(error).__name__}: {error}")
+
+        page.on("pageerror", on_page_error)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_selector("#chats-list .chat-item", timeout=30000)
+
+        watch_cards = 0
+        if chat_id:
+            page.click(
+                f'#chats-list .chat-item[data-chat-id="{chat_id}"] .chat-select'
+            )
+            page.wait_for_selector(
+                f'#chats-list .chat-item.active[data-chat-id="{chat_id}"]',
+                timeout=15000,
+            )
+            try:
+                page.click("#watches-refresh-button")
+            except Exception:  # noqa: BLE001 - the selection load may suffice
+                pass
+            page.wait_for_function(
+                "() => document.querySelectorAll('#watches-list .watch-card').length >= 1",
+                timeout=45000,
+            )
+            watch_cards = page.locator("#watches-list .watch-card").count()
+
+        _start_fresh_chat(page)
+        page.fill("#message-input", NOTIFICATIONS_UI_QUESTION)
+        page.click("#send-button")
+        # Wait for the real A→B tool lines themselves: an early "Status:" line
+        # alone must not satisfy the check, and history never carries the
+        # collapsed technical block.
+        page.wait_for_function(
+            """() => {
+                const texts = Array.from(
+                    document.querySelectorAll('details.technical .tool-line')
+                ).map((line) => line.textContent || '');
+                return texts.some((text) => text.includes('[A]'))
+                    && texts.some((text) => text.includes('[B]'));
+            }""",
+            timeout=600000,
+        )
+        tags = page.evaluate(
+            """() => {
+                const lines = Array.from(
+                    document.querySelectorAll('details.technical .tool-line')
+                );
+                const texts = lines.map((line) => line.textContent || '');
+                return {
+                    count: lines.length,
+                    has_a: texts.some((text) => text.includes('[A]')),
+                    has_b: texts.some((text) => text.includes('[B]')),
+                };
+            }"""
+        )
+        report["notification_ui"] = {"watch_cards": watch_cards, "tool_lines": tags}
+        ok = (
+            watch_cards >= 1
+            and bool(tags.get("has_a"))
+            and bool(tags.get("has_b"))
+            and not page_errors
+        )
+        qa_browser.screenshot(page, shot)
+        context.close()
+        return "PASS" if ok else "FAIL"
+    except qa_browser.PrerequisiteError as exc:
+        report["notification_ui_error"] = str(exc)
+        return "BLOCKED"
+    except Exception as exc:  # noqa: BLE001 - reported as a UI status
+        report["notification_ui_error"] = f"{type(exc).__name__}: {exc}"
+        return "FAIL"
+    finally:
+        report["ui_page_errors"] = page_errors
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            if manager is not None:
+                manager.stop()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
 def _create_chat(backend_url: str, title: str = "") -> str:
     """Create a chat through the real API and return its opaque id."""
     response = httpx.post(
@@ -1580,6 +1952,242 @@ def verify_tool_absent(records: list, request_id: str | None, tool_name: str) ->
     return {"ok": not scoped, "tool": tool_name}
 
 
+def verify_servers_connected(records: list, request_id: str | None = None) -> dict:
+    """Check that the request traced an ``ok`` ``mcp_connect`` for A and B.
+
+    The day-20 hub records one ``mcp_connect`` per configured server; a single
+    successful connection is not proof that both servers were reached.
+    """
+    scoped = [
+        record
+        for record in records
+        if record.get("event") == "mcp_connect"
+        and (request_id is None or record.get("request_id") == request_id)
+    ]
+    connected = sorted(
+        {
+            str(record.get("server"))
+            for record in scoped
+            if record.get("server") in ("A", "B") and record.get("ok") is True
+        }
+    )
+    return {
+        "ok": "A" in connected and "B" in connected,
+        "connected": connected,
+        "records": [
+            {"server": record.get("server"), "ok": record.get("ok")}
+            for record in scoped
+        ],
+    }
+
+
+def _tool_selected_sequence(records: list, request_id: str | None) -> list:
+    return [
+        (str(record.get("server") or ""), str(record.get("tool") or ""))
+        for record in records
+        if record.get("event") == "tool_selected"
+        and (request_id is None or record.get("request_id") == request_id)
+    ]
+
+
+def verify_server_chain(records: list, request_id: str | None = None) -> dict:
+    """Check the ordered A → B tool selection of a cross-server request.
+
+    The chain is an ordered subsequence (interleaved legacy events are skipped);
+    a B tool selected before the A tool does not satisfy it.
+    """
+    sequence = _tool_selected_sequence(records, request_id)
+    a_at = next((i for i, (server, _) in enumerate(sequence) if server == "A"), None)
+    b_at = None
+    if a_at is not None:
+        b_at = next(
+            (i for i in range(a_at + 1, len(sequence)) if sequence[i][0] == "B"),
+            None,
+        )
+    return {
+        "ok": a_at is not None and b_at is not None,
+        "sequence": sequence,
+        "a_at": a_at,
+        "b_at": b_at,
+        "servers": sorted({server for server, _ in sequence if server}),
+    }
+
+
+def verify_servers_sse(events: list) -> dict:
+    """Check that the SSE tool calls came from both servers, A before B."""
+    calls = [
+        (str(data.get("server") or ""), str(data.get("tool") or ""))
+        for name, data in events
+        if name == "tool_call"
+    ]
+    a_at = next((i for i, (server, _) in enumerate(calls) if server == "A"), None)
+    b_at = None
+    if a_at is not None:
+        b_at = next(
+            (i for i in range(a_at + 1, len(calls)) if calls[i][0] == "B"), None
+        )
+    return {"ok": a_at is not None and b_at is not None, "calls": calls}
+
+
+def _completed_payload(records: list, request_id: str | None, tool: str) -> dict:
+    """The structured result of the last ``tool_completed`` for ``tool``."""
+    scoped = [
+        record
+        for record in records
+        if record.get("event") == "tool_completed"
+        and record.get("tool") == tool
+        and (request_id is None or record.get("request_id") == request_id)
+    ]
+    if not scoped:
+        return {}
+    result = scoped[-1].get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def verify_notifications_delivery(
+    records: list,
+    request_id: str | None,
+    telegram_messages: list,
+    *,
+    require_sent: bool = False,
+) -> dict:
+    """Check the delivery outcome of one request's A→B chain.
+
+    A delivery is accepted only when ``send_notification`` itself returned the
+    status ``sent``/``duplicate`` **and** the loopback Telegram payload carries a
+    URL from ``fake_search.RESULT_URLS`` — a bare ``tool_completed.ok`` is not
+    proof of a real notification. When ``require_sent`` is false, an honest
+    ``not_required`` after ``should_notify=false`` is also accepted.
+    """
+    evaluate = _completed_payload(records, request_id, "evaluate_run")
+    send = _completed_payload(records, request_id, "send_notification")
+    send_status = str(send.get("status") or "")
+    should_notify = bool(evaluate.get("should_notify"))
+    delivered = send_status in DELIVERED_STATUSES
+    url_ok = False
+    if delivered:
+        url_ok = any(
+            url in (message or "")
+            for message in telegram_messages
+            for url in RESULT_URLS
+        )
+    if require_sent:
+        ok = delivered and url_ok
+    else:
+        ok = (delivered and url_ok) or (
+            send_status in ("", "not_required") and not should_notify
+        )
+    return {
+        "ok": ok,
+        "send_status": send_status,
+        "should_notify": should_notify,
+        "delivered": delivered,
+        "telegram_url_ok": url_ok,
+        "telegram_messages": len(telegram_messages),
+    }
+
+
+def _monitor_request_ids(records: list, watch_id: str) -> list:
+    wanted = str(watch_id)
+    ids: list = []
+    for record in records:
+        if (
+            record.get("event") == "request_start"
+            and record.get("trigger") == "monitor"
+            and str(record.get("watch_id")) == wanted
+        ):
+            request_id = record.get("request_id")
+            if request_id and request_id not in ids:
+                ids.append(request_id)
+    return ids
+
+
+def monitor_trace_state(records: list, watch_id: str) -> dict:
+    """Summarize the monitor turns of one watch from the JSONL trace."""
+    ids = _monitor_request_ids(records, watch_id)
+    id_set = set(ids)
+    baseline_seen = False
+    sent_ids: set = set()
+    completed_ids: set = set()
+    incomplete_ids: set = set()
+    for record in records:
+        request_id = record.get("request_id")
+        if request_id not in id_set:
+            continue
+        if record.get("event") == "monitor_incomplete":
+            incomplete_ids.add(request_id)
+        elif record.get("event") == "request_done":
+            completed_ids.add(request_id)
+        elif record.get("event") == "tool_completed":
+            payload = record.get("result")
+            payload = payload if isinstance(payload, dict) else {}
+            if record.get("tool") == "evaluate_run" and payload.get("is_baseline") is True:
+                baseline_seen = True
+            if (
+                record.get("tool") == "send_notification"
+                and payload.get("status") == "sent"
+            ):
+                sent_ids.add(request_id)
+    clean_sent = sorted(sent_ids - incomplete_ids)
+    return {
+        "request_ids": ids,
+        "baseline_seen": baseline_seen,
+        "sent_ids": sorted(sent_ids),
+        "completed_ids": sorted(completed_ids),
+        "incomplete_ids": sorted(incomplete_ids),
+        "clean_sent_ids": clean_sent,
+        "success": bool(clean_sent),
+    }
+
+
+def _wait_for_run(client, chat_id: str, task_id: str, statuses, timeout: float = 60.0):
+    """Poll a real server A task until its run reaches one of ``statuses``."""
+    deadline = time.monotonic() + max(float(timeout), 1.0)
+    payload: dict = {"status": "pending", "task_id": task_id}
+    while time.monotonic() < deadline:
+        result = asyncio.run(
+            client.call_tool(
+                "get_latest_search_run", {"chat_id": chat_id, "task_id": task_id}
+            )
+        )
+        if result.ok:
+            payload = result.structured or payload
+            if payload.get("status") in statuses:
+                return payload
+        time.sleep(0.5)
+    return payload
+
+
+def _wait_trace(predicate, records_path: Path, timeout: float, interval: float = 0.5):
+    """Poll the JSONL trace until ``predicate`` returns truthy or time runs out."""
+    deadline = time.monotonic() + max(float(timeout), 1.0)
+    state = None
+    while time.monotonic() < deadline:
+        state = predicate(read_trace(records_path))
+        if state:
+            return state
+        time.sleep(interval)
+    return state
+
+
+def _notifier_ready(url: str, timeout: float) -> bool:
+    """Poll a real notifier handshake and confirm the expected server identity."""
+    deadline = time.monotonic() + max(float(timeout), 1.0)
+    while time.monotonic() < deadline:
+        try:
+            status, _tools = asyncio.run(inspect_tools(url, connect_timeout_s=3.0))
+        except Exception:  # noqa: BLE001 - readiness polling only
+            status = None
+        if (
+            status is not None
+            and status.connected
+            and status.server_name == NOTIFIER_SERVER_NAME
+        ):
+            return True
+        time.sleep(0.4)
+    return False
+
+
 def _run_tasks_turns(
     backend_url: str, records_path: Path, run_dir: Path, report: dict, model_ready: bool
 ) -> str:
@@ -1720,19 +2328,258 @@ def _run_composition_turns(
     return save_status, no_save_status
 
 
+def _run_notifications_turns(
+    backend_url: str,
+    mcp_url: str,
+    notifier_url: str,
+    records_path: Path,
+    run_dir: Path,
+    report: dict,
+    model_ready: bool,
+    telegram: FakeTelegramServer,
+) -> str:
+    """Run the LIVE chat A→B turns of the notifications scenario.
+
+    A deterministic starting point is seeded first: a real server A task whose
+    run finishes ``empty``. The first model turn reads that run and creates the
+    watch, so the baseline records nothing to send; the harness then replaces the
+    empty task with one that returns the fixture links, and the second turn must
+    compare and deliver them with ``send_notification``.
+    """
+    if not model_ready:
+        report["notifications_live_reason"] = "no local OpenAI-compatible model"
+        return "BLOCKED"
+
+    chat_id = _create_chat(backend_url, "Notifications live")
+    report["notifications_chat_id"] = chat_id
+    a_client = SdkMcpClient(mcp_url, call_timeout_s=30.0)
+
+    seeded = asyncio.run(
+        a_client.call_tool(
+            "schedule_search_task",
+            {"query": EMPTY_MARKER, "interval_seconds": 3600, "chat_id": chat_id},
+        )
+    )
+    if not seeded.ok:
+        report["notifications_seed_error"] = seeded.text
+        return "FAIL"
+    empty_task = (seeded.structured or {}).get("task_id", "")
+    empty_run = _wait_for_run(a_client, chat_id, empty_task, ("empty",))
+    report["notifications_empty_run"] = empty_run.get("status")
+
+    events_setup = collect_sse(
+        f"{backend_url}/api/chat/stream",
+        {"chat_id": chat_id, "message": NOTIFICATIONS_SETUP_QUESTION},
+        timeout_s=1800.0,
+    )
+    records = read_trace(records_path)
+    ids = _request_ids(records)
+    setup_id = ids[-1] if ids else None
+    setup_trace = {
+        "servers": verify_servers_connected(records, setup_id),
+        "chain": verify_server_chain(records, setup_id),
+        "sse": verify_servers_sse(events_setup),
+    }
+    report["notifications_setup"] = setup_trace
+
+    asyncio.run(
+        a_client.call_tool(
+            "stop_search_task", {"task_id": empty_task, "chat_id": chat_id}
+        )
+    )
+    created = asyncio.run(
+        a_client.call_tool(
+            "schedule_search_task",
+            {"query": WATCH_QUERY, "interval_seconds": 3600, "chat_id": chat_id},
+        )
+    )
+    if not created.ok:
+        report["notifications_second_task_error"] = created.text
+        return "FAIL"
+    new_task = (created.structured or {}).get("task_id", "")
+    new_run = _wait_for_run(a_client, chat_id, new_task, ("ok",))
+    report["notifications_new_run"] = {
+        "status": new_run.get("status"),
+        "task_id": new_task,
+        "result_count": new_run.get("result_count"),
+    }
+
+    events_check = collect_sse(
+        f"{backend_url}/api/chat/stream",
+        {"chat_id": chat_id, "message": NOTIFICATIONS_CHECK_QUESTION},
+        timeout_s=1800.0,
+    )
+    records = read_trace(records_path)
+    ids = _request_ids(records)
+    check_id = ids[-1] if ids else None
+    check_trace = {
+        "servers": verify_servers_connected(records, check_id),
+        "chain": verify_server_chain(records, check_id),
+        "sse": verify_servers_sse(events_check),
+    }
+    delivery = verify_notifications_delivery(
+        records, check_id, telegram.messages, require_sent=True
+    )
+    report["notifications_check"] = check_trace
+    report["notifications_delivery"] = delivery
+
+    ok = (
+        bool(setup_trace["servers"]["ok"])
+        and bool(setup_trace["chain"]["ok"])
+        and bool(setup_trace["sse"]["ok"])
+        and bool(check_trace["servers"]["ok"])
+        and bool(check_trace["chain"]["ok"])
+        and bool(check_trace["sse"]["ok"])
+        and bool(delivery["ok"])
+    )
+    return "PASS" if ok else "FAIL"
+
+
+def _run_notifications_monitor(
+    backend_url: str,
+    mcp_url: str,
+    notifier_url: str,
+    records_path: Path,
+    run_dir: Path,
+    report: dict,
+    model_ready: bool,
+    telegram: FakeTelegramServer,
+) -> str:
+    """Run the monitor-LIVE scenario without the baseline race (ACCEPTANCE §2).
+
+    The steps are ordered on purpose: the empty run is recorded **before** the
+    watch exists, the watch is created host→B (not through the model), the first
+    monitor tick consumes the baseline without sending, then a real ``ok`` run
+    with the fixture links makes the second due tick deliver them.
+    """
+    if not model_ready:
+        report["notifications_monitor_reason"] = "no local OpenAI-compatible model"
+        return "BLOCKED"
+
+    chat_id = _create_chat(backend_url, "Monitor live")
+    report["notifications_monitor_chat_id"] = chat_id
+    a_client = SdkMcpClient(mcp_url, call_timeout_s=30.0)
+    b_client = SdkMcpClient(notifier_url, call_timeout_s=30.0)
+
+    seeded = asyncio.run(
+        a_client.call_tool(
+            "schedule_search_task",
+            {"query": EMPTY_MARKER, "interval_seconds": 3600, "chat_id": chat_id},
+        )
+    )
+    if not seeded.ok:
+        report["monitor_seed_error"] = seeded.text
+        return "FAIL"
+    empty_task = (seeded.structured or {}).get("task_id", "")
+    empty_run = _wait_for_run(a_client, chat_id, empty_task, ("empty",))
+    report["monitor_empty_run"] = empty_run.get("status")
+
+    created = asyncio.run(
+        b_client.call_tool(
+            "create_notification_watch",
+            {
+                "query": WATCH_QUERY,
+                "keywords": list(WATCH_KEYWORDS),
+                "interval_seconds": 60,
+                "summary_interval_seconds": 3600,
+                "chat_id": chat_id,
+            },
+        )
+    )
+    if not created.ok:
+        report["monitor_watch_error"] = created.text
+        return "FAIL"
+    watch_id = (created.structured or {}).get("watch_id", "")
+    report["monitor_watch_id"] = watch_id
+
+    messages_before_baseline = telegram.message_count
+
+    def _baseline_ready(records: list):
+        state = monitor_trace_state(records, watch_id)
+        return state["baseline_seen"] or None
+
+    _wait_trace(_baseline_ready, records_path, MONITOR_BASELINE_TIMEOUT_SECONDS)
+    baseline_state = monitor_trace_state(read_trace(records_path), watch_id)
+    baseline_messages = telegram.message_count - messages_before_baseline
+    baseline_ok = bool(baseline_state["baseline_seen"]) and baseline_messages == 0
+    report["monitor_baseline"] = {
+        "seen": bool(baseline_state["baseline_seen"]),
+        "telegram_messages": baseline_messages,
+        "incomplete_ids": baseline_state["incomplete_ids"],
+    }
+
+    asyncio.run(
+        a_client.call_tool(
+            "stop_search_task", {"task_id": empty_task, "chat_id": chat_id}
+        )
+    )
+    second = asyncio.run(
+        a_client.call_tool(
+            "schedule_search_task",
+            {"query": WATCH_QUERY, "interval_seconds": 3600, "chat_id": chat_id},
+        )
+    )
+    if not second.ok:
+        report["monitor_second_task_error"] = second.text
+        return "FAIL"
+    new_task = (second.structured or {}).get("task_id", "")
+    new_run = _wait_for_run(a_client, chat_id, new_task, ("ok",))
+    report["monitor_new_run"] = {
+        "status": new_run.get("status"),
+        "task_id": new_task,
+        "result_count": new_run.get("result_count"),
+    }
+
+    messages_before_send = telegram.message_count
+
+    def _delivery_ready(records: list):
+        state = monitor_trace_state(records, watch_id)
+        return state if state["success"] else None
+
+    _wait_trace(_delivery_ready, records_path, MONITOR_DELIVERY_TIMEOUT_SECONDS)
+    final_state = monitor_trace_state(read_trace(records_path), watch_id)
+    new_messages = telegram.messages[messages_before_send:]
+    url_ok = any(
+        any(url in (message or "") for url in RESULT_URLS)
+        for message in new_messages
+    )
+    report["monitor_delivery"] = {
+        "success": bool(final_state["success"]),
+        "sent_ids": final_state["sent_ids"],
+        "incomplete_ids": final_state["incomplete_ids"],
+        "telegram_messages": len(new_messages),
+        "telegram_url_ok": url_ok,
+    }
+
+    ok = baseline_ok and bool(final_state["success"]) and url_ok
+    if not ok:
+        print("  monitor: " + json.dumps(report["monitor_delivery"], ensure_ascii=False))
+    return "PASS" if ok else "FAIL"
+
+
 def run(ui: bool = False, scenario: str = "arithmetic") -> int:
     """Execute the live E2E scenario and return its exit code."""
     scenario = str(scenario or "arithmetic").strip().lower()
-    is_search = scenario == "search"
+    is_tavily = scenario == "tavily"
+    is_search = scenario in ("search", "tavily")
     is_tasks = scenario == "tasks"
     is_composition = scenario == "composition"
+    is_notifications = scenario == NOTIFICATIONS_SCENARIO
+    is_monitor = scenario in (NOTIFICATIONS_MONITOR_SCENARIO, "monitor")
+    is_notifier = is_notifications or is_monitor
     label = (
-        "live-e2e-search"
+        "live-e2e-tavily"
+        if is_tavily
+        else "live-e2e-search"
         if is_search
         else "live-e2e-tasks"
         if is_tasks
         else "live-e2e-composition"
         if is_composition
+        else "live-e2e-notifications-monitor"
+        if is_monitor
+        else "live-e2e-notifications"
+        if is_notifications
         else "live-e2e"
     )
     question = (
@@ -1742,10 +2589,14 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         if is_tasks
         else COMPOSITION_QUESTION
         if is_composition
+        else NOTIFICATIONS_SETUP_QUESTION
+        if is_notifications
         else QUESTION
     )
     chain = (
-        SEARCH_TRACE_CHAIN
+        None
+        if is_notifier
+        else SEARCH_TRACE_CHAIN
         if is_search
         else TASKS_SCHEDULE_CHAIN
         if is_tasks
@@ -1753,64 +2604,123 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         if is_composition
         else REQUIRED_TRACE_CHAIN
     )
+    expected_tool = chain[3][1].get("tool") if chain and len(chain) > 3 else ""
 
     mcp_port = int(os.environ.get("MCP_TEST_PORT") or DEFAULT_MCP_TEST_PORT)
     backend_port = int(os.environ.get("BACKEND_TEST_PORT") or DEFAULT_BACKEND_TEST_PORT)
+    notifier_port = int(
+        os.environ.get("MCP_NOTIFIER_TEST_PORT") or DEFAULT_NOTIFIER_TEST_PORT
+    )
 
     run_dir = create_run_dir(label)
     db_path = run_dir / "day18.sqlite3"
+    notifier_db_path = run_dir / "day20-notifier.sqlite3"
     report: dict = {
         "scenario": label,
         "question": question,
-        "expected_answer": "" if (is_search or is_tasks or is_composition) else EXPECTED_ANSWER,
-        "expected_tool": chain[3][1]["tool"],
+        "expected_answer": (
+            "" if (is_search or is_tasks or is_composition or is_notifier)
+            else EXPECTED_ANSWER
+        ),
+        "expected_tool": expected_tool,
         "ui_requested": bool(ui),
         "db": relative(db_path),
     }
+    if is_notifier:
+        report["notifier_db"] = relative(notifier_db_path)
 
     try:
-        require_free_ports([mcp_port, backend_port])
+        test_profile = load_model_profile(os.environ)
+        if is_tavily and not tavily_opt_in(os.environ):
+            raise PrerequisiteError("real Tavily test requires explicit opt-in")
     except PrerequisiteError as exc:
-        print(f"PREREQUISITE: {exc}")
-        write_report(run_dir, {**report, "status": "prerequisite", "reason": str(exc)})
+        print(f"LIVE_LLM_STATUS: BLOCKED - {exc}")
+        if is_tavily:
+            print(f"TAVILY_STATUS: BLOCKED - {exc}")
+        report.update({"status": "blocked", "reason": str(exc)})
+        _write_safe_report(run_dir, report)
+        print(f"RUN_DIR: {relative(run_dir)}")
         return EXIT_PREREQUISITE
 
-    config, model, launcher = ensure_local_model(run_dir, report)
-    model_ready = bool(model) and qa_local_llm.probe(
-        config.base_url, api_key=config.api_key
-    ) is not None
-    if not model_ready and not (is_tasks or is_composition):
-        print(
-            "LIVE_LLM_STATUS: BLOCKED - no local OpenAI-compatible model is "
-            "running and no launcher is configured "
-            "(compare qa/local.llm.example.json)."
+    ports = [mcp_port, backend_port]
+    if is_notifier:
+        ports.append(notifier_port)
+    try:
+        require_free_ports(ports)
+    except PrerequisiteError as exc:
+        print(f"PREREQUISITE: {exc}")
+        _write_safe_report(
+            run_dir, {**report, "status": "prerequisite", "reason": str(exc)}
         )
+        return EXIT_PREREQUISITE
+
+    config, model, launcher = ensure_local_model(run_dir, report, test_profile)
+    model_ready = bool(model) and (
+        (
+            os.environ.get("AI_TEST_MODEL_PARENT_READY") == "1"
+            or probe_model(test_profile)
+            if test_profile.kind == "remote"
+            else probe_model(test_profile)
+        )
+        if test_profile is not None
+        else qa_local_llm.probe(config.base_url, api_key=config.api_key) is not None
+    )
+    # The tasks, composition and notifications scenarios still produce UI
+    # statuses without a model; the monitor scenario cannot run without one.
+    if not model_ready and (
+        test_profile is not None
+        or not (is_tasks or is_composition or is_notifications)
+    ):
+        if test_profile is not None and test_profile.kind == "remote":
+            reason = "the selected remote test model is unavailable or returned no usable answer"
+        elif test_profile is not None:
+            reason = "the selected local test model is unavailable or does not match its GGUF"
+        else:
+            reason = (
+                "no local OpenAI-compatible model is running and no launcher is "
+                "configured (compare qa/local.llm.example.json)."
+            )
+        if is_monitor:
+            print(f"NOTIFICATIONS_MONITOR_LIVE_STATUS: BLOCKED - {reason}")
+            report["notifications_monitor_live_status"] = "BLOCKED"
+        else:
+            print(f"LIVE_LLM_STATUS: BLOCKED - {reason}")
+            report["live_llm_status"] = "BLOCKED"
+        if is_tavily:
+            print(f"TAVILY_STATUS: BLOCKED - {reason}")
         if launcher is not None:
             launcher.stop()
         report["status"] = "blocked"
-        report["live_llm_status"] = "BLOCKED"
-        write_report(run_dir, report)
+        _write_safe_report(run_dir, report, config.api_key)
         print(f"RUN_DIR: {relative(run_dir)}")
         return EXIT_PREREQUISITE
-    # The tasks and composition scenarios still produce their UI statuses
-    # without a model.
 
     report["model"] = model
     report["model_ready"] = model_ready
     mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+    notifier_url = f"http://127.0.0.1:{notifier_port}/mcp"
     backend_url = f"http://127.0.0.1:{backend_port}"
 
     mcp_process: ManagedProcess | None = None
+    notifier_process: ManagedProcess | None = None
     backend_process: ManagedProcess | None = None
     fake_search: FakeSearchServer | None = None
+    telegram: FakeTelegramServer | None = None
     cleanup: list = []
     exit_code = EXIT_FAIL
-    live_status = "BLOCKED" if (is_tasks or is_composition) and not model_ready else "FAIL"
+    live_status = (
+        "BLOCKED"
+        if (is_tasks or is_composition or is_notifications) and not model_ready
+        else "FAIL"
+    )
     ui_status = "NOT_REQUESTED"
     chats_ui_status = "NOT_REQUESTED"
     tasks_ui_status = "NOT_REQUESTED"
     reports_ui_status = "NOT_REQUESTED"
     composition_no_save_status = "NOT_REQUESTED"
+    notifier_ui_status = "NOT_REQUESTED"
+    notification_ui_status = "NOT_REQUESTED"
+    monitor_live_status = "NOT_REQUESTED"
 
     try:
         mcp_env = {
@@ -1822,10 +2732,13 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             "MCP_LOAD_DOTENV": "0",
             "AGENT_DB_PATH": str(db_path),
         }
-        if is_tasks:
-            # The scheduler must run soon so the summary turn has a stored run.
+        if is_tasks or is_notifier:
+            # The scheduler must run soon so a stored run exists in time.
             mcp_env["MCP_TASK_TICK_SECONDS"] = "0.5"
-        if is_search or is_tasks or is_composition:
+        if is_tavily:
+            mcp_env["MCP_SEARCH_API_KEY_ENV"] = "TAVILY_API_KEY"
+            mcp_env["TAVILY_API_KEY"] = str(os.environ["AI_TEST_TAVILY_API_KEY"])
+        elif is_search or is_tasks or is_composition or is_notifier:
             fake_search = FakeSearchServer(0).start()
             report["fake_search"] = {"loopback_port": fake_search.port}
             # The key lives only in the MCP child process; the harness keeps the
@@ -1846,39 +2759,94 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             cwd=PROJECT_DIR,
             env=sanitized_env(mcp_env),
             log_path=run_dir / "mcp_server.log",
+            redact_values=(str(os.environ["AI_TEST_TAVILY_API_KEY"]),)
+            if is_tavily
+            else (),
         ).start()
         cleanup.append(mcp_process)
         if not wait_tcp("127.0.0.1", mcp_port, MCP_READY_TIMEOUT_SECONDS, mcp_process):
             print("LIVE_LLM_STATUS: FAIL - the MCP server did not start")
             return EXIT_FAIL
 
+        if is_notifier:
+            # Server B and its loopback Telegram fake: NOTIFIER_LOAD_DOTENV=0 and
+            # a fake token keep the child away from a local .env and the real
+            # service; every sendMessage lands in this in-process fake.
+            telegram = FakeTelegramServer(0).start()
+            report["fake_telegram"] = {"loopback_port": telegram.port}
+            notifier_process = ManagedProcess(
+                name="notifier-server",
+                args=python_module("notifier_server"),
+                cwd=PROJECT_DIR,
+                env=sanitized_env(
+                    {
+                        "MCP_NOTIFIER_HOST": "127.0.0.1",
+                        "MCP_NOTIFIER_PORT": str(notifier_port),
+                        "NOTIFIER_LOAD_DOTENV": "0",
+                        "TELEGRAM_BOT_TOKEN": "live-e2e-fake-token",
+                        "TELEGRAM_CHAT_ID": "live-e2e-fake-chat",
+                        "NOTIFIER_TELEGRAM_API_BASE_URL": telegram.base_url,
+                        "NOTIFIER_DB_PATH": str(notifier_db_path),
+                    }
+                ),
+                log_path=run_dir / "notifier_server.log",
+            ).start()
+            cleanup.append(notifier_process)
+            if not wait_tcp(
+                "127.0.0.1", notifier_port, MCP_READY_TIMEOUT_SECONDS, notifier_process
+            ):
+                print("LIVE_LLM_STATUS: FAIL - the notifier server did not start")
+                return EXIT_FAIL
+            if not _notifier_ready(notifier_url, MCP_READY_TIMEOUT_SECONDS):
+                print(
+                    "LIVE_LLM_STATUS: FAIL - the notifier server did not complete "
+                    "the expected handshake"
+                )
+                return EXIT_FAIL
+            report["notifier_handshake"] = {"server_name": NOTIFIER_SERVER_NAME}
+
+        backend_env = {
+            "BACKEND_HOST": "127.0.0.1",
+            "BACKEND_PORT": str(backend_port),
+            "MCP_SERVER_URL": mcp_url,
+            "AGENT_MODEL_BASE_URL": config.base_url,
+            "AGENT_MODEL_NAME": model,
+            "AGENT_MODEL_API_KEY_ENV": "LOCAL_LLM_API_KEY",
+            "LOCAL_LLM_API_KEY": config.api_key,
+            "AGENT_LOAD_DOTENV": "0",
+            "AGENT_MODEL_TIMEOUT_SECONDS": "1800",
+            "AGENT_TRACE_PATH": str(run_dir / "trace.jsonl"),
+            "AGENT_LOG_LEVEL": "INFO",
+            "AGENT_DB_PATH": str(db_path),
+        }
+        if is_notifier:
+            backend_env["MCP_NOTIFIER_URL"] = notifier_url
+            if is_notifications:
+                # The chat scenario owns the trace; the background monitor stays
+                # off so it cannot race the explicit turns.
+                backend_env["NOTIFIER_MONITOR_ENABLED"] = "0"
+            else:
+                backend_env["NOTIFIER_MONITOR_TICK_SECONDS"] = "1"
+
         backend_process = ManagedProcess(
             name="backend",
             args=python_module("agent"),
             cwd=PROJECT_DIR,
-            env=sanitized_env(
-                {
-                    "BACKEND_HOST": "127.0.0.1",
-                    "BACKEND_PORT": str(backend_port),
-                    "MCP_SERVER_URL": mcp_url,
-                    "AGENT_MODEL_BASE_URL": config.base_url,
-                    "AGENT_MODEL_NAME": model,
-                    "AGENT_MODEL_API_KEY_ENV": "LOCAL_LLM_API_KEY",
-                    "LOCAL_LLM_API_KEY": config.api_key,
-                    "AGENT_MODEL_TIMEOUT_SECONDS": "1800",
-                    "AGENT_TRACE_PATH": str(run_dir / "trace.jsonl"),
-                    "AGENT_LOG_LEVEL": "INFO",
-                    "AGENT_DB_PATH": str(db_path),
-                }
-            ),
+            env=sanitized_env(backend_env),
             log_path=run_dir / "backend.log",
+            redact_values=(config.api_key,),
         ).start()
         cleanup.append(backend_process)
         if not wait_http(
             f"{backend_url}/api/health", BACKEND_READY_TIMEOUT_SECONDS, backend_process
         ):
             print("LIVE_LLM_STATUS: FAIL - the backend did not become ready")
-            print((backend_process.tail_log() or "")[-2000:])
+            print(
+                _redact_test_secrets(
+                    (backend_process.tail_log() or "")[-2000:],
+                    test_profile.api_key if test_profile is not None else "",
+                )
+            )
             return EXIT_FAIL
 
         if not _mcp_ready(mcp_url, MCP_READY_TIMEOUT_SECONDS):
@@ -1901,20 +2869,52 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             report["composition_no_save_live_status"] = composition_no_save_status
             print(f"COMPOSITION_LIVE_STATUS: {live_status}")
             print(f"COMPOSITION_NO_SAVE_LIVE_STATUS: {composition_no_save_status}")
+        elif is_notifications:
+            live_status = _run_notifications_turns(
+                backend_url,
+                mcp_url,
+                notifier_url,
+                records_path,
+                run_dir,
+                report,
+                model_ready,
+                telegram,
+            )
+            print(f"NOTIFICATIONS_LIVE_STATUS: {live_status}")
+            report["notifications_live_status"] = live_status
+        elif is_monitor:
+            monitor_live_status = _run_notifications_monitor(
+                backend_url,
+                mcp_url,
+                notifier_url,
+                records_path,
+                run_dir,
+                report,
+                model_ready,
+                telegram,
+            )
+            live_status = monitor_live_status
+            print(f"NOTIFICATIONS_MONITOR_LIVE_STATUS: {monitor_live_status}")
+            report["notifications_monitor_live_status"] = monitor_live_status
         else:
             events = collect_sse(
                 f"{backend_url}/api/chat/stream",
                 {"chat_id": _create_chat(backend_url), "message": question},
                 timeout_s=1800.0,
             )
+            records = read_trace(records_path)
             sse = (
-                verify_search_sse(events, RESULT_URLS)
+                verify_real_search_sse(events, records)
+                if is_tavily
+                else verify_search_sse(events, RESULT_URLS)
                 if is_search
                 else verify_sse(events)
             )
             report["sse"] = sse
-
-            records = read_trace(records_path)
+            if is_tavily:
+                report["tavily_search_result_count"] = sse["search_result_count"]
+                report["tavily_answer_urls"] = sse["answer_urls"]
+                report["tavily_source_url_match"] = sse["source_url_match"]
             trace = verify_trace(records, None, chain)
             report["trace"] = trace
             report["trace_events"] = [
@@ -1931,7 +2931,9 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
                     str(data.get("text") or "") for name, data in events if name == "delta"
                 )
                 key_isolation = key_is_isolated(
-                    FAKE_API_KEY,
+                    str(os.environ["AI_TEST_TAVILY_API_KEY"])
+                    if is_tavily
+                    else FAKE_API_KEY,
                     (
                         sse_text,
                         _read_text(records_path),
@@ -1949,13 +2951,28 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             live_status = "PASS" if ok else "FAIL"
             report["live_llm_status"] = live_status
             print(f"LIVE_LLM_STATUS: {live_status}")
+            if is_tavily:
+                tavily_status = (
+                    live_status if sse["search_result_count"] > 0 else "BLOCKED"
+                )
+                report["tavily_status"] = tavily_status
+                print(f"TAVILY_STATUS: {tavily_status}")
+                if tavily_status == "BLOCKED":
+                    live_status = "BLOCKED"
+                    report["live_llm_status"] = live_status
             if not ok:
                 print("  sse: " + json.dumps(sse, ensure_ascii=False))
                 print("  trace: " + json.dumps(trace, ensure_ascii=False))
                 print("  tools: " + json.dumps(tools_listed, ensure_ascii=False))
                 if key_isolation is False:
                     print("  key_isolation: FAIL - the search key leaked into an artifact")
-                print((backend_process.tail_log() or "")[-2000:])
+                print(
+                    _redact_test_secrets(
+                        (backend_process.tail_log() or "")[-2000:],
+                        test_profile.api_key if test_profile is not None else "",
+                        os.environ.get("AI_TEST_TAVILY_API_KEY") if is_tavily else "",
+                    )
+                )
 
         if ui:
             if is_tasks:
@@ -1977,12 +2994,52 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
                 )
                 print(f"REPORTS_UI_STATUS: {reports_ui_status}")
                 report["reports_ui_status"] = reports_ui_status
+            elif is_notifications:
+                notifier_ui_status = run_ui_notifier_servers_e2e(
+                    backend_url, run_dir, report
+                )
+                print(f"NOTIFIER_SERVERS_UI_STATUS: {notifier_ui_status}")
+                report["notifier_servers_ui_status"] = notifier_ui_status
+                if model_ready:
+                    notification_ui_status = run_ui_notification_e2e(
+                        backend_url,
+                        run_dir,
+                        report,
+                        report.get("notifications_chat_id"),
+                    )
+                else:
+                    notification_ui_status = "BLOCKED"
+                print(f"NOTIFICATION_UI_STATUS: {notification_ui_status}")
+                report["notification_ui_status"] = notification_ui_status
             else:
                 ui_status = run_ui_e2e(backend_url, run_dir, report)
                 print(f"UI_E2E_STATUS: {ui_status}")
                 report["ui_e2e_status"] = ui_status
 
-        if live_status == "PASS":
+        if test_profile is not None:
+            model_key_isolation = key_is_isolated(
+                test_profile.api_key,
+                (
+                    _read_text(run_dir / "trace.jsonl"),
+                    _read_text(run_dir / "backend.log"),
+                    _read_text(run_dir / "mcp_server.log"),
+                    _read_text(run_dir / "notifier_server.log"),
+                ),
+            )
+            report["model_key_isolation"] = model_key_isolation
+            if not model_key_isolation:
+                print("MODEL_KEY_ISOLATION: FAIL")
+                live_status = "FAIL"
+
+        if is_monitor:
+            exit_code = (
+                EXIT_OK
+                if monitor_live_status == "PASS"
+                else EXIT_PREREQUISITE
+                if monitor_live_status == "BLOCKED"
+                else EXIT_FAIL
+            )
+        elif live_status == "PASS":
             exit_code = EXIT_OK
         elif live_status == "BLOCKED":
             exit_code = EXIT_PREREQUISITE
@@ -1994,6 +3051,13 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
             exit_code = EXIT_FAIL
         if is_composition and ui and reports_ui_status == "FAIL":
             exit_code = EXIT_FAIL
+        if is_notifications and ui and model_ready and "FAIL" in (
+            notifier_ui_status,
+            notification_ui_status,
+        ):
+            exit_code = EXIT_FAIL
+        if test_profile is not None and not report.get("model_key_isolation", True):
+            exit_code = EXIT_FAIL
         report["status"] = (
             "pass"
             if exit_code == EXIT_OK
@@ -2003,15 +3067,22 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         )
         return exit_code
     except Exception as exc:  # noqa: BLE001 - the run reports, never crashes
-        print(f"LIVE_LLM_STATUS: FAIL - {type(exc).__name__}: {exc}")
+        safe_error = _redact_test_secrets(
+            f"{type(exc).__name__}: {exc}",
+            test_profile.api_key if test_profile is not None else "",
+            os.environ.get("AI_TEST_TAVILY_API_KEY") if is_tavily else "",
+        )
+        print(f"LIVE_LLM_STATUS: FAIL - {safe_error}")
         report["live_llm_status"] = "FAIL"
-        report["error"] = f"{type(exc).__name__}: {exc}"
+        report["error"] = safe_error
         return EXIT_FAIL
     finally:
         for process in reversed(cleanup):
             report.setdefault("stopped", []).append(process.stop())
         if fake_search is not None:
             fake_search.stop()
+        if telegram is not None:
+            telegram.stop()
         if launcher is not None:
             report["local_llm"]["stop"] = launcher.stop()
         report.setdefault("live_llm_status", live_status)
@@ -2023,7 +3094,13 @@ def run(ui: bool = False, scenario: str = "arithmetic") -> int:
         if is_composition:
             report.setdefault("composition_live_status", live_status)
             report.setdefault("composition_no_save_live_status", composition_no_save_status)
-        write_report(run_dir, report)
+        if is_notifications:
+            report.setdefault("notifications_live_status", live_status)
+            report.setdefault("notifier_servers_ui_status", notifier_ui_status)
+            report.setdefault("notification_ui_status", notification_ui_status)
+        if is_monitor:
+            report.setdefault("notifications_monitor_live_status", monitor_live_status)
+        _write_safe_report(run_dir, report, config.api_key)
         print(f"RUN_DIR: {relative(run_dir)}")
 
 
@@ -2033,7 +3110,15 @@ def main(argv=None) -> int:
     parser.add_argument("--ui", action="store_true", help="also run the UI E2E")
     parser.add_argument(
         "--scenario",
-        choices=("arithmetic", "search", "tasks", "composition"),
+        choices=(
+            "arithmetic",
+            "search",
+            "tasks",
+            "composition",
+            "tavily",
+            NOTIFICATIONS_SCENARIO,
+            NOTIFICATIONS_MONITOR_SCENARIO,
+        ),
         default=str(os.environ.get("LIVE_E2E_SCENARIO") or "arithmetic"),
         help="which live scenario to run (default: arithmetic)",
     )

@@ -228,6 +228,10 @@ class DegradedBackendTest(unittest.TestCase):
                     "BACKEND_HOST": "127.0.0.1",
                     "BACKEND_PORT": str(port),
                     "MCP_SERVER_URL": mcp_url,
+                    # A degraded backend exercises the legacy A-only path: an empty
+                    # notifier URL keeps server B unconfigured instead of pointing
+                    # the slot at whatever listens on the default port.
+                    "MCP_NOTIFIER_URL": "",
                     "AGENT_MODEL_BASE_URL": model_url,
                     "AGENT_MODEL_NAME": MODEL_ID,
                     "AGENT_MODEL_API_KEY_ENV": "LOCAL_LLM_API_KEY",

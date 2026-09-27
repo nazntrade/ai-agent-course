@@ -1,14 +1,17 @@
-"""Live MCP smoke test: real MCP server, real backend, real HTTP transport.
+"""Live MCP smoke test: two real MCP servers, real backend, real HTTP transport.
 
 Everything here is a real process or a real HTTP call:
 
-* the MCP server runs as its own process on a private test port;
+* server A (``mcp_server``) runs as its own process on a private test port;
+* server B (``notifier_server``) runs as its own process on a second test port;
 * a deterministic model stub stands in for the model (documented as a double);
-* the backend runs as its own process and talks to the real MCP server;
+* the backend runs as its own process and talks to both servers through the hub;
 * the discovery CLI connects with the real official SDK over Streamable HTTP;
 * the integration test modules then exercise the same live endpoints.
 
-No mock replaces the MCP transport. Only processes started here are stopped.
+The notifier's only network boundary (Telegram) is replaced by a loopback fake,
+as is the paid search API of server A; neither leaves ``127.0.0.1``. No mock
+replaces the MCP transport. Only processes started here are stopped.
 Exit codes: 0 PASS, 1 FAIL, 2 prerequisite.
 """
 
@@ -45,6 +48,7 @@ ensure_paths()
 
 from agent.mcp_adapter import inspect_tools  # noqa: E402
 from tests.support.fake_search import FAKE_API_KEY, FakeSearchServer  # noqa: E402
+from tests.support.fake_telegram import FakeTelegramServer  # noqa: E402
 from tests.support.stub_model import MODEL_ID, StubModelServer  # noqa: E402
 
 try:
@@ -57,10 +61,13 @@ EXIT_FAIL = 1
 EXIT_PREREQUISITE = 2
 
 DEFAULT_MCP_TEST_PORT = 8766
+DEFAULT_NOTIFIER_TEST_PORT = 8768
 DEFAULT_BACKEND_TEST_PORT = 8601
 DEFAULT_STUB_PORT = 8099
 # A loopback port that is deliberately left unused, to prove the unreachable path.
 DEFAULT_UNREACHABLE_PORT = 8790
+
+NOTIFIER_SERVER_NAME = "day-20-notifier"
 
 MCP_READY_TIMEOUT_SECONDS = 45.0
 BACKEND_READY_TIMEOUT_SECONDS = 60.0
@@ -69,10 +76,13 @@ NO_TOOL_CHAT_TIMEOUT_SECONDS = 60.0
 
 # One probe (mode="auto") sends `server/discover` and `tools/list`, so one MCP
 # session is two outgoing POST records in the backend log. The duplicate-session
-# regression produced four; this constant is checked against the real log.
+# regression produced four for a single server; the day-20 hub probes both
+# configured servers, so a single no-tool chat request now opens two sessions and
+# records `2 x servers` POSTs. The constant is checked against the real log.
 # The MCP SDK v2 uses httpx2, whose INFO log line looks like:
 #   INFO:httpx2:HTTP Request: POST http://127.0.0.1:8766/mcp "HTTP/1.1 200 OK"
-EXPECTED_MCP_POSTS_PER_PROBE = 2
+CONFIGURED_MCP_SERVERS = 2
+EXPECTED_MCP_POSTS_PER_PROBE = 2 * CONFIGURED_MCP_SERVERS
 # The regression probe window must not overlap any other MCP traffic.
 NO_TOOL_MESSAGE = "Hello there"
 
@@ -86,6 +96,29 @@ def _mcp_ready(url: str, timeout: float) -> bool:
         except Exception:  # noqa: BLE001 - readiness polling only
             status = None
         if status is not None and status.connected:
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def _notifier_ready(url: str, timeout: float) -> bool:
+    """Poll server B and confirm it is the notifier, not a foreign process.
+
+    A loopback port may be occupied by an unrelated service; the handshake also
+    checks the advertised server name so the smoke run never accepts a stranger
+    as server B.
+    """
+    deadline = time.monotonic() + max(float(timeout), 1.0)
+    while time.monotonic() < deadline:
+        try:
+            status, _tools = asyncio.run(inspect_tools(url, connect_timeout_s=3.0))
+        except Exception:  # noqa: BLE001 - readiness polling only
+            status = None
+        if (
+            status is not None
+            and status.connected
+            and status.server_name == NOTIFIER_SERVER_NAME
+        ):
             return True
         time.sleep(0.4)
     return False
@@ -218,6 +251,11 @@ def _check_mcp_probe_count(backend_url: str, process: ManagedProcess, report: di
 def run() -> int:
     """Execute the smoke scenario and return its exit code."""
     mcp_port = int(os.environ.get("MCP_TEST_PORT") or DEFAULT_MCP_TEST_PORT)
+    # Smoke sets MCP_TEST_PORT for server A; server B gets its own port so the
+    # two real MCP processes never collide (the .bat files are not changed).
+    notifier_port = int(
+        os.environ.get("MCP_NOTIFIER_TEST_PORT") or DEFAULT_NOTIFIER_TEST_PORT
+    )
     backend_port = int(
         os.environ.get("BACKEND_TEST_PORT") or DEFAULT_BACKEND_TEST_PORT
     )
@@ -228,31 +266,37 @@ def run() -> int:
 
     run_dir = create_run_dir("live-mcp")
     db_path = run_dir / "day18.sqlite3"
+    notifier_db_path = run_dir / "day20-notifier.sqlite3"
     report: dict = {
         "scenario": "live-mcp-smoke",
         "ports": {
             "mcp": mcp_port,
+            "notifier": notifier_port,
             "backend": backend_port,
             "stub_model": stub_port,
         },
         "db": relative(db_path),
+        "notifier_db": relative(notifier_db_path),
     }
 
     try:
-        require_free_ports([mcp_port, backend_port, stub_port])
+        require_free_ports([mcp_port, notifier_port, backend_port, stub_port])
     except PrerequisiteError as exc:
         print(f"PREREQUISITE: {exc}")
         write_report(run_dir, {**report, "status": "prerequisite", "reason": str(exc)})
         return EXIT_PREREQUISITE
 
     mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+    notifier_url = f"http://127.0.0.1:{notifier_port}/mcp"
     backend_url = f"http://127.0.0.1:{backend_port}"
     unreachable_url = f"http://127.0.0.1:{unreachable_port}/mcp"
 
     mcp_process: ManagedProcess | None = None
+    notifier_process: ManagedProcess | None = None
     backend_process: ManagedProcess | None = None
     stub: StubModelServer | None = None
     search_server: FakeSearchServer | None = None
+    telegram: FakeTelegramServer | None = None
     cleanup: list = []
     exit_code = EXIT_FAIL
 
@@ -300,6 +344,43 @@ def run() -> int:
             return EXIT_FAIL
         report["mcp_handshake"] = True
 
+        # Server B (notifier) and its loopback Telegram fake. NOTIFIER_LOAD_DOTENV=0
+        # and a fake token keep the child away from a local .env and the real API;
+        # every sendMessage lands in this in-process fake over loopback only.
+        telegram = FakeTelegramServer(0).start()
+        report["fake_telegram"] = {"loopback_port": telegram.port}
+
+        notifier_process = ManagedProcess(
+            name="notifier-server",
+            args=python_module("notifier_server"),
+            cwd=PROJECT_DIR,
+            env=sanitized_env(
+                {
+                    "MCP_NOTIFIER_HOST": "127.0.0.1",
+                    "MCP_NOTIFIER_PORT": str(notifier_port),
+                    "NOTIFIER_LOAD_DOTENV": "0",
+                    "TELEGRAM_BOT_TOKEN": "live-smoke-fake-token",
+                    "TELEGRAM_CHAT_ID": "live-smoke-fake-chat",
+                    "NOTIFIER_TELEGRAM_API_BASE_URL": telegram.base_url,
+                    "NOTIFIER_DB_PATH": str(notifier_db_path),
+                }
+            ),
+            log_path=run_dir / "notifier_server.log",
+        ).start()
+        cleanup.append(notifier_process)
+
+        if not wait_tcp("127.0.0.1", notifier_port, MCP_READY_TIMEOUT_SECONDS, notifier_process):
+            print("FAIL: the notifier server did not start")
+            print(_tail(notifier_process.tail_log()))
+            report["notifier_started"] = False
+            return EXIT_FAIL
+        if not _notifier_ready(notifier_url, MCP_READY_TIMEOUT_SECONDS):
+            print("FAIL: the notifier server did not complete the expected handshake")
+            print(_tail(notifier_process.tail_log()))
+            report["notifier_handshake"] = False
+            return EXIT_FAIL
+        report["notifier_handshake"] = {"server_name": NOTIFIER_SERVER_NAME}
+
         backend_process = ManagedProcess(
             name="backend",
             args=python_module("agent"),
@@ -311,10 +392,15 @@ def run() -> int:
                     "MCP_SERVER_URL": mcp_url,
                     "MCP_SERVER_HOST": "127.0.0.1",
                     "MCP_SERVER_PORT": str(mcp_port),
+                    "MCP_NOTIFIER_URL": notifier_url,
+                    # The background monitor must not add MCP traffic inside the
+                    # probe-regression window or race the explicit checks.
+                    "NOTIFIER_MONITOR_ENABLED": "0",
                     "AGENT_MODEL_BASE_URL": stub.base_url,
                     "AGENT_MODEL_NAME": MODEL_ID,
                     "AGENT_MODEL_API_KEY_ENV": "LOCAL_LLM_API_KEY",
                     "LOCAL_LLM_API_KEY": "local-e2e",
+                    "AGENT_LOAD_DOTENV": "0",
                     "AGENT_MODEL_TIMEOUT_SECONDS": "30",
                     "AGENT_TRACE_PATH": str(run_dir / "trace.jsonl"),
                     "AGENT_LOG_LEVEL": "INFO",
@@ -375,10 +461,12 @@ def run() -> int:
             {
                 "RUN_LIVE_MCP": "1",
                 "MCP_TEST_URL": mcp_url,
+                "NOTIFIER_TEST_URL": notifier_url,
                 "BACKEND_TEST_URL": backend_url,
                 "MCP_UNREACHABLE_URL": unreachable_url,
                 "TASKS_TEST_DB": str(db_path),
                 "FAKE_SEARCH_URL": search_server.base_url,
+                "FAKE_TELEGRAM_URL": telegram.base_url,
             }
         )
 
@@ -442,6 +530,18 @@ def run() -> int:
             + ("PASS" if reports_tests.returncode == 0 else "FAIL")
         )
 
+        notifier_tests = _run_unittest("tests.integration.test_notifier_live", test_env)
+        print("--- integration: notifier ---")
+        print(_tail(notifier_tests.stdout or notifier_tests.stderr))
+        report["notifier_integration"] = {
+            "ok": notifier_tests.returncode == 0,
+            "exit_code": notifier_tests.returncode,
+        }
+        print(
+            "NOTIFIER_INTEGRATION_STATUS: "
+            + ("PASS" if notifier_tests.returncode == 0 else "FAIL")
+        )
+
         # The restart checks run their own processes on private ports, so the
         # running smoke processes do not interfere.
         restart = _run(
@@ -485,14 +585,34 @@ def run() -> int:
         }
         print(f"REPORTS_RESTART_STATUS: {reports_restart_status}")
 
+        notifier_restart = _run(
+            [sys.executable, str(PROJECT_DIR / "harness" / "notifier_restart.py")],
+            sanitized_env(),
+            INTEGRATION_TIMEOUT_SECONDS,
+        )
+        print("--- restart: notifier state and no backfill ---")
+        print(_tail(notifier_restart.stdout or notifier_restart.stderr))
+        notifier_restart_status = _status_from_output(
+            notifier_restart.stdout, "NOTIFIER_RESTART_STATUS"
+        )
+        if notifier_restart.returncode == 2:
+            notifier_restart_status = "BLOCKED"
+        report["notifier_restart"] = {
+            "exit_code": notifier_restart.returncode,
+            "notifier_restart_status": notifier_restart_status,
+        }
+        print(f"NOTIFIER_RESTART_STATUS: {notifier_restart_status}")
+
         ok = (
             mcp_tests.returncode == 0
             and backend_tests.returncode == 0
             and search_tests.returncode == 0
             and tasks_tests.returncode == 0
             and reports_tests.returncode == 0
+            and notifier_tests.returncode == 0
             and restart.returncode == 0
             and reports_restart.returncode == 0
+            and notifier_restart.returncode == 0
         )
         exit_code = EXIT_OK if ok else EXIT_FAIL
         return exit_code
@@ -513,8 +633,11 @@ def run() -> int:
             stub.stop()
         if search_server is not None:
             search_server.stop()
+        if telegram is not None:
+            telegram.stop()
         report["ports_released"] = {
             "mcp": qa_port_is_free(mcp_port, "127.0.0.1"),
+            "notifier": qa_port_is_free(notifier_port, "127.0.0.1"),
             "backend": qa_port_is_free(backend_port, "127.0.0.1"),
         }
         report["status"] = "pass" if exit_code == EXIT_OK else "fail"

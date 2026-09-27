@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import os
+import io
 import socket
 import subprocess
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
+
+import httpx
+
+from harness import acceptance, live_e2e
 
 from harness.live_e2e import (
     COMPOSITION_CHAIN,
@@ -17,16 +27,27 @@ from harness.live_e2e import (
     TASKS_SCHEDULE_CHAIN,
     TASKS_SUMMARY_CHAIN,
     key_is_isolated,
+    monitor_trace_state,
+    search_result_urls,
     verify_composition_sse,
     verify_no_save_sse,
+    verify_notifications_delivery,
+    verify_real_search_sse,
     verify_search_sse,
+    verify_server_chain,
+    verify_servers_connected,
+    verify_servers_sse,
     verify_task_schedule_sse,
     verify_task_summary_sse,
     verify_tool_absent,
     verify_tools_listed,
     verify_trace,
 )
-from harness.live_mcp import _status_from_output
+from harness.live_mcp import (
+    CONFIGURED_MCP_SERVERS,
+    EXPECTED_MCP_POSTS_PER_PROBE,
+    _status_from_output,
+)
 from harness.mcp_unavailable_e2e import (
     duplicate_sentences,
     error_text_problems,
@@ -34,12 +55,22 @@ from harness.mcp_unavailable_e2e import (
 )
 from harness.qa_bridge import PROJECT_DIR
 from harness.processes import (
+    ManagedProcess,
     PrerequisiteError,
     python_module,
     require_free_ports,
     sanitized_env,
 )
 from harness.run_dir import create_run_dir, relative, write_report
+from harness.test_profile import (
+    TestModelProfile,
+    load_model_profile,
+    local_model_id,
+    probe_model,
+    redact_report,
+    tavily_opt_in,
+)
+from tests.support.fake_telegram import FakeTelegramServer, fetch_stats
 
 
 def _trace_records(tool_completed: dict | None = None) -> list:
@@ -92,6 +123,410 @@ class SanitizedEnvTest(unittest.TestCase):
         env = sanitized_env({"MAYBE": None})
         self.assertNotIn("MAYBE", env)
 
+    def test_managed_process_redacts_before_log_write(self):
+        fake = Mock()
+        fake.pid = 101
+        fake.poll.return_value = 0
+        fake.stdout = io.BytesIO(b"before fake-unit-secret after\n")
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "backend.log"
+            process = ManagedProcess(
+                name="backend",
+                args=["unused"],
+                cwd=PROJECT_DIR,
+                env={"SECRET": "fake-unit-secret"},
+                log_path=log_path,
+                redact_values=("fake-unit-secret",),
+            )
+            with patch("harness.processes.subprocess.Popen", return_value=fake) as popen:
+                process.start()
+                stopped = process.stop()
+            saved = log_path.read_text(encoding="utf-8")
+        self.assertEqual(popen.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertNotIn("fake-unit-secret", saved)
+        self.assertIn("[redacted]", saved)
+        self.assertTrue(stopped["redaction_ok"])
+        self.assertNotIn("fake-unit-secret", repr(process))
+
+
+class LocalTestProfileTest(unittest.TestCase):
+    """LTP-1/LTP-2: a selected model never falls back silently."""
+
+    @staticmethod
+    def remote_env() -> dict:
+        return {
+            "AI_TEST_MODEL_KIND": "remote",
+            "AI_TEST_MODEL_BASE_URL": "https://models.example.test/v1",
+            "AI_TEST_MODEL_NAME": "chosen-model",
+            "AI_TEST_MODEL_API_KEY": "fake-unit-key",
+        }
+
+    def test_any_partial_profile_is_blocked(self):
+        for key in self.remote_env():
+            with self.subTest(missing=key):
+                values = self.remote_env()
+                values[key] = ""
+                with self.assertRaises(PrerequisiteError):
+                    load_model_profile(values)
+
+    def test_unselected_model_keeps_existing_path(self):
+        self.assertIsNone(load_model_profile({}))
+
+    def test_local_url_must_be_loopback(self):
+        values = self.remote_env()
+        values["AI_TEST_MODEL_KIND"] = "local"
+        with self.assertRaises(PrerequisiteError):
+            load_model_profile(values)
+
+    @staticmethod
+    def local_env() -> dict:
+        path = "D:\\Models\\chosen.gguf"
+        return {
+            "AI_TEST_MODEL_KIND": "local",
+            "AI_TEST_MODEL_BASE_URL": "http://127.0.0.1:10999/v1",
+            "AI_TEST_MODEL_NAME": "local",
+            "AI_TEST_MODEL_API_KEY": "fake-unit-key",
+            "AI_TEST_MODEL_ID": local_model_id(path),
+            "AI_TEST_MODEL_PATH": path,
+        }
+
+    def test_local_identity_is_required_and_not_exposed_in_report(self):
+        values = self.local_env()
+        for key in ("AI_TEST_MODEL_ID", "AI_TEST_MODEL_PATH"):
+            with self.subTest(missing=key):
+                partial = dict(values)
+                partial.pop(key)
+                with self.assertRaises(PrerequisiteError):
+                    load_model_profile(partial)
+        profile = load_model_profile(values)
+        self.assertEqual(profile.public_details()["id"], values["AI_TEST_MODEL_ID"])
+        self.assertNotIn("D:\\Models", repr(profile))
+        self.assertNotIn("model_path", profile.public_details())
+
+    def test_local_id_must_match_path_hash(self):
+        values = self.local_env()
+        values["AI_TEST_MODEL_ID"] = "0" * 16
+        with self.assertRaises(PrerequisiteError):
+            load_model_profile(values)
+
+    def test_forbidden_model_drives_are_rejected_without_opening_them(self):
+        for drive in ("E:", "F:"):
+            with self.subTest(drive=drive):
+                with self.assertRaises(PrerequisiteError):
+                    local_model_id(drive + "\\Models\\chosen.gguf")
+
+    def test_local_props_path_mismatch_is_blocked(self):
+        profile = load_model_profile(self.local_env())
+        client = Mock()
+        client.get.return_value.json.return_value = {
+            "model_path": "D:\\Models\\different.gguf"
+        }
+        context = MagicMock()
+        context.__enter__.return_value = client
+        with (
+            patch("harness.test_profile.qa_local_llm.probe", return_value=["local"]),
+            patch("harness.test_profile.httpx.Client", return_value=context),
+        ):
+            self.assertFalse(probe_model(profile))
+        self.assertEqual(
+            client.get.call_args.args[0], "http://127.0.0.1:10999/props"
+        )
+
+    def test_local_props_matching_path_is_accepted(self):
+        profile = load_model_profile(self.local_env())
+        client = Mock()
+        client.get.return_value.json.return_value = {
+            "model_path": "d:/models/chosen.gguf"
+        }
+        context = MagicMock()
+        context.__enter__.return_value = client
+        with (
+            patch("harness.test_profile.qa_local_llm.probe", return_value=["local"]),
+            patch("harness.test_profile.httpx.Client", return_value=context),
+        ):
+            self.assertTrue(probe_model(profile))
+
+    def test_nested_report_scrubs_keys_and_model_path(self):
+        secret = 'fake"\\key'
+        path = "D:\\Models\\chosen.gguf"
+        report = {
+            "error": f"provider refused {secret}",
+            "sse": [{"detail": {"text": f"header={secret}; path={path}"}}],
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_TEST_MODEL_API_KEY": secret,
+                    "AI_TEST_MODEL_PATH": path,
+                    "AI_TEST_TAVILY_API_KEY": "fake-search-secret",
+                },
+            ),
+            patch("harness.live_e2e.write_report") as saved,
+        ):
+            live_e2e._write_safe_report(PROJECT_DIR, report)
+        persisted = saved.call_args.args[1]
+        self.assertEqual(persisted["error"], "provider refused [redacted]")
+        self.assertNotIn(secret, persisted["sse"][0]["detail"]["text"])
+        self.assertNotIn(path, persisted["sse"][0]["detail"]["text"])
+        self.assertIn("[redacted]", persisted["sse"][0]["detail"]["text"])
+        self.assertIn(secret, report["error"])
+        self.assertEqual(redact_report([secret], [secret]), ["[redacted]"])
+
+    def test_acceptance_redacts_nested_report_before_write(self):
+        secret = "fake-model-secret"
+
+        def completed_steps(*args):
+            args[2]["steps"]["provider"] = {"error": [f"bad {secret}"]}
+            return 0
+
+        with (
+            patch.dict(os.environ, {"AI_TEST_MODEL_API_KEY": secret}),
+            patch("harness.acceptance.create_run_dir", return_value=PROJECT_DIR),
+            patch("harness.acceptance.write_report") as saved,
+            patch("harness.acceptance.load_model_profile", return_value=None),
+            patch("harness.acceptance.tavily_opt_in", return_value=False),
+            patch("harness.acceptance._run_steps", side_effect=completed_steps),
+        ):
+            self.assertEqual(acceptance.run(ui=False, live=False), 0)
+        self.assertEqual(
+            saved.call_args.args[1]["steps"]["provider"]["error"],
+            ["bad [redacted]"],
+        )
+
+    def test_remote_effort_proxy_may_use_loopback(self):
+        values = self.remote_env()
+        values["AI_TEST_MODEL_BASE_URL"] = "http://127.0.0.1:10999/v1"
+        profile = load_model_profile(values)
+        self.assertEqual(profile.name, "chosen-model")
+        self.assertNotIn("fake-unit-key", repr(profile))
+        self.assertNotIn("api_key", profile.public_details())
+
+    def test_local_probe_rejects_another_advertised_model(self):
+        profile = load_model_profile(self.local_env())
+        with patch("harness.test_profile.qa_local_llm.probe", return_value=["qwen"]):
+            self.assertFalse(probe_model(profile))
+
+    def test_remote_preflight_requests_the_selected_model(self):
+        profile = TestModelProfile(
+            "remote", "https://models.example.test/v1", "chosen-model", "fake-unit-key"
+        )
+        client = Mock()
+        client.post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "OK"}}]
+        }
+        context = MagicMock()
+        context.__enter__.return_value = client
+        with patch("harness.test_profile.httpx.Client", return_value=context):
+            self.assertTrue(probe_model(profile))
+        payload = client.post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "chosen-model")
+        self.assertFalse(payload["stream"])
+
+    def test_remote_preflight_reports_only_http_status(self):
+        profile = load_model_profile(self.remote_env())
+        secret = "fake-unit-key"
+        request = httpx.Request("POST", profile.base_url + "/chat/completions")
+        response = httpx.Response(429, request=request, text=f"provider {secret}")
+        client = Mock()
+        client.post.return_value = response
+        context = MagicMock()
+        context.__enter__.return_value = client
+        output = io.StringIO()
+        with (
+            patch("harness.test_profile.httpx.Client", return_value=context),
+            redirect_stdout(output),
+        ):
+            self.assertFalse(probe_model(profile))
+        self.assertIn("http_status=429", output.getvalue())
+        self.assertNotIn(secret, output.getvalue())
+        self.assertNotIn("provider", output.getvalue())
+
+    def test_remote_preflight_reports_network_error_type_without_exception_text(self):
+        profile = load_model_profile(self.remote_env())
+        client = Mock()
+        client.post.side_effect = httpx.ConnectError("fake-unit-key in error")
+        context = MagicMock()
+        context.__enter__.return_value = client
+        output = io.StringIO()
+        with (
+            patch("harness.test_profile.httpx.Client", return_value=context),
+            redirect_stdout(output),
+        ):
+            self.assertFalse(probe_model(profile))
+        self.assertIn("network_error=ConnectError", output.getvalue())
+        self.assertNotIn("fake-unit-key", output.getvalue())
+
+    def test_remote_preflight_reports_response_shape_without_provider_text(self):
+        profile = load_model_profile(self.remote_env())
+        client = Mock()
+        client.post.return_value.status_code = 200
+        client.post.return_value.json.return_value = {
+            "choices": [
+                {
+                    "message": {"content": "", "reasoning_content": ""},
+                    "finish_reason": "length",
+                    "provider_text": "fake-unit-key in response",
+                }
+            ]
+        }
+        context = MagicMock()
+        context.__enter__.return_value = client
+        output = io.StringIO()
+        with (
+            patch("harness.test_profile.httpx.Client", return_value=context),
+            redirect_stdout(output),
+        ):
+            self.assertFalse(probe_model(profile))
+        self.assertIn(
+            "http_status=200; response_shape=message_empty; finish_reason=length",
+            output.getvalue(),
+        )
+        self.assertNotIn("fake-unit-key", output.getvalue())
+
+    def test_tavily_requires_explicit_opt_in_and_key(self):
+        self.assertFalse(tavily_opt_in({}))
+        with self.assertRaises(PrerequisiteError):
+            tavily_opt_in({"AI_TEST_TAVILY_ENABLED": "1"})
+        self.assertTrue(
+            tavily_opt_in(
+                {"AI_TEST_TAVILY_ENABLED": "1", "AI_TEST_TAVILY_API_KEY": "fake"}
+            )
+        )
+
+    def test_acceptance_never_launches_a_panel_owned_model(self):
+        profile = load_model_profile(self.local_env())
+        with (
+            patch("harness.acceptance.create_run_dir", return_value=PROJECT_DIR),
+            patch("harness.acceptance.write_report") as write_report_mock,
+            patch("harness.acceptance.load_model_profile", return_value=profile),
+            patch("harness.acceptance.tavily_opt_in", return_value=False),
+            patch("harness.acceptance._run_steps", return_value=0) as steps,
+            patch("harness.live_e2e.ensure_local_model") as legacy,
+        ):
+            self.assertEqual(acceptance.run(ui=False, live=True), 0)
+        legacy.assert_not_called()
+        self.assertEqual(steps.call_args.args[3].name, "local")
+        self.assertEqual(write_report_mock.call_args.args[1]["status"], "pass")
+
+    def test_acceptance_stops_one_owned_launcher_on_failure(self):
+        launcher = Mock()
+
+        def failed_steps(*args):
+            args[-1]["launcher"] = launcher
+            return 1
+
+        with (
+            patch("harness.acceptance.create_run_dir", return_value=PROJECT_DIR),
+            patch("harness.acceptance.write_report"),
+            patch("harness.acceptance.load_model_profile", return_value=None),
+            patch("harness.acceptance.tavily_opt_in", return_value=False),
+            patch("harness.acceptance._run_steps", side_effect=failed_steps),
+        ):
+            self.assertEqual(acceptance.run(ui=False, live=True), 1)
+        launcher.stop.assert_called_once_with()
+
+    def test_acceptance_reuses_a_single_default_launcher(self):
+        launcher = Mock()
+        owner = {"launcher": None}
+        report = {"steps": {}}
+        with patch(
+            "harness.live_e2e.ensure_local_model",
+            return_value=(SimpleNamespace(base_url="http://127.0.0.1/v1"), "qwen", launcher),
+        ) as legacy:
+            child_env = acceptance._prepare_live_model(None, PROJECT_DIR, report, owner)
+        legacy.assert_called_once()
+        self.assertEqual(child_env, {})
+        self.assertIs(owner["launcher"], launcher)
+
+    def test_remote_preflight_is_performed_once_by_parent(self):
+        profile = TestModelProfile(
+            "remote", "https://models.example.test/v1", "chosen-model", "fake-unit-key"
+        )
+        owner = {"launcher": None}
+        with patch("harness.acceptance.probe_model", return_value=True) as probe:
+            child_env = acceptance._prepare_live_model(
+                profile, PROJECT_DIR, {"steps": {}}, owner
+            )
+        probe.assert_called_once_with(profile)
+        self.assertEqual(child_env["AI_TEST_MODEL_PARENT_READY"], "1")
+        self.assertIsNone(owner["launcher"])
+
+    def test_standalone_remote_live_probes_selected_model(self):
+        profile = load_model_profile(self.remote_env())
+        output = io.StringIO()
+        with (
+            patch.dict(os.environ, {"AI_TEST_MODEL_PARENT_READY": ""}),
+            patch("harness.live_e2e.create_run_dir", return_value=PROJECT_DIR),
+            patch("harness.live_e2e.load_model_profile", return_value=profile),
+            patch("harness.live_e2e.require_free_ports"),
+            patch(
+                "harness.live_e2e.ensure_local_model",
+                return_value=(SimpleNamespace(api_key=profile.api_key), profile.name, None),
+            ),
+            patch("harness.live_e2e.probe_model", return_value=False) as probe,
+            patch("harness.live_e2e._write_safe_report"),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(live_e2e.run(scenario="arithmetic"), 2)
+        probe.assert_called_once_with(profile)
+        self.assertIn("selected remote test model", output.getvalue())
+        self.assertNotIn("GGUF", output.getvalue())
+
+    def test_parent_ready_remote_live_does_not_repeat_preflight(self):
+        profile = load_model_profile(self.remote_env())
+        process = Mock()
+        with (
+            patch.dict(os.environ, {"AI_TEST_MODEL_PARENT_READY": "1"}),
+            patch("harness.live_e2e.create_run_dir", return_value=PROJECT_DIR),
+            patch("harness.live_e2e.load_model_profile", return_value=profile),
+            patch("harness.live_e2e.require_free_ports"),
+            patch(
+                "harness.live_e2e.ensure_local_model",
+                return_value=(SimpleNamespace(api_key=profile.api_key), profile.name, None),
+            ),
+            patch("harness.live_e2e.probe_model") as probe,
+            patch("harness.live_e2e.ManagedProcess") as managed,
+            patch("harness.live_e2e.wait_tcp", return_value=False),
+            patch("harness.live_e2e._write_safe_report"),
+            redirect_stdout(io.StringIO()),
+        ):
+            managed.return_value.start.return_value = process
+            self.assertEqual(live_e2e.run(scenario="arithmetic"), 1)
+        probe.assert_not_called()
+
+    def test_acceptance_invalid_profile_does_not_start_any_model(self):
+        with (
+            patch("harness.acceptance.create_run_dir", return_value=PROJECT_DIR),
+            patch("harness.acceptance.write_report"),
+            patch("harness.acceptance.load_model_profile", side_effect=PrerequisiteError("invalid")),
+            patch("harness.acceptance.tavily_opt_in", return_value=False),
+            patch("harness.acceptance._run_steps") as steps,
+            patch("harness.live_e2e.ensure_local_model") as legacy,
+        ):
+            self.assertEqual(acceptance.run(ui=False, live=True), 2)
+        steps.assert_not_called()
+        legacy.assert_not_called()
+
+    def test_real_result_urls_require_a_completed_search(self):
+        records = [
+            {"event": "tool_completed", "tool": "search_web", "ok": False,
+             "result": {"results": [{"url": "https://wrong.example.test"}]}},
+            {"event": "tool_completed", "tool": "search_web", "ok": True,
+             "result": {"results": [{"url": "https://docs.python.org"}]}},
+        ]
+        self.assertEqual(search_result_urls(records), ["https://docs.python.org"])
+
+    def test_test_backend_can_opt_out_of_dotenv(self):
+        from agent.settings import load_settings
+
+        with (
+            patch.dict(os.environ, {"AGENT_LOAD_DOTENV": "0"}),
+            patch("agent.settings.resolve_settings") as resolve,
+        ):
+            load_settings()
+        resolve.assert_called_once_with(dotenv=False)
+
 
 class PortTest(unittest.TestCase):
     """A busy port is a prerequisite error, never a silent failure."""
@@ -118,6 +553,55 @@ class CommandTest(unittest.TestCase):
         command = python_module("agent", "--flag", 1)
         self.assertEqual(command[1:4], ["-m", "agent", "--flag"])
         self.assertTrue(command[0])
+
+
+class FakeTelegramTest(unittest.TestCase):
+    """The loopback Telegram fake records payloads and never leaves loopback."""
+
+    def test_records_send_message_payload(self):
+        import json
+        import urllib.request
+
+        with FakeTelegramServer(0) as telegram:
+            url = f"{telegram.base_url}/bot123:abc/sendMessage"
+            body = json.dumps(
+                {"chat_id": "42", "text": "hello https://docs.example.test/1"}
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["result"]["message_id"], 1)
+            self.assertEqual(telegram.message_count, 1)
+            self.assertIn("docs.example.test/1", telegram.messages[0])
+            self.assertIn("/sendMessage", telegram.requests[0]["path"])
+            stats = fetch_stats(telegram.base_url)
+            self.assertEqual(stats["count"], 1)
+            self.assertIn("docs.example.test/1", stats["messages"][0])
+
+    def test_unknown_paths_are_not_recorded(self):
+        import urllib.error
+        import urllib.request
+
+        with FakeTelegramServer(0) as telegram:
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(
+                    f"{telegram.base_url}/not-the-bot-api", timeout=5.0
+                )
+            self.assertEqual(telegram.message_count, 0)
+
+
+class McpProbeExpectationTest(unittest.TestCase):
+    """The hub probes both servers, so one chat request opens two sessions."""
+
+    def test_probe_expects_two_posts_per_configured_server(self):
+        self.assertEqual(CONFIGURED_MCP_SERVERS, 2)
+        self.assertEqual(EXPECTED_MCP_POSTS_PER_PROBE, 4)
 
 
 class RunDirTest(unittest.TestCase):
@@ -291,6 +775,50 @@ class SearchHarnessVerificationTest(unittest.TestCase):
         ]
         result = verify_search_sse(events, urls)
         self.assertEqual(result["urls_observed"], ["https://docs.example.test/1"])
+
+    def test_real_search_accepts_redacted_trace_and_reports_answer_urls_only(self):
+        records = self._search_records()
+        self.assertEqual(search_result_urls(records), [])
+        events = [
+            ("tool_call", {"tool": "search_web"}),
+            ("tool_result", {"tool": "search_web", "ok": True}),
+            (
+                "delta",
+                {
+                    "text": (
+                        "[Python](https://docs.python.org/) and "
+                        "[video](https://www.youtube.com/watch?v=abc)"
+                    )
+                },
+            ),
+            ("done", {"ok": True}),
+        ]
+        result = verify_real_search_sse(events, records)
+        self.assertTrue(result["ok"], msg=result)
+        self.assertEqual(result["search_result_count"], 2)
+        self.assertEqual(result["answer_url_count"], 2)
+        self.assertEqual(result["source_url_match"], "unverified_trace_redacted")
+        self.assertNotIn("urls_found", result)
+
+    def test_real_search_requires_results_and_answer_url(self):
+        records = self._search_records()
+        search = next(
+            record
+            for record in records
+            if record.get("event") == "tool_completed"
+            and record.get("tool") == "search_web"
+        )
+        search["result"]["count"] = 0
+        events = [
+            ("tool_call", {"tool": "search_web"}),
+            ("tool_result", {"tool": "search_web", "ok": True}),
+            ("delta", {"text": "No valid citation: https://"}),
+            ("done", {"ok": True}),
+        ]
+        result = verify_real_search_sse(events, records)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["search_result_count"], 0)
+        self.assertEqual(result["answer_urls"], [])
 
     def test_tools_listed_requires_the_search_tool(self):
         records = self._search_records()
@@ -540,6 +1068,216 @@ class CompositionHarnessVerificationTest(unittest.TestCase):
         self.assertFalse(verify_no_save_sse(events)["ok"])
 
 
+class NotificationsHarnessVerificationTest(unittest.TestCase):
+    """The day-20 cross-server verifiers (D20-03/D20-09/D20-16/D20-20/D20-24)."""
+
+    @staticmethod
+    def _records() -> list:
+        return [
+            {"event": "request_start", "request_id": "r1", "trigger": "chat"},
+            {"event": "mcp_connect", "request_id": "r1", "server": "A", "ok": True},
+            {"event": "mcp_connect", "request_id": "r1", "server": "B", "ok": True},
+            {
+                "event": "mcp_list_tools",
+                "request_id": "r1",
+                "tools_count": 15,
+                "per_server": {"A": 9, "B": 6},
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "tool_selection"},
+            {
+                "event": "tool_selected",
+                "request_id": "r1",
+                "server": "A",
+                "tool": "get_latest_search_run",
+            },
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "server": "A",
+                "tool": "get_latest_search_run",
+                "ok": True,
+                "result": {"status": "ok", "results": [{"title": "x", "url": "u"}]},
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "r1",
+                "server": "B",
+                "tool": "evaluate_run",
+            },
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "server": "B",
+                "tool": "evaluate_run",
+                "ok": True,
+                "result": {"status": "ok", "should_notify": True, "new_items": []},
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "r1",
+                "server": "B",
+                "tool": "send_notification",
+            },
+            {
+                "event": "tool_completed",
+                "request_id": "r1",
+                "server": "B",
+                "tool": "send_notification",
+                "ok": True,
+                "result": {"status": "sent", "delivery_id": "d1"},
+            },
+            {"event": "model_request", "request_id": "r1", "phase": "final_answer"},
+            {"event": "request_done", "request_id": "r1", "ok": True},
+        ]
+
+    def test_both_servers_connected(self):
+        self.assertTrue(verify_servers_connected(self._records(), "r1")["ok"])
+
+    def test_one_server_missing_is_rejected(self):
+        records = [r for r in self._records() if r.get("server") != "B"]
+        self.assertFalse(verify_servers_connected(records, "r1")["ok"])
+
+    def test_server_chain_requires_a_before_b(self):
+        self.assertTrue(verify_server_chain(self._records(), "r1")["ok"])
+
+    def test_server_chain_rejects_b_only(self):
+        records = [r for r in self._records() if r.get("server") != "A"]
+        self.assertFalse(verify_server_chain(records, "r1")["ok"])
+
+    def test_servers_sse_requires_a_before_b(self):
+        events = [
+            (
+                "tool_call",
+                {
+                    "tool": "get_latest_search_run",
+                    "server": "A",
+                    "arguments": {},
+                    "round": 1,
+                },
+            ),
+            (
+                "tool_result",
+                {
+                    "tool": "get_latest_search_run",
+                    "ok": True,
+                    "summary": "s",
+                    "duration_ms": 1,
+                    "server": "A",
+                },
+            ),
+            (
+                "tool_call",
+                {"tool": "send_notification", "server": "B", "arguments": {}, "round": 1},
+            ),
+            (
+                "tool_result",
+                {
+                    "tool": "send_notification",
+                    "ok": True,
+                    "summary": "s",
+                    "duration_ms": 1,
+                    "server": "B",
+                },
+            ),
+            ("done", {"ok": True}),
+        ]
+        self.assertTrue(verify_servers_sse(events)["ok"])
+        self.assertFalse(verify_servers_sse(events[:1])["ok"])
+
+    def test_delivery_requires_sent_and_telegram_url(self):
+        url = "https://docs.example.test/1"
+        records = self._records()
+        sent = verify_notifications_delivery(
+            records, "r1", [f"New item {url}"], require_sent=True
+        )
+        self.assertTrue(sent["ok"], msg=sent)
+        without_url = verify_notifications_delivery(
+            records, "r1", ["New item without a link"], require_sent=True
+        )
+        self.assertFalse(without_url["ok"])
+
+    def test_delivery_rejects_a_bare_ok(self):
+        records = self._records()
+        for record in records:
+            if record.get("tool") == "send_notification":
+                record["result"] = {"delivery_id": "d1"}  # no status at all
+        result = verify_notifications_delivery(
+            records, "r1", ["https://docs.example.test/1"], require_sent=True
+        )
+        self.assertFalse(result["ok"])
+
+    def test_delivery_accepts_an_honest_not_required(self):
+        records = self._records()
+        for record in records:
+            if record.get("tool") == "evaluate_run":
+                record["result"] = {"status": "ok", "should_notify": False}
+            if record.get("tool") == "send_notification":
+                record["result"] = {"status": "not_required"}
+        result = verify_notifications_delivery(records, "r1", [])
+        self.assertTrue(result["ok"], msg=result)
+
+    def test_delivery_rejects_a_dishonest_not_required(self):
+        records = self._records()
+        for record in records:
+            if record.get("tool") == "evaluate_run":
+                record["result"] = {"status": "ok", "should_notify": True}
+            if record.get("tool") == "send_notification":
+                record["result"] = {"status": "not_required"}
+        result = verify_notifications_delivery(records, "r1", [])
+        self.assertFalse(result["ok"])
+
+    def test_monitor_state_detects_baseline(self):
+        records = [
+            {
+                "event": "request_start",
+                "request_id": "m1",
+                "trigger": "monitor",
+                "watch_id": "w1",
+            },
+            {
+                "event": "tool_completed",
+                "request_id": "m1",
+                "tool": "evaluate_run",
+                "ok": True,
+                "result": {
+                    "status": "empty",
+                    "is_baseline": True,
+                    "should_notify": False,
+                },
+            },
+            {"event": "request_done", "request_id": "m1", "ok": True},
+        ]
+        state = monitor_trace_state(records, "w1")
+        self.assertTrue(state["baseline_seen"])
+        self.assertFalse(state["success"])
+
+    def test_monitor_state_ignores_incomplete_sent(self):
+        records = [
+            {
+                "event": "request_start",
+                "request_id": "m1",
+                "trigger": "monitor",
+                "watch_id": "w1",
+            },
+            {
+                "event": "monitor_incomplete",
+                "request_id": "m1",
+                "watch_id": "w1",
+                "reason": "send_notification_missing",
+            },
+            {
+                "event": "tool_completed",
+                "request_id": "m1",
+                "tool": "send_notification",
+                "ok": True,
+                "result": {"status": "sent"},
+            },
+        ]
+        state = monitor_trace_state(records, "w1")
+        self.assertFalse(state["success"])
+        self.assertIn("m1", state["incomplete_ids"])
+
+
 class KeyIsolationTest(unittest.TestCase):
     """The search key must be absent from every observable artifact (D17-07)."""
 
@@ -683,6 +1421,28 @@ class HarnessEntryPointTest(unittest.TestCase):
         self.assertNotIn("ModuleNotFoundError", completed.stderr)
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
 
+    def test_live_e2e_accepts_the_notifications_scenario_option(self):
+        completed = self._run(
+            "live_e2e.py", argv=("--scenario", "notifications", "--help")
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_live_e2e_accepts_the_monitor_scenario_option(self):
+        completed = self._run(
+            "live_e2e.py", argv=("--scenario", "notifications-monitor", "--help")
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_notifier_real_live_blocks_without_explicit_opt_in(self):
+        completed = self._run(
+            "notifier_real_live.py", extra_env={"NOTIFIER_REAL_ALLOW": ""}
+        )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+        self.assertIn("NOTIFIER_REAL_STATUS: BLOCKED", completed.stdout)
+
     def test_reports_real_live_blocks_without_explicit_opt_in(self):
         completed = self._run(
             "reports_real_live.py", extra_env={"REPORTS_REAL_ALLOW": ""}
@@ -702,6 +1462,22 @@ class HarnessEntryPointTest(unittest.TestCase):
                     "REPORTS_RESTART_MCP_PORT": str(busy_port),
                     "REPORTS_RESTART_BACKEND_PORT": str(_free_port()),
                     "REPORTS_RESTART_STUB_PORT": str(_free_port()),
+                },
+            )
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+        self.assertIn("PREREQUISITE", completed.stdout)
+
+    def test_notifier_restart_script_runs_from_a_file_path(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            busy_port = sock.getsockname()[1]
+            completed = self._run(
+                "notifier_restart.py",
+                extra_env={
+                    "NOTIFIER_RESTART_MCP_PORT": str(busy_port),
+                    "NOTIFIER_RESTART_NOTIFIER_PORT": str(_free_port()),
                 },
             )
         self.assertNotIn("ModuleNotFoundError", completed.stderr)

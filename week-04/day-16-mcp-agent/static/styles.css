@@ -568,3 +568,58 @@ details.tools summary {
 .report-source-desc {
   color: var(--muted);
 }
+
+/* Notification watches panel (day 20): reads server B per selected chat. */
+.watches {
+  margin-top: 1rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.75rem;
+}
+
+.watches-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.watch-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  background: var(--panel-2);
+}
+
+.watch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.watch-query {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.watch-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+  word-break: break-word;
+}
+
+.watch-delivery {
+  font-size: 0.8rem;
+  margin-top: 0.3rem;
+}
+
+.watch-delivery.bad {
+  color: var(--danger, #b00020);
+}
+
+/* MCP status panel: one block per hub server (A and B). */
+.status-server + .status-server {
+  margin-top: 0.6rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.6rem;
+}

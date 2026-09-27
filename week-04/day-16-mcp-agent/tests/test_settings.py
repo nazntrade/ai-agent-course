@@ -11,6 +11,7 @@ from unittest import mock
 from agent import settings as settings_module
 from agent.settings import (
     DEFAULT_MODEL_BASE_URL,
+    DEFAULT_MODEL_NAME,
     resolve_settings,
 )
 from mcp_server import config as mcp_config
@@ -25,6 +26,9 @@ class DefaultsTest(unittest.TestCase):
     def test_model_endpoint_defaults_to_loopback(self):
         self.assertEqual(self.settings.model_base_url, DEFAULT_MODEL_BASE_URL)
         self.assertTrue(self.settings.model_base_url.startswith("http://127.0.0.1"))
+
+    def test_unlaunched_default_model_is_unchanged(self):
+        self.assertEqual(self.settings.model_name, DEFAULT_MODEL_NAME)
 
     def test_mcp_endpoint_defaults_to_loopback(self):
         self.assertEqual(self.settings.mcp_server_host, "127.0.0.1")
@@ -61,9 +65,64 @@ class DefaultsTest(unittest.TestCase):
     def test_tool_round_limit_defaults_to_five(self):
         self.assertEqual(self.settings.max_tool_rounds, 5)
 
+    def test_notifier_defaults_to_the_loopback_endpoint(self):
+        self.assertEqual(
+            self.settings.mcp_notifier_url, "http://127.0.0.1:8766/mcp"
+        )
+
+    def test_notifier_monitor_defaults_on_with_a_thirty_second_tick(self):
+        self.assertTrue(self.settings.notifier_monitor_enabled)
+        self.assertEqual(self.settings.notifier_monitor_tick_seconds, 30)
+
 
 class EnvironmentTest(unittest.TestCase):
     """Explicit environment variables win over the defaults."""
+
+    def test_local_launcher_model_is_only_a_fallback(self):
+        resolved = resolve_settings(
+            env={"AGENT_LOCAL_MODEL_DEFAULT_NAME": "gemma-4-26B-A4B-it-UD-IQ4_XS"},
+            dotenv=False,
+        )
+        self.assertEqual(resolved.model_name, "gemma-4-26B-A4B-it-UD-IQ4_XS")
+        self.assertEqual(resolved.model_base_url, DEFAULT_MODEL_BASE_URL)
+
+    def test_local_launcher_sets_the_gemma_fallback(self):
+        launcher = (settings_module.PROJECT_ROOT / "run_app.bat").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'set "AGENT_LOCAL_MODEL_DEFAULT_NAME=gemma-4-26B-A4B-it-UD-IQ4_XS"',
+            launcher,
+        )
+
+    def test_explicit_model_name_overrides_local_launcher_fallback(self):
+        resolved = resolve_settings(
+            env={
+                "AGENT_MODEL_NAME": "explicit-model",
+                "AGENT_LOCAL_MODEL_DEFAULT_NAME": "gemma-4-26B-A4B-it-UD-IQ4_XS",
+            },
+            dotenv=False,
+        )
+        self.assertEqual(resolved.model_name, "explicit-model")
+
+    def test_model_name_loaded_from_dotenv_overrides_launcher_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"AGENT_LOCAL_MODEL_DEFAULT_NAME": "gemma-4-26B-A4B-it-UD-IQ4_XS"},
+                    clear=True,
+                ),
+                mock.patch.object(
+                    settings_module,
+                    "load_dotenv_if_present",
+                    side_effect=lambda _path: os.environ.__setitem__(
+                        "AGENT_MODEL_NAME", "from-dotenv"
+                    ),
+                ),
+            ):
+                resolved = resolve_settings(env_path=Path(temporary) / "synthetic.env")
+        self.assertEqual(resolved.model_name, "from-dotenv")
 
     def test_key_is_read_from_the_named_variable(self):
         environment = {
@@ -165,6 +224,57 @@ class EnvironmentTest(unittest.TestCase):
             .max_tool_rounds,
             7,
         )
+
+    def test_empty_notifier_url_disables_server_b(self):
+        resolved = resolve_settings(env={"MCP_NOTIFIER_URL": ""}, dotenv=False)
+        self.assertEqual(resolved.mcp_notifier_url, "")
+
+    def test_explicit_notifier_url_is_kept(self):
+        resolved = resolve_settings(
+            env={"MCP_NOTIFIER_URL": "http://127.0.0.1:9999/mcp"}, dotenv=False
+        )
+        self.assertEqual(resolved.mcp_notifier_url, "http://127.0.0.1:9999/mcp")
+
+    def test_notifier_monitor_flag_can_be_disabled(self):
+        self.assertFalse(
+            resolve_settings(
+                env={"NOTIFIER_MONITOR_ENABLED": "0"}, dotenv=False
+            ).notifier_monitor_enabled
+        )
+        self.assertTrue(
+            resolve_settings(
+                env={"NOTIFIER_MONITOR_ENABLED": "1"}, dotenv=False
+            ).notifier_monitor_enabled
+        )
+
+    def test_notifier_monitor_tick_is_clamped(self):
+        self.assertEqual(
+            resolve_settings(
+                env={"NOTIFIER_MONITOR_TICK_SECONDS": "0"}, dotenv=False
+            ).notifier_monitor_tick_seconds,
+            1,
+        )
+        self.assertEqual(
+            resolve_settings(
+                env={"NOTIFIER_MONITOR_TICK_SECONDS": "99999"}, dotenv=False
+            ).notifier_monitor_tick_seconds,
+            3600,
+        )
+        self.assertEqual(
+            resolve_settings(
+                env={"NOTIFIER_MONITOR_TICK_SECONDS": "nope"}, dotenv=False
+            ).notifier_monitor_tick_seconds,
+            30,
+        )
+
+
+class NotifierSettingsSourceGuardTest(unittest.TestCase):
+    """``agent/settings.py`` must never read a Telegram secret or B's dotenv flag."""
+
+    def test_no_telegram_secret_is_read_in_the_backend_settings(self):
+        source = Path(settings_module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("TELEGRAM", source)
+        self.assertNotIn("NOTIFIER_LOAD_DOTENV", source)
 
 
 class McpConfigDotenvTest(unittest.TestCase):
