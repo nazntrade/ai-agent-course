@@ -757,6 +757,131 @@ class MultiServerAndMonitorTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(incomplete["reason"], "evaluate_run_absent")
             self.assertFalse(any(isinstance(event, DoneEvent) for event in events))
 
+    def _a_client(self):
+        return FakeMcpClient(
+            call_results={
+                "get_latest_search_run": McpCallResult(
+                    ok=True, text="", structured={"status": "ok", "results": []}
+                )
+            }
+        )
+
+    async def test_monitor_injection_overrides_the_model_task_id(self):
+        # Regression (LIVE): the model copied the watch id into ``task_id`` and
+        # the real server A rejected the read. The host-owned override must reach
+        # the actual A call, not the model's value.
+        a = self._a_client()
+        hub, a_client, _b = self._hub(a=a)
+        provider = ScriptedProvider(
+            [
+                _tool_turn(
+                    name="get_latest_search_run", arguments='{"task_id": "watch-42"}'
+                ),
+                _answer_turn("checked"),
+            ]
+        )
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=hub, trace=NullTraceWriter()
+        )
+        await _collect(
+            orchestrator,
+            "req-inject-mon",
+            ChatSession("m-chat"),
+            "tick",
+            trigger="monitor",
+            watch_id="watch-42",
+            allowed_tools=("get_latest_search_run",),
+            injected_arguments={"get_latest_search_run": {"task_id": ""}},
+        )
+        self.assertEqual(
+            a_client.calls,
+            [("get_latest_search_run", {"task_id": "", "chat_id": "m-chat"})],
+        )
+
+    async def test_monitor_injection_overrides_a_wrong_type_task_id(self):
+        a = self._a_client()
+        hub, a_client, _b = self._hub(a=a)
+        provider = ScriptedProvider(
+            [
+                _tool_turn(
+                    name="get_latest_search_run", arguments='{"task_id": 123}'
+                ),
+                _answer_turn("checked"),
+            ]
+        )
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=hub, trace=NullTraceWriter()
+        )
+        await _collect(
+            orchestrator,
+            "req-inject-type",
+            ChatSession("m-chat"),
+            "tick",
+            trigger="monitor",
+            watch_id="watch-42",
+            allowed_tools=("get_latest_search_run",),
+            injected_arguments={"get_latest_search_run": {"task_id": ""}},
+        )
+        # The override lands before validation, so the wrong model type never
+        # reaches a type error and the call carries the host scope.
+        self.assertEqual(
+            a_client.calls,
+            [("get_latest_search_run", {"task_id": "", "chat_id": "m-chat"})],
+        )
+
+    async def test_chat_turn_without_injection_keeps_the_model_task_id(self):
+        a = self._a_client()
+        hub, a_client, _b = self._hub(a=a)
+        provider = ScriptedProvider(
+            [
+                _tool_turn(
+                    name="get_latest_search_run", arguments='{"task_id": "t1"}'
+                ),
+                _answer_turn("ok"),
+            ]
+        )
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=hub, trace=NullTraceWriter()
+        )
+        await _collect(
+            orchestrator,
+            "req-chat-keep",
+            ChatSession("chat-keep"),
+            "latest run",
+        )
+        self.assertEqual(
+            a_client.calls,
+            [("get_latest_search_run", {"task_id": "t1", "chat_id": "chat-keep"})],
+        )
+
+    async def test_injected_argument_outside_the_schema_is_dropped(self):
+        a = self._a_client()
+        hub, a_client, _b = self._hub(a=a)
+        provider = ScriptedProvider(
+            [
+                _tool_turn(name="get_latest_search_run", arguments="{}"),
+                _answer_turn("checked"),
+            ]
+        )
+        orchestrator = Orchestrator(
+            provider=provider, mcp_client=hub, trace=NullTraceWriter()
+        )
+        await _collect(
+            orchestrator,
+            "req-inject-unknown",
+            ChatSession("chat-d"),
+            "tick",
+            trigger="monitor",
+            watch_id="w-d",
+            allowed_tools=("get_latest_search_run",),
+            injected_arguments={"get_latest_search_run": {"not_in_schema": "x"}},
+        )
+        # The override is applied before validation, so an out-of-schema key is
+        # still discarded and cannot smuggle an argument into the MCP call.
+        self.assertEqual(
+            a_client.calls, [("get_latest_search_run", {"chat_id": "chat-d"})]
+        )
+
     async def test_complete_monitor_turn_records_done(self):
         from agent.monitor import monitor_result_incomplete
 

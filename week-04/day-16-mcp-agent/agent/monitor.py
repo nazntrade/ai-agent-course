@@ -5,7 +5,9 @@ lists the app chats, asks server B (host→B ``list_notification_watches``) for 
 active watches that are due, and runs the **same** :class:`Orchestrator` with the
 same model provider for each due watch. The model then follows the A→B chain
 (A ``get_latest_search_run`` → B ``evaluate_run`` → B ``send_notification``) with a
-restricted tool subset; an incomplete turn is recorded as ``monitor_incomplete``
+restricted tool subset; the host owns the A-read scope through
+``MONITOR_INJECTED_ARGUMENTS``, so the model cannot substitute the watch id for
+the ``task_id``. An incomplete turn is recorded as ``monitor_incomplete``
 instead of a success, so the next tick repeats the check.
 
 The monitor never opens the notifier database, never touches the Telegram token
@@ -29,6 +31,14 @@ MONITOR_TRIGGER = "monitor"
 MONITOR_ALLOWED_TOOLS = ("get_latest_search_run", "evaluate_run", "send_notification")
 MAX_MONITOR_CHATS = 5
 
+# Host-owned scope of the monitor's A-read. The model tends to copy the watch id
+# into the ``task_id`` argument of ``get_latest_search_run`` (LIVE regression),
+# which server A rejects with "No scheduled task with this id exists in the
+# current chat". An empty ``task_id`` is the documented "latest run of this
+# chat" default, so the host fixes it before validation and the model cannot
+# widen the read scope.
+MONITOR_INJECTED_ARGUMENTS = {"get_latest_search_run": {"task_id": ""}}
+
 STATUS_SENT = "sent"
 STATUS_DUPLICATE = "duplicate"
 
@@ -42,23 +52,31 @@ MONITOR_SYSTEM_PROMPT = (
     "to check; that id is the one to pass to 'evaluate_run' and "
     "'send_notification', never a literal placeholder. For the given watch: read "
     "the latest scheduled search result from server A with "
-    "'get_latest_search_run', compare it with the watch using 'evaluate_run' on "
-    "server B, and call 'send_notification' on server B only when 'evaluate_run' "
-    "returned 'should_notify' true, passing its 'new_items' unchanged. When "
-    "'should_notify' is false or the run is empty, error or pending, do not send "
-    "anything. Never call a tool of one server from the other and never claim a "
-    "notification was delivered unless 'send_notification' returned 'sent' or "
-    "'duplicate'."
+    "'get_latest_search_run' and pass its whole result as the 'run' argument of "
+    "'evaluate_run'. The host fixes the read scope of 'get_latest_search_run' to "
+    "the latest run of this chat, so call it without a 'task_id' and never pass "
+    "the watch id as a 'task_id'. Compare the run with the watch using "
+    "'evaluate_run' on server B, and call 'send_notification' on server B only "
+    "when 'evaluate_run' returned 'should_notify' true, passing its 'new_items' "
+    "unchanged. When 'should_notify' is false or the run is empty, error or "
+    "pending, do not send anything. Never call a tool of one server from the "
+    "other and never claim a notification was delivered unless "
+    "'send_notification' returned 'sent' or 'duplicate'."
 )
 
 # The model must know which watch it is checking: the watch id is not part of any
 # system prompt, so the synthetic user message carries it. Without it the model
 # would have to guess an id and ``evaluate_run`` would answer ``unknown_watch``.
+# The watch id is only for ``evaluate_run``/``send_notification``: the A-read
+# scope is host-owned (``MONITOR_INJECTED_ARGUMENTS``), so the message tells the
+# model to call ``get_latest_search_run`` without a ``task_id``.
 MONITOR_USER_MESSAGE_TEMPLATE = (
-    "Check the notification watch with id '{watch_id}' now. Read its latest "
-    "scheduled search run with 'get_latest_search_run', compare it with "
-    "'evaluate_run' using exactly this watch id, and call 'send_notification' "
-    "only when 'evaluate_run' returned 'should_notify' true."
+    "Check the notification watch with id '{watch_id}' now. Read the latest "
+    "scheduled search run of this chat with 'get_latest_search_run' (without a "
+    "'task_id'; the host fixes the read scope to this chat) and pass its whole "
+    "result as the 'run' argument of 'evaluate_run' using exactly this watch id, "
+    "then call 'send_notification' only when 'evaluate_run' returned "
+    "'should_notify' true."
 )
 
 
@@ -221,6 +239,7 @@ class NotifierMonitor:
             system_prompt=MONITOR_SYSTEM_PROMPT,
             allowed_tools=MONITOR_ALLOWED_TOOLS,
             require_result=monitor_result_incomplete,
+            injected_arguments=MONITOR_INJECTED_ARGUMENTS,
         ):
             pass
 

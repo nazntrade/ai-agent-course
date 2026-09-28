@@ -2140,6 +2140,83 @@ def monitor_trace_state(records: list, watch_id: str) -> dict:
     }
 
 
+def monitor_run_scope(records: list, watch_id: str) -> dict:
+    """The effective A-read scope of one watch's monitor turns, from the trace.
+
+    The host injects an empty ``task_id`` before validation, so the recorded
+    ``tool_selected`` arguments are the real call arguments: an empty ``task_id``
+    proves the model did not smuggle the watch id into the read scope.
+    """
+    id_set = set(_monitor_request_ids(records, watch_id))
+    reads: list = []
+    for record in records:
+        if record.get("event") != "tool_selected":
+            continue
+        if record.get("tool") != "get_latest_search_run":
+            continue
+        if record.get("request_id") not in id_set:
+            continue
+        arguments = record.get("arguments")
+        arguments = arguments if isinstance(arguments, dict) else {}
+        reads.append(
+            {
+                "request_id": record.get("request_id"),
+                "task_id": arguments.get("task_id"),
+            }
+        )
+    ok = bool(reads) and all(read["task_id"] == "" for read in reads)
+    return {"ok": ok, "count": len(reads), "reads": reads}
+
+
+def _seen_count(watch) -> int:
+    value = (watch or {}).get("seen_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def monitor_schedule_state(
+    created: dict, baseline: dict | None, final: dict | None
+) -> dict:
+    """Host-side proof that the monitor consumed the baseline and moved on.
+
+    ``created`` is the ``create_notification_watch`` payload; ``baseline`` and
+    ``final`` are the matching ``list_notification_watches`` items read after the
+    baseline turn and after the delivery. A monitor that never reached
+    ``evaluate_run`` leaves ``last_check_at`` empty, ``seen_count`` at zero and
+    ``next_check_at`` frozen at its creation value.
+    """
+    created = created or {}
+    baseline = baseline or {}
+    final = final or {}
+    created_next = str(created.get("next_check_at") or "")
+    baseline_next = str(baseline.get("next_check_at") or "")
+    final_next = str(final.get("next_check_at") or "")
+    delivery = final.get("last_delivery")
+    delivery_status = delivery.get("status") if isinstance(delivery, dict) else None
+    checks = {
+        "baseline_last_check": bool(baseline.get("last_check_at")),
+        "baseline_next_moved": bool(
+            created_next and baseline_next and baseline_next != created_next
+        ),
+        "baseline_seen_empty": _seen_count(baseline) == 0,
+        "delivered_seen_count": _seen_count(final) == len(RESULT_URLS),
+        "delivered_last_sent": delivery_status == "sent",
+        "delivered_next_moved_again": bool(
+            baseline_next and final_next and final_next != baseline_next
+        ),
+    }
+    return {
+        "ok": all(checks.values()),
+        "created_next_check_at": created_next,
+        "baseline_next_check_at": baseline_next,
+        "final_next_check_at": final_next,
+        "baseline_seen_count": _seen_count(baseline),
+        "final_seen_count": _seen_count(final),
+        "expected_seen_count": len(RESULT_URLS),
+        "final_last_delivery_status": delivery_status,
+        "checks": checks,
+    }
+
+
 def _wait_for_run(client, chat_id: str, task_id: str, statuses, timeout: float = 60.0):
     """Poll a real server A task until its run reaches one of ``statuses``."""
     deadline = time.monotonic() + max(float(timeout), 1.0)
@@ -2156,6 +2233,18 @@ def _wait_for_run(client, chat_id: str, task_id: str, statuses, timeout: float =
                 return payload
         time.sleep(0.5)
     return payload
+
+
+def _list_watch(client, chat_id: str, watch_id: str) -> dict | None:
+    """Read one watch item through host→B ``list_notification_watches``."""
+    result = asyncio.run(
+        client.call_tool("list_notification_watches", {"chat_id": chat_id})
+    )
+    watches = (result.structured or {}).get("watches") or []
+    for watch in watches:
+        if isinstance(watch, dict) and str(watch.get("watch_id")) == str(watch_id):
+            return watch
+    return None
 
 
 def _wait_trace(predicate, records_path: Path, timeout: float, interval: float = 0.5):
@@ -2490,6 +2579,7 @@ def _run_notifications_monitor(
         report["monitor_watch_error"] = created.text
         return "FAIL"
     watch_id = (created.structured or {}).get("watch_id", "")
+    watch_created = created.structured or {}
     report["monitor_watch_id"] = watch_id
 
     messages_before_baseline = telegram.message_count
@@ -2507,6 +2597,9 @@ def _run_notifications_monitor(
         "telegram_messages": baseline_messages,
         "incomplete_ids": baseline_state["incomplete_ids"],
     }
+    # Snapshot the schedule right after the baseline turn, before any later
+    # monitor turn can move it again.
+    baseline_watch = _list_watch(b_client, chat_id, watch_id)
 
     asyncio.run(
         a_client.call_tool(
@@ -2551,7 +2644,27 @@ def _run_notifications_monitor(
         "telegram_url_ok": url_ok,
     }
 
-    ok = baseline_ok and bool(final_state["success"]) and url_ok
+    # Full-path evidence beyond the delivery itself: the host-owned schedule and
+    # the effective A-read scope. A turn that never reached ``evaluate_run``
+    # leaves the schedule frozen and the read scope unproven.
+    final_watch = _list_watch(b_client, chat_id, watch_id)
+    schedule_state = monitor_schedule_state(watch_created, baseline_watch, final_watch)
+    run_scope = monitor_run_scope(read_trace(records_path), watch_id)
+    report["monitor_schedule"] = schedule_state
+    report["monitor_seen"] = {
+        "baseline": schedule_state["baseline_seen_count"],
+        "delivered": schedule_state["final_seen_count"],
+        "expected": schedule_state["expected_seen_count"],
+    }
+    report["monitor_run_scope"] = run_scope
+
+    ok = (
+        baseline_ok
+        and bool(final_state["success"])
+        and url_ok
+        and bool(schedule_state["ok"])
+        and bool(run_scope["ok"])
+    )
     if not ok:
         print("  monitor: " + json.dumps(report["monitor_delivery"], ensure_ascii=False))
     return "PASS" if ok else "FAIL"

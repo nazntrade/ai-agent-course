@@ -1086,6 +1086,9 @@ async function send() {
   await refreshChats();
   // A saved report appears after the answer finished, without a page reload.
   await loadReports();
+  // A watch created (or stopped) by the turn must also show up without a
+  // page reload; without this call the panel stayed stale until F5.
+  await loadWatches();
 }
 
 function pill(ok, label) {

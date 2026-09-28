@@ -27,6 +27,8 @@ from harness.live_e2e import (
     TASKS_SCHEDULE_CHAIN,
     TASKS_SUMMARY_CHAIN,
     key_is_isolated,
+    monitor_run_scope,
+    monitor_schedule_state,
     monitor_trace_state,
     search_result_urls,
     verify_composition_sse,
@@ -1276,6 +1278,80 @@ class NotificationsHarnessVerificationTest(unittest.TestCase):
         state = monitor_trace_state(records, "w1")
         self.assertFalse(state["success"])
         self.assertIn("m1", state["incomplete_ids"])
+
+    def test_monitor_run_scope_accepts_the_injected_empty_task_id(self):
+        records = [
+            {
+                "event": "request_start",
+                "request_id": "m1",
+                "trigger": "monitor",
+                "watch_id": "w1",
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "m1",
+                "tool": "get_latest_search_run",
+                "arguments": {"task_id": ""},
+            },
+            {"event": "request_start", "request_id": "c1", "trigger": "chat"},
+            {
+                "event": "tool_selected",
+                "request_id": "c1",
+                "tool": "get_latest_search_run",
+                "arguments": {"task_id": "t1"},
+            },
+        ]
+        scope = monitor_run_scope(records, "w1")
+        self.assertTrue(scope["ok"], msg=scope)
+        self.assertEqual(scope["count"], 1)
+        self.assertEqual(scope["reads"][0]["task_id"], "")
+
+    def test_monitor_run_scope_rejects_the_watch_id_as_task_id(self):
+        records = [
+            {
+                "event": "request_start",
+                "request_id": "m1",
+                "trigger": "monitor",
+                "watch_id": "w1",
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "m1",
+                "tool": "get_latest_search_run",
+                "arguments": {"task_id": "w1"},
+            },
+        ]
+        self.assertFalse(monitor_run_scope(records, "w1")["ok"])
+        self.assertFalse(monitor_run_scope(records, "other")["ok"])
+
+    def test_monitor_schedule_state_accepts_a_moved_schedule(self):
+        created = {"next_check_at": "2026-09-28T08:00:00Z"}
+        baseline = {
+            "last_check_at": "2026-09-28T08:00:30Z",
+            "next_check_at": "2026-09-28T08:01:30Z",
+            "seen_count": 0,
+        }
+        final = {
+            "last_check_at": "2026-09-28T08:01:30Z",
+            "next_check_at": "2026-09-28T08:02:30Z",
+            "seen_count": 3,
+            "last_delivery": {"status": "sent"},
+        }
+        state = monitor_schedule_state(created, baseline, final)
+        self.assertTrue(state["ok"], msg=state)
+        self.assertEqual(state["expected_seen_count"], 3)
+
+    def test_monitor_schedule_state_rejects_a_frozen_watch(self):
+        created = {"next_check_at": "2026-09-28T08:00:00Z"}
+        frozen = {
+            "last_check_at": None,
+            "next_check_at": "2026-09-28T08:00:00Z",
+            "seen_count": 0,
+        }
+        state = monitor_schedule_state(created, frozen, frozen)
+        self.assertFalse(state["ok"])
+        self.assertFalse(state["checks"]["baseline_last_check"])
+        self.assertFalse(state["checks"]["baseline_next_moved"])
 
 
 class KeyIsolationTest(unittest.TestCase):

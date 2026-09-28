@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from agent.monitor import (
     MONITOR_ALLOWED_TOOLS,
+    MONITOR_INJECTED_ARGUMENTS,
     MONITOR_TRIGGER,
     NotifierMonitor,
     monitor_result_incomplete,
@@ -184,6 +185,9 @@ class TickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(run["allowed_tools"]), set(MONITOR_ALLOWED_TOOLS))
         self.assertTrue(run["system_prompt"])
         self.assertIs(run["require_result"], monitor_result_incomplete)
+        # The monitor host owns the A-read scope: the orchestrator receives the
+        # fixed override so the model cannot copy the watch id into ``task_id``.
+        self.assertEqual(run["injected_arguments"], MONITOR_INJECTED_ARGUMENTS)
         # The monitor session carries the chat id for tool injection and has no
         # persistence callback, so a monitor turn never writes chat history.
         self.assertEqual(run["session"].chat_id, "c1")

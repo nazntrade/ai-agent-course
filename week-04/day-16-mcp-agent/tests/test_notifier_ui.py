@@ -75,6 +75,24 @@ class NotificationWatchesUiSourceGuardTest(unittest.TestCase):
         self.assertNotIn("setInterval(loadWatches", APP_JS)
         self.assertNotIn("setInterval(refreshStatus", APP_JS)
 
+    def test_post_turn_reloads_watches_like_reports(self):
+        """A finished turn must reload the watches panel, next to the reports.
+
+        Regression: ``send()`` refreshed chats and reports but never called
+        ``loadWatches()``, so a watch created (or stopped) by the turn only
+        appeared after a full page reload.
+        """
+        start = APP_JS.index("async function send()")
+        end = APP_JS.index("function pill(", start)
+        body = APP_JS[start:end]
+        self.assertIn("await sendMessage(", body)
+        self.assertIn("await loadReports()", body)
+        self.assertIn("await loadWatches()", body)
+        self.assertLess(
+            body.index("await sendMessage("),
+            body.index("await loadWatches()"),
+        )
+
     def test_watches_are_guarded_against_parallel_requests(self):
         start = APP_JS.index("async function loadWatches")
         end = APP_JS.index("// Idempotent: a second call while the timer already runs")

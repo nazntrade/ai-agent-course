@@ -245,6 +245,22 @@ def _accepts_chat_id(schema) -> bool:
     return isinstance(properties, dict) and "chat_id" in properties
 
 
+def _copy_injected_arguments(injected_arguments) -> dict | None:
+    """Defensive copy of the host-owned per-tool argument overrides.
+
+    The mapping is ``{tool_name: {argument_name: value}}``. A malformed value is
+    dropped rather than trusted, and the caller keeps its own object.
+    """
+    if not isinstance(injected_arguments, dict):
+        return None
+    copied: dict = {}
+    for tool, overrides in injected_arguments.items():
+        if not isinstance(overrides, dict) or not overrides:
+            continue
+        copied[str(tool)] = {str(name): value for name, value in overrides.items()}
+    return copied or None
+
+
 def _summarize(result) -> str:
     """Build a short, safe one-line summary of a tool result."""
     if result.structured is not None:
@@ -286,6 +302,7 @@ class Orchestrator:
         allowed_tools=None,
         on_tool_result=None,
         require_result=None,
+        injected_arguments: dict | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Yield the events of one request for ``session``.
 
@@ -294,9 +311,16 @@ class Orchestrator:
         ``system_prompt``, a restricted ``allowed_tools`` set and a
         ``require_result`` predicate; an incomplete monitor turn is recorded as
         ``monitor_incomplete`` instead of a successful ``request_done``.
+
+        ``injected_arguments`` is host-owned: a ``{tool_name: {argument:
+        value}}`` map applied after the model arguments are parsed and before
+        they are validated, so the model can neither widen nor forge the scope
+        of a call (for example the monitor's A-read). ``None`` keeps the chat
+        path unchanged.
         """
         started = time.monotonic()
         allowed = None if allowed_tools is None else {str(name) for name in allowed_tools}
+        injected = _copy_injected_arguments(injected_arguments)
 
         async with session.lock:
             # The context window is read under the per-chat lock so two requests
@@ -436,6 +460,7 @@ class Orchestrator:
                     allowed_tools=allowed,
                     on_tool_result=on_tool_result,
                     outcomes=outcomes,
+                    injected_arguments=injected,
                 ):
                     if isinstance(event, ErrorEvent):
                         yield event
@@ -625,9 +650,11 @@ class Orchestrator:
         allowed_tools=None,
         on_tool_result=None,
         outcomes: dict | None = None,
+        injected_arguments: dict | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Run every tool call of one round, feeding results back to the model."""
         server_by_name = server_by_name or {}
+        overrides_by_tool = injected_arguments or {}
         for call in calls:
             name = call["name"] or ""
             raw_arguments = call["arguments"] or "{}"
@@ -671,8 +698,14 @@ class Orchestrator:
                 continue
 
             schema = schema_by_name.get(name)
+            overrides = overrides_by_tool.get(name)
             try:
                 arguments = tool_schema.parse_arguments(raw_arguments)
+                # A host-owned override (for example the monitor's A-read scope)
+                # is applied before validation: it supersedes whatever the model
+                # sent, and a key outside the schema is still dropped below.
+                if overrides:
+                    arguments.update(overrides)
                 arguments = tool_schema.validate_arguments(schema, arguments)
                 # Chat-scoped tools carry an optional ``chat_id`` the model never
                 # sees; the backend overwrites any value the model supplied.

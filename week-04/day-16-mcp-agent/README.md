@@ -175,15 +175,19 @@ harness, если модель не переопределена. Локальн
 ### Команды запуска
 
 ```
-run_app.bat            :: MCP-сервер + backend + UI в браузере (режим all)
-run_app.bat mcp        :: только MCP-сервер в текущем окне
+run_app.bat            :: сервер A + сервер B + backend + UI в браузере (режим all)
+run_app.bat check      :: неинтерактивная проверка запуска: поднять A и B, проверить их через API
+run_app.bat mcp        :: только MCP-сервер A в текущем окне
 run_app.bat backend    :: только backend
 run_app.bat tools      :: discovery CLI по MCP
 ```
 
-Порты: MCP `127.0.0.1:8765`, backend `127.0.0.1:8600`. Если MCP уже отвечает, `run_app.bat all`
-его не перезапускает. По завершении останавливаются только процессы, запущенные самим скриптом;
-занятый порт → сообщение и exit 2.
+Порты: MCP A `127.0.0.1:8765`, notifier B `127.0.0.1:8766`, backend `127.0.0.1:8600`.
+`run_app.bat all` сам поднимает оба MCP-сервера. Если сервер уже отвечает на своём порту,
+повторный экземпляр не запускается. Перед открытием UI скрипт проверяет через
+`/api/mcp/servers`, что A `connected` с 9 инструментами, а B `connected` с 6; если B не
+поднялся, выводится понятная ошибка; подробности видны в свёрнутом окне B, UI не открывается. По завершении
+останавливаются только процессы, запущенные самим скриптом; занятый порт → сообщение и exit 2.
 
 ### Команды проверок
 
@@ -343,8 +347,9 @@ protocol version при соединении v2-клиента и v2-серве�
 - Harness рассчитан на Windows (`taskkill`, `CREATE_NO_WINDOW`, `powershell`) и не портирован на Linux.
 - Обязательный уровень дня — один Host, один MCP-сервер и один пользователь; multi-user изоляции
   и rate limiting нет.
-- `run_app.bat all` требует интерактивного окна (пауза до нажатия клавиши), поэтому проверяется
-  вручную; автоматически проверяются те же процессы через harness.
+- `run_app.bat all` требует интерактивного окна (пауза до нажатия клавиши); для автоматической
+  проверки того же запуска без браузера и паузы добавлен режим `run_app.bat check`, который
+  поднимает A и B и проверяет их состояние через `/api/mcp/servers`.
 - Канонический id модели — `qwen3.8-27b-local`; trace различает requested (configured) и
   server-reported имя и пишет `model_reported` только при расхождении.
 
@@ -994,8 +999,9 @@ trace и SSE.
 | `tests/*`, `tests/integration/test_notifier_live.py`, `harness/notifier_restart.py`, `harness/notifier_real_live.py`, `harness/live_e2e.py`, `harness/acceptance.py` | UNIT/INT/RESTART/LIVE/UI и opt-in REAL |
 | `docs/specs/day-20-multi-mcp-orchestration/{SPEC,PLAN,ACCEPTANCE}.md` | спецификация, план и критерии (D20-01…D20-29) |
 
-Все `.bat` (доверенные точки входа) **не изменялись**: проверки встроены в
-существующие `test.bat`, `smoke_test.bat`, `test.bat acceptance` через `harness/`.
+`.bat` дня 20 остаются защищёнными точками входа. Проверки встроены в существующие
+`test.bat`, `smoke_test.bat`, `test.bat acceptance` через `harness/`. Отдельная доработка
+дня 20 добавила авто-запуск сервера B в `run_app.bat` (см. «Команды запуска» ниже).
 
 ### Контракт инструментов сервера B (6)
 
@@ -1074,12 +1080,16 @@ model_request(phase=final_answer) → request_done(ok=True)
 
 ```
 setup.bat                                  :: создать .venv и поставить зависимости
-.venv\Scripts\python.exe -m notifier_server :: Сервер B (отдельное окно/процесс)
-run_app.bat                                :: Сервер A + backend + UI в браузере
+run_app.bat                                :: Сервер A + сервер B + backend + UI в браузере
+run_app.bat check                          :: Проверка запуска A и B без браузера и паузы
+.venv\Scripts\python.exe -m notifier_server :: Сервер B отдельно (VPS или отладка)
 ```
 
-`run_app.bat` запускает A и backend (монитор живёт в backend), но не запускает B —
-B стартует отдельным процессом, как и задумано (на VPS — отдельный сервис).
+`run_app.bat` теперь запускает A, B и backend (монитор живёт в backend). B больше не нужно
+поднимать вручную: если он уже отвечает на `127.0.0.1:8766`, повторный экземпляр не
+запускается. Если B не поднялся, `run_app.bat` показывает понятную ошибку, а детали
+запуска видны в свёрнутом окне B; UI не открывается.
+На VPS B по-прежнему отдельный сервис (см. чек-лист ниже).
 
 ### Команды проверок (день 20)
 
@@ -1143,10 +1153,9 @@ monitor-сценарии первый чек — baseline без отправк�
 
 ### Сценарий демонстрации и короткий сценарий видео
 
-1. `setup.bat`; в одном окне запустить **сервер B**
-   (`.venv\Scripts\python.exe -m notifier_server`), затем `run_app.bat`.
-2. В браузере: блок `MCP status` показывает **два** сервера (A и B) со статусом и
-   списком инструментов.
+1. `setup.bat`, затем `run_app.bat` — одна команда сама поднимает серверы A и B и backend.
+2. В браузере: блок `MCP status` показывает **два** сервера (A и B) со статусом
+   `connected` и списком инструментов (A — 9, B — 6).
 3. В чате: `Every three hours check new materials about Xbox game releases. If a
    new matching item appears, send me a short message with a link in Telegram.
    Also send a scheduled summary even when there is no matching news.`
@@ -1173,7 +1182,8 @@ setup.bat
 test.bat
 smoke_test.bat
 test.bat acceptance        (нужна тестовая модель и системный браузер)
-run_app.bat                (плюс отдельно .venv\Scripts\python.exe -m notifier_server)
+run_app.bat check          (неинтерактивная проверка запуска: A=9, B=6, exit 0)
+run_app.bat                (поднимает A, B и backend и открывает UI)
 ```
 
 Для живой отправки в Telegram: заполнить в локальном `.env` `TELEGRAM_BOT_TOKEN` и
