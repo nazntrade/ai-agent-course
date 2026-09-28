@@ -1,0 +1,2 @@
+# Shell scripts run on Linux; deploy_vps.sh is piped to bash over SSH.
+*.sh text eol=lf

@@ -997,7 +997,11 @@ trace и SSE.
 | `static/index.html`, `static/app.js`, `static/styles.css` | `MCP status` для двух серверов, `[A]`/`[B]` в `Technical details`, панель `Notification watches` |
 | `.env.example` | переменные сервера B и Telegram (без настоящих значений) |
 | `tests/*`, `tests/integration/test_notifier_live.py`, `harness/notifier_restart.py`, `harness/notifier_real_live.py`, `harness/live_e2e.py`, `harness/acceptance.py` | UNIT/INT/RESTART/LIVE/UI и opt-in REAL |
-| `docs/vps-setup-day20.md` | инструкция первичной настройки VPS для сервиса B (без секретов; на VPS не выполнялась) |
+| `docs/vps-setup-day20.md` | инструкция первичной настройки VPS для сервиса B (без секретов): интерпретатор B `/opt/day16/venv/bin/python` и раздел «Re-running the deploy» |
+| `.gitattributes` (корень репозитория) | `*.sh text eol=lf` — LF для shell-скриптов закрепляется в Git |
+| `harness/normalize_lf.ps1` | локальная нормализация `deploy_vps.sh` в LF перед отправкой по SSH |
+| `deploy_vps.bat`, `deploy_vps.sh` | деплой-контур: LF-передача скрипта, пропуск GitHub при совпавшем SHA, ограниченный по времени fetch с конкретной причиной, проверка интерпретатора B, понятный итог каждой проверки |
+| `tests/test_deploy_vps.py`, `tests/support/deploy_shims.sh` | изолированные UNIT/поведенческие сценарии деплой-контура (без сети, SSH, сервисов и `.env`) |
 | `docs/specs/day-20-multi-mcp-orchestration/{SPEC,PLAN,ACCEPTANCE}.md` | спецификация, план и критерии (D20-01…D20-32) |
 
 `.bat` дня 20 остаются защищёнными точками входа. Проверки встроены в существующие
@@ -1162,6 +1166,13 @@ REAL Telegram: .venv\Scripts\python.exe harness\notifier_real_live.py
 через `sanitized_env()` без браузерных путей, поэтому DOM-классы пропускаются
 целиком. Это не пропуск тестов дня 20.
 
+После исправления деплой-контура (см. «Повторный запуск деплоя») `test.bat`
+выполняет 820 тестов, 62 skipped: добавлены 13 тестов `tests/test_deploy_vps.py`
+(байтовая нормализация LF, `.gitattributes`, статические проверки `.bat`,
+`bash -n` и шесть изолированных поведенческих сценариев). Независимый прогон
+Tester совпал: `Ran 820 tests`, `OK (skipped=62)`, `UNIT_STATUS: PASS`, exit 0.
+Приведённая выше таблица результатов относится к ревизии до этой правки.
+
 Приёмочный harness исправлен по результату Tester: в сценарии `notifications`
 watch теперь идентифицируется по `watch_id` из trace (`tool_completed`
 `create_notification_watch`), а не по свободному тексту `query`, и сценарий
@@ -1251,6 +1262,26 @@ run_app.bat                (поднимает A, B и backend и открыва
    секреты в лог не печатаются. При остановке B — `connected:false`, без 5xx.
 7. Убедиться, что деплой A/backend не требует изменений (A не переписывался).
 8. Резервное копирование БД B отдельно от БД A.
+
+### Повторный запуск деплоя (по итогам реального прогона)
+
+Исправлены три дефекта, найденные на реальном VPS; логика A, B, backend и Telegram не менялась.
+Проверяемый `deploy_vps.sh` всегда отправляется в Bash с LF: `deploy_vps.bat` нормализует его через
+`harness/normalize_lf.ps1`, а `*.sh` закреплены в LF через `.gitattributes`. Короткая
+последовательность для оператора:
+
+1. Повторный `deploy_vps.bat` на уже развёрнутом коммите печатает
+   `VPS checkout already matches <sha>; skipping the GitHub fetch.` и **не обращается к GitHub**.
+2. Итог печатается только после проверок сервисов: `backend /api/health: OK`,
+   `A/B connectivity and tool lists: OK`, затем
+   `DEPLOY_STATUS: PASS - already deployed; ...` и `DEPLOY_COMMIT: <sha>`.
+3. На другом коммите выполняется проверенный `git fetch` с лимитом 60 секунд; при недоступном
+   `github.com:443` — `ERROR: VPS could not reach github.com:443 ...`, а checkout остаётся без изменений.
+4. Если `/opt/day16/venv/bin/python` отсутствует, деплой останавливается до рестартов с ошибкой
+   `... would fail with 203/EXEC.` — вместо неинформативного статуса службы B.
+
+Совпадение коммита само по себе никогда не даёт PASS: и при `already deployed`, и при новом
+коммите итог выдаётся только после health- и tool-гейта.
 
 ### Ограничения дня 20
 
