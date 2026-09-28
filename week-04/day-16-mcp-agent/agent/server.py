@@ -120,6 +120,7 @@ class ServerEntry(BaseModel):
     protocol_version: str | None = None
     server: ServerInfo | None = None
     tools_count: int = 0
+    tool_names: list[str] = Field(default_factory=list)
     error: ErrorInfo | None = None
 
 
@@ -536,6 +537,11 @@ def create_app(
                 protocol_version=probe.status.protocol_version,
                 server=_server_info(probe.status),
                 tools_count=int(probe.status.tools_count),
+                tool_names=[
+                    str(tool.name)
+                    for tool in (probe.tools or [])
+                    if getattr(tool, "name", None)
+                ],
                 error=_error_info(probe.status.error),
             )
             for probe in probes

@@ -91,7 +91,11 @@ SYSTEM_PROMPT = (
     "tool. To watch news, first schedule or read the search in A "
     "('schedule_search_task'/'get_latest_search_run'), then create the watch with "
     "'create_notification_watch' in B, compare the run with 'evaluate_run', and send "
-    "with 'send_notification' only when it returned 'should_notify' true. Never claim "
+    "with 'send_notification' only when it returned 'should_notify' true. When you "
+    "create a notification watch in B after scheduling or reading a search in A, you "
+    "must pass the 'source_task_id' of that scheduled task to "
+    "'create_notification_watch', so the watch reads the result of its own task in A; "
+    "without it the watch cannot be checked. Never claim "
     "a notification was delivered unless 'send_notification' returned the status "
     "'sent' or 'duplicate'."
 )

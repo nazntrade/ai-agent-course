@@ -26,10 +26,14 @@ from harness.live_e2e import (
     TASKS_EXPECTED_TOOL_1,
     TASKS_SCHEDULE_CHAIN,
     TASKS_SUMMARY_CHAIN,
+    _watch_by_id,
+    chat_run_task_id,
+    created_watch_id_from_trace,
     key_is_isolated,
     monitor_run_scope,
     monitor_schedule_state,
     monitor_trace_state,
+    resolve_notifications_watch,
     search_result_urls,
     verify_composition_sse,
     verify_no_save_sse,
@@ -1352,6 +1356,126 @@ class NotificationsHarnessVerificationTest(unittest.TestCase):
         self.assertFalse(state["ok"])
         self.assertFalse(state["checks"]["baseline_last_check"])
         self.assertFalse(state["checks"]["baseline_next_moved"])
+
+
+class _FakeWatchListClient:
+    """A client whose ``call_tool`` returns a scripted watch list."""
+
+    def __init__(self, watches):
+        self._watches = list(watches)
+        self.calls = []
+
+    async def call_tool(self, name, arguments):
+        self.calls.append((name, arguments))
+        return SimpleNamespace(
+            ok=True,
+            structured={"count": len(self._watches), "watches": list(self._watches)},
+        )
+
+
+class NotificationWatchScopeTest(unittest.TestCase):
+    """The notifications watch is identified by its result, never by its query.
+
+    Regression: the LIVE scenario used to compare the free-text ``query`` with
+    ``WATCH_QUERY``, so a differently worded query hid the created watch and the
+    setup check falsely failed. The id must come from the tool result and the
+    ``source_task_id`` from a read of that exact watch.
+    """
+
+    def _records(self, request_id, watch_id, query):
+        return [
+            {"event": "request_start", "request_id": request_id, "trigger": "chat"},
+            {
+                "event": "tool_completed",
+                "request_id": request_id,
+                "tool": "create_notification_watch",
+                "ok": True,
+                "result": {"watch_id": watch_id, "query": query, "status": "active"},
+            },
+        ]
+
+    def test_created_watch_id_comes_from_the_tool_result_not_the_query(self):
+        records = self._records("r1", "w-1", "official Python documentation")
+        self.assertEqual(created_watch_id_from_trace(records, "r1"), "w-1")
+        # Another request's completion is never used.
+        self.assertEqual(created_watch_id_from_trace(records, "other"), "")
+
+    def test_watch_by_id_selects_the_requested_watch_among_two(self):
+        watches = [
+            {
+                "watch_id": "w-1",
+                "query": "python documentation",
+                "source_task_id": "t-1",
+            },
+            {
+                "watch_id": "w-2",
+                "query": "official Python documentation",
+                "source_task_id": "t-2",
+            },
+        ]
+        client = _FakeWatchListClient(watches)
+        selected = _watch_by_id(client, "chat-1", "w-2")
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["source_task_id"], "t-2")
+        self.assertIsNone(_watch_by_id(client, "chat-1", "missing"))
+        self.assertEqual(client.calls[0][0], "list_notification_watches")
+
+    def test_resolve_notifications_watch_uses_the_created_watch(self):
+        records = self._records("r1", "w-2", "official Python documentation")
+        client = _FakeWatchListClient(
+            [
+                {
+                    "watch_id": "w-1",
+                    "query": "python documentation",
+                    "source_task_id": "t-1",
+                },
+                {
+                    "watch_id": "w-2",
+                    "query": "official Python documentation",
+                    "source_task_id": "t-2",
+                },
+            ]
+        )
+        scope = resolve_notifications_watch(records, "r1", client, "chat-1", "t-2")
+        self.assertTrue(scope["ok"], msg=scope)
+        self.assertEqual(scope["watch_id"], "w-2")
+        self.assertEqual(scope["source_task_id"], "t-2")
+        # A watch linked to a different task must fail, not pass by text.
+        mismatch = resolve_notifications_watch(records, "r1", client, "chat-1", "t-1")
+        self.assertFalse(mismatch["ok"])
+        self.assertEqual(mismatch["watch_id"], "w-2")
+
+    def test_missing_watch_result_is_not_a_scope(self):
+        scope = resolve_notifications_watch(
+            [], None, _FakeWatchListClient([]), "chat-1", "t-1"
+        )
+        self.assertFalse(scope["ok"])
+        self.assertEqual(scope["watch_id"], "")
+
+    def test_chat_run_task_id_reads_the_last_selection_of_the_request(self):
+        records = [
+            {
+                "event": "tool_selected",
+                "request_id": "r1",
+                "tool": "get_latest_search_run",
+                "arguments": {"task_id": "t-1"},
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "r1",
+                "tool": "get_latest_search_run",
+                "arguments": {"task_id": "t-2"},
+            },
+            {
+                "event": "tool_selected",
+                "request_id": "r2",
+                "tool": "get_latest_search_run",
+                "arguments": {"task_id": "other-request"},
+            },
+        ]
+        self.assertEqual(chat_run_task_id(records, "r1"), "t-2")
+        self.assertEqual(chat_run_task_id(records, "r2"), "other-request")
+        self.assertEqual(chat_run_task_id(records, "missing"), "")
 
 
 class KeyIsolationTest(unittest.TestCase):

@@ -991,13 +991,14 @@ trace и SSE.
 | `agent/notifier_client.py` | host→B чтение подписок/доставок для API/UI |
 | `agent/mcp_adapter.py` | необязательное поле `McpTool.server` (default `None`) и категория `not_configured` |
 | `agent/orchestrator.py` | `server` в trace/SSE, per-server `mcp_connect`, агрегированный `mcp_list_tools.per_server`, `trigger`, `monitor_incomplete` |
-| `agent/server.py` | hub из A и B, `GET /api/mcp/servers`, `GET /api/chats/{id}/watches`, `create_app(..., enable_monitor=False)` |
+| `agent/server.py` | hub из A и B, `GET /api/mcp/servers` (в т.ч. аддитивное `tool_names`), `GET /api/chats/{id}/watches`, `create_app(..., enable_monitor=False)` |
 | `agent/__main__.py` | запуск монитора в реальном процессе backend (`enable_monitor=True`) |
 | `agent/settings.py` | `MCP_NOTIFIER_URL`, `NOTIFIER_MONITOR_ENABLED`, `NOTIFIER_MONITOR_TICK_SECONDS` (не читает `TELEGRAM_*`) |
 | `static/index.html`, `static/app.js`, `static/styles.css` | `MCP status` для двух серверов, `[A]`/`[B]` в `Technical details`, панель `Notification watches` |
 | `.env.example` | переменные сервера B и Telegram (без настоящих значений) |
 | `tests/*`, `tests/integration/test_notifier_live.py`, `harness/notifier_restart.py`, `harness/notifier_real_live.py`, `harness/live_e2e.py`, `harness/acceptance.py` | UNIT/INT/RESTART/LIVE/UI и opt-in REAL |
-| `docs/specs/day-20-multi-mcp-orchestration/{SPEC,PLAN,ACCEPTANCE}.md` | спецификация, план и критерии (D20-01…D20-29) |
+| `docs/vps-setup-day20.md` | инструкция первичной настройки VPS для сервиса B (без секретов; на VPS не выполнялась) |
+| `docs/specs/day-20-multi-mcp-orchestration/{SPEC,PLAN,ACCEPTANCE}.md` | спецификация, план и критерии (D20-01…D20-32) |
 
 `.bat` дня 20 остаются защищёнными точками входа. Проверки встроены в существующие
 `test.bat`, `smoke_test.bat`, `test.bat acceptance` через `harness/`. Отдельная доработка
@@ -1010,10 +1011,10 @@ trace и SSE.
 
 | Инструмент | Контракт |
 | --- | --- |
-| `create_notification_watch(query, keywords, exclude, interval_seconds, summary_interval_seconds, source_task_id, chat_id)` | создаёт подписку: что отслеживать, **явный** критерий и расписания; первый чек — точка отсчёта (`next_check_at = now`); критерий и расписание сохраняются и возвращаются |
-| `list_notification_watches(chat_id)` | подписки чата с состоянием, расписанием и последней доставкой |
-| `evaluate_run(watch_id, run, chat_id)` | принимает **весь** результат `get_latest_search_run` A; возвращает `{status, new_items, matched_count, known_count, is_baseline, should_notify, note}`; `error`/`empty`/`pending` — честно; malformed/чужой watch → structured `error`/`unknown_watch` без исключения; ничего не отправляет и не пишет seen-set (кроме baseline) |
-| `send_notification(watch_id, chat_id, kind, items)` | **единственная** точка отправки и записи seen/доставки; идемпотентно по `(watch_id, kind, period_key)`; статусы `sent`/`not_required`/`duplicate`/`failed`/`not_configured` |
+| `create_notification_watch(query, keywords, exclude, interval_seconds, summary_interval_seconds, source_task_id, chat_id)` | создаёт подписку: что отслеживать, **явный** критерий и расписания; `source_task_id` — id задания A, результат которого читает эта подписка (пусто → подписка не проверяется, `unknown_task`); первый чек — точка отсчёта (`next_check_at = now`); критерий и расписание сохраняются и возвращаются |
+| `list_notification_watches(chat_id)` | подписки чата с состоянием, расписанием, последней доставкой, `source_task_id`, `summary_due` и `next_summary_at` |
+| `evaluate_run(watch_id, run, chat_id)` | принимает **весь** результат `get_latest_search_run` A; возвращает `{status, new_items, matched_items, matched_count, known_count, is_baseline, should_notify, summary_due, next_summary_at, note}`; `matched_items` — все подходящие items прогона (включая seen), дедуплицированные; `error`/`empty`/`pending` — честно; malformed/чужой watch → structured `error`/`unknown_watch` без исключения; ничего не отправляет и не пишет seen-set (кроме baseline) |
+| `send_notification(watch_id, chat_id, kind, items)` | **единственная** точка отправки и записи seen/доставки; `new_items` с пустым списком → `not_required`; `summary` отправляет честное сообщение даже с пустым списком; идемпотентно по `(watch_id, kind, period_key)`; статусы `sent`/`not_required`/`duplicate`/`failed`/`not_configured` |
 | `get_delivery_status(watch_id, chat_id)` | последние доставки со статусами |
 | `stop_notification_watch(watch_id, chat_id)` | идемпотентная остановка |
 
@@ -1040,6 +1041,38 @@ trace и SSE.
   за простой промежуточные прогоны сознательно **не «догоняются»** (no backfill):
   items, бывшие только в промежуточных прогонах и исчезнувшие к моменту проверки,
   пропускаются. Это осознанное ограничение (SPEC §14).
+
+### Сводка по расписанию, `source_task_id` и `unknown_task`
+
+* **`new_items` и summary — разные уведомления.** `new_items` отправляется только
+  при появлении новых подходящих пунктов (пустой список → `not_required`, сообщения
+  нет). `summary` — регулярная сводка по расписанию
+  (`summary_interval_seconds`): она отправляется один раз за период `period_key`
+  вида `summary:<номер периода>` и **всегда** даёт честное сообщение, даже когда
+  подходящих результатов нет («`<query>: summary — no matching results in this
+  period.`»). Summary помечается как summary и никогда — как «new».
+* **`summary_due` и `next_summary_at`.** `list_notification_watches` (и
+  `evaluate_run`) показывают, «наступила» ли сводка для текущего периода
+  (`summary_due`, только после первого чека baseline и пока нет доставки `summary`
+  со статусом `sent`) и когда начинается следующий период (`next_summary_at`, ISO
+  UTC). Монитор (`agent/monitor.py`) при `summary_due=true` выполняет **второй**
+  ход: `get_latest_search_run` → `evaluate_run` → `send_notification(kind="summary",
+  items=matched_items)`. Неполный ход пишет `monitor_incomplete` и повторяется на
+  следующем тике.
+* **Привязка к заданию A (`source_task_id`).** Монитор читает результат именно
+  задания `source_task_id` своей подписки: host подставляет `task_id` в
+  `get_latest_search_run` после разбора аргументов модели, поэтому модель не может
+  подменить его — ни значением `watch_id`, ни значением другого задания. Два
+  задания и две подписки в одном чате не смешиваются. Если `source_task_id` пуст
+  или пробельный, ход **не запускается**: в журнал пишется предупреждение, а в
+  `tick()` счётчик `unknown_task` растёт; клиент A не вызывается. Fallback на
+  «последний прогон чата» запрещён.
+* **Ошибка Telegram и рестарт.** При ошибке доставки (`failed`) или отсутствии
+  настройки (`not_configured`) сообщение не считается отправленным, а доставка
+  сохраняется и **повторяется через ту же строку** (`attempts` растёт). Сводка
+  того же периода при повторе возвращает `duplicate` без второго сообщения. После
+  рестарта B состояние `deliveries`/`last_check_at` восстанавливается, поэтому
+  внутри периода дубль не создаётся, а старые результаты не подаются как «новые».
 
 ### Межсерверная цепочка в trace
 
@@ -1117,39 +1150,44 @@ REAL Telegram: .venv\Scripts\python.exe harness\notifier_real_live.py
 
 | Проверка | Команда | Результат |
 | --- | --- | --- |
-| UNIT | `test.bat` | `UNIT_STATUS: PASS` — 731 тест, 62 skipped |
-| INT + RESTART | `smoke_test.bat` | `MCP_PROBE_REGRESSION: PASS (posts=4)`, `NOTIFIER_INTEGRATION_STATUS: PASS`, `NOTIFIER_RESTART_STATUS: PASS`, а также `MCP/BACKEND/SEARCH/TASKS/REPORTS_INTEGRATION_STATUS`, `PERSISTENCE/SCHEDULER/REPORTS_RESTART_STATUS` — PASS |
-| LIVE + UI | `test.bat acceptance` (независимый прогон Tester) | **exit 0**, все статусы PASS: `LIVE_LLM_STATUS`, `SEARCH_LIVE_STATUS`, `TASKS_LIVE_STATUS`, `CHATS_UI_STATUS`, `TASKS_UI_STATUS`, `COMPOSITION_LIVE_STATUS`, `COMPOSITION_NO_SAVE_LIVE_STATUS`, `REPORTS_UI_STATUS`, `NOTIFICATIONS_LIVE_STATUS`, `NOTIFIER_SERVERS_UI_STATUS`, `NOTIFICATION_UI_STATUS`, `NOTIFICATIONS_MONITOR_LIVE_STATUS`; `NOTIFIER_REAL_STATUS: BLOCKED` (нет opt-in). В более раннем прогоне Developer агрегированный exit 1 дали **пре-существующие** флейки LIVE дней 17/19 (`SEARCH_LIVE_STATUS`, `COMPOSITION_LIVE_STATUS`) — см. «Ограничения» |
+| UNIT | `test.bat` | `UNIT_STATUS: PASS` — 807 тестов, 62 skipped (тесты сводки/`source_task_id`/`tool_names` и идентификации watch в harness) |
+| INT + RESTART | `smoke_test.bat` | `MCP_PROBE_REGRESSION: PASS (posts=4)`, `NOTIFIER_INTEGRATION_STATUS: PASS`, `NOTIFIER_RESTART_STATUS: PASS` (18/18 host-проверок, включая две подписки без смешения, сводку с дедупом после рестарта и `failed`→`sent`), а также `MCP/BACKEND/SEARCH/TASKS/REPORTS_INTEGRATION_STATUS`, `PERSISTENCE/SCHEDULER/REPORTS_RESTART_STATUS` — PASS |
+| LIVE + UI | `test.bat acceptance` (прогон Developer, сетевая модель) | **exit 0**, все статусы PASS: `LIVE_LLM_STATUS`, `SEARCH_LIVE_STATUS`, `SEARCH_UI_STATUS`, `TASKS_LIVE_STATUS`, `CHATS_UI_STATUS`, `TASKS_UI_STATUS`, `COMPOSITION_LIVE_STATUS`, `COMPOSITION_NO_SAVE_LIVE_STATUS`, `REPORTS_UI_STATUS`, `NOTIFICATIONS_LIVE_STATUS: PASS`, `NOTIFIER_SERVERS_UI_STATUS: PASS`, `NOTIFICATION_UI_STATUS: PASS`, `NOTIFICATIONS_MONITOR_LIVE_STATUS: PASS`; `NOTIFIER_REAL_STATUS: BLOCKED` (нет opt-in). В двух предыдущих попытках агрегированный exit 1 дали **не связанные с правкой** флейки LIVE/UI (`SEARCH_LIVE_STATUS` — модель дважды вызвала `search_web`; `NOTIFICATION_UI_STATUS` — таймаут браузера) — см. «Ограничения» |
 | REAL Telegram | ручной `harness\notifier_real_live.py` | `NOTIFIER_REAL_STATUS: BLOCKED` (нет opt-in/ключа) |
 | REAL Tavily | ручной opt-in (день 17/18/19) | `BLOCKED` (не вызывается автоматикой) |
 | VPS | ручной чек-лист (ниже) | не выполнялся |
 
-Разница 731 теста в `test.bat` и 702 в unit-шаге `test.bat acceptance` (29 тестов)
-объяснима и не является пропуском тестов дня 20: компонент acceptance запускает
-unit-набор через `sanitized_env()` без браузерных путей, поэтому три DOM-класса
-(`MarkdownRendererDomTest` и др.) пропускаются целиком — `731 − 29 = 702`, число
-skipped растёт 62 → 65 (по одному на класс). Все модули дня 20 выполняются в обоих
-прогонах. Замечание Tester о расхождении счётчиков этим закрывается.
+`test.bat` (807 тестов, 62 skipped) и unit-шаг `test.bat acceptance` (773 теста,
+66 skipped) отличаются на 34 теста: компонент acceptance запускает unit-набор
+через `sanitized_env()` без браузерных путей, поэтому DOM-классы пропускаются
+целиком. Это не пропуск тестов дня 20.
 
-Проверка Tester (независимая приёмка): `test.bat`, `smoke_test.bat` и
-`test.bat acceptance` запущены заново; результаты совпали, `TEST_STATUS: PASS`.
-Подтверждены два раздельных сервера со своими `tools/list` (A=9, B=6), отсутствие
-прямого A→B, trace-цепочка с полем `server`, baseline без рассылки, дедупликация
-(повтор того же материала — без второго сообщения; два разных материала в одном
-периоде — две доставки), сохранение состояния после рестарта, B-down ветки без 5xx,
-безопасность Telegram и регрессии дней 16–19. Единственные `BLOCKED`-пункты —
-D20-23 (реальный Telegram), реальный Tavily и VPS.
+Приёмочный harness исправлен по результату Tester: в сценарии `notifications`
+watch теперь идентифицируется по `watch_id` из trace (`tool_completed`
+`create_notification_watch`), а не по свободному тексту `query`, и сценарий
+больше не подменяет задание после создания watch — baseline поглощается
+host-side пустым прогоном, а check-ход читает задание из `source_task_id`
+наблюдения. Дефект закрыт детерминированным UNIT-тестом
+(`NotificationWatchScopeTest`) и подтверждённым прогоном
+`NOTIFICATIONS_LIVE_STATUS: PASS`; независимую перепроверку выполняет Tester
+(этот блок не является его вердиктом).
 
-### Локальная модель в LIVE-прогонах
+### Тестовая модель в LIVE-прогонах
 
-LIVE-шаги дня 20 проходили на **`AGENT_MODEL_NAME=qwen3.8-27b-local`**
-(OpenAI-compatible, loopback `127.0.0.1:8080`). Это **не** модель ролей в
-Control Center — это отдельная настройка проверяемого приложения.
-`MODEL_CHECK_KIND: LOCAL`; `LOCAL_MODEL_START: PASS`, `LOCAL_MODEL_INFERENCE: PASS`,
-`LOCAL_SCENARIO_TEST: PASS`. Фактические токены/скорость — н/д (локальный endpoint
-их не отдаёт harness'у). В чат-сценарии `send_notification.status=sent`, а payload
-фейкового Telegram содержит URL из `tests/support/fake_search.py::RESULT_URLS`; в
-monitor-сценарии первый чек — baseline без отправки, затем второй тик даёт `sent`.
+Последний приёмочный прогон (`test.bat acceptance`, exit 0) выполнен на сетевой
+модели **`AI_TEST_MODEL_NAME=deepseek-flash`** (OpenAI-compatible endpoint
+`127.0.0.1:54811/v1`, `AI_TEST_MODEL_KIND=remote`). Это **не** модель ролей в
+Control Center — это отдельная настройка проверяемого приложения;
+`MODEL_CHECK_KIND: NETWORK`. Фактические токены/скорость модель не отдаёт
+harness'у — н/д. В live-уведомлениях `send_notification.status=sent`, а payload
+фейкового Telegram содержит URL из
+`tests/support/fake_search.py::RESULT_URLS`; monitor-сценарий в том же прогоне
+дал `NOTIFICATIONS_MONITOR_LIVE_STATUS: PASS`.
+
+Более ранние LIVE-прогоны дня 20 шли на локальной
+**`AGENT_MODEL_NAME=qwen3.8-27b-local`** (`MODEL_CHECK_KIND: LOCAL`,
+`LOCAL_MODEL_START/INFERENCE/SCENARIO_TEST: PASS`); выбранная модель передаётся
+через `AI_TEST_MODEL_*` и не является постоянной частью конфигурации.
 
 ### Сценарий демонстрации и короткий сценарий видео
 
@@ -1193,18 +1231,26 @@ run_app.bat                (поднимает A, B и backend и открыва
 
 ### Чек-лист VPS-деплоя (только для оператора; VPS не изменялся)
 
-1. Запустить третий сервис B (`notifier_server`) под process manager с
-   `Restart=always`, отдельный порт 8766 (или иной через `MCP_NOTIFIER_PORT`).
-2. `NOTIFIER_DB_PATH` — абсолютный путь вне деплой-каталога (например
-   `/var/lib/day16/day20-notifier.sqlite3`), каталог принадлежит пользователю
-   сервиса.
-3. `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` — только в окружении сервиса B
-   (`EnvironmentFile`), права файла ограничены.
-4. `MCP_NOTIFIER_URL` в backend-юните указывает на loopback-порт B.
-5. Проверить `/api/mcp/servers`: A и B `connected`; при остановке B — `connected:false`,
-   без 5xx.
-6. Убедиться, что деплой A/backend не требует изменений (A не переписывался).
-7. Резервное копирование БД B отдельно от БД A.
+Полная пошаговая инструкция первичной настройки — `docs/vps-setup-day20.md`.
+
+1. Запустить третий сервис B `day16-notifier` (`python -m notifier_server`) из
+   `.venv`, отдельный порт 8766 (или иной через `MCP_NOTIFIER_PORT`), `enabled`.
+2. `NOTIFIER_DB_PATH=/var/lib/day16/notifier/day20-notifier.sqlite3` — абсолютный
+   путь **вне** Git-каталога `/opt/day16/repo`, каталог принадлежит `day16`.
+   `deploy_vps.sh` проверяет и то, и другое.
+3. `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` — только в `/etc/day16/notifier.env`
+   (`root:root`, mode 600, `EnvironmentFile` сервиса B). В проектом `.env` этих
+   переменных быть не должно; `deploy_vps.sh` отказывается деплоить при их наличии.
+4. `MCP_NOTIFIER_URL` в backend-окружении указывает на loopback-порт B.
+5. Порядок рестарта деплоя: `day16-mcp` (A) → `day16-notifier` (B) →
+   `day16-backend`; после каждого `systemctl is-active`.
+6. Проверить `/api/mcp/servers`: A и B `connected`, а аддитивное поле `tool_names`
+   каждого сервера совпадает с зарегистрированными инструментами
+   (`mcp_server/server.py`, `notifier_server/server.py`). `deploy_vps.sh` печатает
+   `DEPLOY_STATUS: PASS` только тогда, когда backend healthy и совпали оба списка;
+   секреты в лог не печатаются. При остановке B — `connected:false`, без 5xx.
+7. Убедиться, что деплой A/backend не требует изменений (A не переписывался).
+8. Резервное копирование БД B отдельно от БД A.
 
 ### Ограничения дня 20
 

@@ -48,7 +48,6 @@ from storage.chats import ChatRepository  # noqa: E402
 from storage.db import Database  # noqa: E402
 from tests.support.fake_search import (  # noqa: E402
     DUPLICATES_MARKER,
-    EMPTY_MARKER,
     FAKE_API_KEY,
     MANY_MARKER,
     RESULT_URLS,
@@ -214,6 +213,11 @@ async def _scenario(
     report: dict,
 ) -> bool:
     # --- create state -----------------------------------------------------
+    # The watch reads the result of its own scheduled task, so the results task
+    # exists first and the watch is created with its ``source_task_id``.
+    first_task = await _schedule(mcp_url, chat_id, WATCH_QUERY)
+    first_run = await _wait_run(mcp_url, chat_id, first_task, statuses=("ok",))
+
     created = await _call(
         notifier_url,
         "create_notification_watch",
@@ -222,6 +226,7 @@ async def _scenario(
             "keywords": list(WATCH_KEYWORDS),
             "interval_seconds": WATCH_INTERVAL_SECONDS,
             "summary_interval_seconds": WATCH_SUMMARY_INTERVAL_SECONDS,
+            "source_task_id": first_task,
             "chat_id": chat_id,
         },
     )
@@ -229,18 +234,18 @@ async def _scenario(
         raise RuntimeError(f"create_notification_watch failed: {created.text}")
     watch_id = created.structured["watch_id"]
 
-    empty_task = await _schedule(mcp_url, chat_id, EMPTY_MARKER)
-    empty_run = await _wait_run(mcp_url, chat_id, empty_task, statuses=("empty",))
+    # Host-side baseline with an empty run, then deliver the task's results.
+    # The baseline must not send; the next check finds every link as new.
     baseline = await _call(
         notifier_url,
         "evaluate_run",
-        {"watch_id": watch_id, "run": empty_run, "chat_id": chat_id},
+        {
+            "watch_id": watch_id,
+            "run": {"status": "empty", "results": []},
+            "chat_id": chat_id,
+        },
     )
     baseline_payload = baseline.structured or {}
-    await _stop_task(mcp_url, chat_id, empty_task)
-
-    first_task = await _schedule(mcp_url, chat_id, WATCH_QUERY)
-    first_run = await _wait_run(mcp_url, chat_id, first_task, statuses=("ok",))
     evaluated = await _call(
         notifier_url,
         "evaluate_run",
@@ -259,27 +264,100 @@ async def _scenario(
     )
     sent1_payload = sent1.structured or {}
     delivery1 = sent1_payload.get("delivery_id")
+
+    # A scheduled summary is sent once per period, even with no matching results.
+    summary1 = await _call(
+        notifier_url,
+        "send_notification",
+        {"watch_id": watch_id, "chat_id": chat_id, "kind": "summary", "items": []},
+    )
+    summary1_payload = summary1.structured or {}
+    summary_delivery = summary1_payload.get("delivery_id")
+
+    # --- a second task and a second watch in the same chat -----------------
+    second_task = await _schedule(mcp_url, chat_id, MANY_MARKER)
+    second_run = await _wait_run(mcp_url, chat_id, second_task, statuses=("ok",))
+    created2 = await _call(
+        notifier_url,
+        "create_notification_watch",
+        {
+            "query": WATCH_QUERY,
+            "keywords": list(WATCH_KEYWORDS),
+            "interval_seconds": WATCH_INTERVAL_SECONDS,
+            "summary_interval_seconds": WATCH_SUMMARY_INTERVAL_SECONDS,
+            "source_task_id": second_task,
+            "chat_id": chat_id,
+        },
+    )
+    if not created2.ok:
+        raise RuntimeError(f"second create_notification_watch failed: {created2.text}")
+    watch2 = created2.structured["watch_id"]
+    await _call(
+        notifier_url,
+        "evaluate_run",
+        {
+            "watch_id": watch2,
+            "run": {"status": "empty", "results": []},
+            "chat_id": chat_id,
+        },
+    )
+    evaluated2 = await _call(
+        notifier_url,
+        "evaluate_run",
+        {"watch_id": watch2, "run": second_run, "chat_id": chat_id},
+    )
+    items2 = (evaluated2.structured or {}).get("new_items") or []
+    sent2a = await _call(
+        notifier_url,
+        "send_notification",
+        {
+            "watch_id": watch2,
+            "chat_id": chat_id,
+            "kind": "new_items",
+            "items": items2,
+        },
+    )
+    # Free both active task slots so the later ``_schedule`` calls create fresh
+    # tasks instead of reusing an existing active one with the same query.
     await _stop_task(mcp_url, chat_id, first_task)
+    await _stop_task(mcp_url, chat_id, second_task)
 
     listed_before = await _call(
         notifier_url, "list_notification_watches", {"chat_id": chat_id}
     )
     listed_before_watches = (listed_before.structured or {}).get("watches") or []
-    seen_before = listed_before_watches[0]["seen_count"] if listed_before_watches else -1
+    by_id = {w.get("watch_id"): w for w in listed_before_watches}
+    seen_before = int((by_id.get(watch_id) or {}).get("seen_count") or 0)
+    seen2_before = int((by_id.get(watch2) or {}).get("seen_count") or 0)
+    scope1_before = (by_id.get(watch_id) or {}).get("source_task_id")
+    scope2_before = (by_id.get(watch2) or {}).get("source_task_id")
+    summary_due_before = (by_id.get(watch_id) or {}).get("summary_due")
     deliveries_before = await _call(
         notifier_url,
         "get_delivery_status",
         {"watch_id": watch_id, "chat_id": chat_id},
     )
     count_before = (deliveries_before.structured or {}).get("count")
+    chat_deliveries_before = await _call(
+        notifier_url, "get_delivery_status", {"chat_id": chat_id}
+    )
+    chat_list_before = (chat_deliveries_before.structured or {}).get("deliveries") or []
     messages_before_stop = telegram.message_count
 
     report["before_stop"] = {
         "watch_id": watch_id,
+        "second_watch_id": watch2,
         "baseline_is_baseline": bool(baseline_payload.get("is_baseline")),
         "first_status": sent1_payload.get("status"),
+        "summary_status": summary1_payload.get("status"),
+        "summary_due_after_summary": summary_due_before,
         "seen_count": seen_before,
+        "second_seen_count": seen2_before,
         "delivery_count": count_before,
+        "watch_count": len(listed_before_watches),
+        "delivery_watch_ids": sorted(
+            {str(entry.get("watch_id")) for entry in chat_list_before}
+        ),
     }
 
     # --- stop server B, accumulate server A runs --------------------------
@@ -310,16 +388,27 @@ async def _scenario(
         notifier_url, "list_notification_watches", {"chat_id": chat_id}
     )
     listed_after_watches = (listed_after.structured or {}).get("watches") or []
-    seen_after = listed_after_watches[0]["seen_count"] if listed_after_watches else -1
-    last_delivery = (
-        listed_after_watches[0].get("last_delivery") if listed_after_watches else None
-    )
+    by_id_after = {w.get("watch_id"): w for w in listed_after_watches}
+    watch1_after = by_id_after.get(watch_id) or {}
+    watch2_after = by_id_after.get(watch2) or {}
+    seen_after = int(watch1_after.get("seen_count") or 0)
+    seen2_after = int(watch2_after.get("seen_count") or 0)
+    last_delivery = watch1_after.get("last_delivery")
     deliveries_after = await _call(
         notifier_url,
         "get_delivery_status",
         {"watch_id": watch_id, "chat_id": chat_id},
     )
     count_after = (deliveries_after.structured or {}).get("count")
+
+    # The same summary period after a restart must be a duplicate, not a second
+    # message: the period key and the sent row are persisted in ``deliveries``.
+    repeat_summary = await _call(
+        notifier_url,
+        "send_notification",
+        {"watch_id": watch_id, "chat_id": chat_id, "kind": "summary", "items": []},
+    )
+    repeat_summary_payload = repeat_summary.structured or {}
 
     repeat = await _call(
         notifier_url,
@@ -332,6 +421,47 @@ async def _scenario(
         },
     )
     repeat_payload = repeat.structured or {}
+
+    # --- a failed delivery is recorded and retried on the same row --------
+    error_run = {
+        "status": "ok",
+        "results": [
+            {
+                "title": "Python retry page",
+                "url": "https://docs.example.test/retry/1",
+                "description": "python retry",
+            }
+        ],
+    }
+    error_eval = await _call(
+        notifier_url,
+        "evaluate_run",
+        {"watch_id": watch2, "run": error_run, "chat_id": chat_id},
+    )
+    error_items = (error_eval.structured or {}).get("new_items") or []
+    telegram.fail_next(1)
+    failed_send = await _call(
+        notifier_url,
+        "send_notification",
+        {
+            "watch_id": watch2,
+            "chat_id": chat_id,
+            "kind": "new_items",
+            "items": error_items,
+        },
+    )
+    failed_payload = failed_send.structured or {}
+    retry_send = await _call(
+        notifier_url,
+        "send_notification",
+        {
+            "watch_id": watch2,
+            "chat_id": chat_id,
+            "kind": "new_items",
+            "items": error_items,
+        },
+    )
+    retry_payload = retry_send.structured or {}
 
     # --- no backfill: only the latest accumulated run ---------------------
     latest = await _call(mcp_url, "get_latest_search_run", {"chat_id": chat_id})
@@ -357,29 +487,75 @@ async def _scenario(
     )
     sent2_payload = sent2.structured or {}
     sent_messages = telegram.messages[messages_before_send2:]
+    chat_deliveries_after = await _call(
+        notifier_url, "get_delivery_status", {"chat_id": chat_id}
+    )
+    chat_list_after = (chat_deliveries_after.structured or {}).get("deliveries") or []
 
     report["after_restart"] = {
         "seen_count": seen_after,
         "seen_before": seen_before,
+        "second_seen_count": seen2_after,
+        "second_seen_before": seen2_before,
         "delivery_count": count_after,
         "last_delivery_status": (last_delivery or {}).get("status"),
+        "summary_repeat_status": repeat_summary_payload.get("status"),
+        "summary_repeat_same_id": repeat_summary_payload.get("delivery_id")
+        == summary_delivery,
         "repeat_status": repeat_payload.get("status"),
         "repeat_same_id": repeat_payload.get("delivery_id") == delivery1,
         "latest_task": latest_payload.get("task_id"),
         "latest_urls": sorted(latest_urls),
         "second_send_status": sent2_payload.get("status"),
         "messages_sent_after_restart": len(sent_messages),
+        "delivery_watch_ids": sorted(
+            {str(entry.get("watch_id")) for entry in chat_list_after}
+        ),
     }
+    report["delivery_error"] = {
+        "failed_status": failed_payload.get("status"),
+        "failed_attempts": failed_payload.get("attempts"),
+        "retry_status": retry_payload.get("status"),
+        "retry_attempts": retry_payload.get("attempts"),
+        "same_delivery_id": retry_payload.get("delivery_id")
+        == failed_payload.get("delivery_id"),
+    }
+
+    scope1_after = watch1_after.get("source_task_id")
+    scope2_after = watch2_after.get("source_task_id")
 
     checks = {
         "baseline": bool(baseline_payload.get("is_baseline"))
         and not baseline_payload.get("should_notify"),
         "first_sent": sent1_payload.get("status") == "sent",
-        "seen_persisted": seen_after == seen_before == len(RESULT_URLS),
-        "delivery_persisted": count_after == count_before == 1,
+        "summary_sent": summary1_payload.get("status") == "sent"
+        and summary_due_before is False,
+        "summary_duplicate_after_restart": repeat_summary_payload.get("status")
+        == "duplicate"
+        and repeat_summary_payload.get("delivery_id") == summary_delivery,
+        "two_watches": len(listed_before_watches) == 2
+        and len(listed_after_watches) == 2,
+        "watch_scopes_persisted": scope1_before == first_task
+        and scope2_before == second_task
+        and scope1_after == first_task
+        and scope2_after == second_task,
+        "no_seen_mixing": seen_before == len(RESULT_URLS)
+        and seen2_before == int(second_run.get("result_count") or -1)
+        and seen_after == seen_before
+        and seen2_after == seen2_before,
+        "deliveries_not_mixed": {watch_id, watch2} <= set(
+            str(entry.get("watch_id")) for entry in chat_list_before
+        ),
+        "seen_persisted": seen_after == seen_before,
+        "delivery_persisted": count_after == count_before == 2,
         "last_delivery_sent": (last_delivery or {}).get("status") == "sent",
         "repeat_duplicate": repeat_payload.get("status") == "duplicate"
         and repeat_payload.get("delivery_id") == delivery1,
+        "failed_delivery_retried": failed_payload.get("status") == "failed"
+        and failed_payload.get("attempts") == 1
+        and retry_payload.get("status") == "sent"
+        and retry_payload.get("attempts") == 2
+        and retry_payload.get("delivery_id") == failed_payload.get("delivery_id"),
         "latest_is_the_new_task": latest_payload.get("task_id") == new_task,
         "no_backfill": bool(latest_urls)
         and all("reference/" in url for url in latest_urls)

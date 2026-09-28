@@ -75,7 +75,6 @@ from storage.chats import ChatRepository  # noqa: E402
 from storage.db import Database  # noqa: E402
 from storage.reports import ReportRepository  # noqa: E402
 from tests.support.fake_search import (  # noqa: E402
-    EMPTY_MARKER,
     FAKE_API_KEY,
     MANY_MARKER,
     RESULT_URLS,
@@ -240,15 +239,26 @@ WATCH_KEYWORDS = ["python"]
 # deterministic search fake (it always answers with Python-documentation links),
 # so the LIVE scenario monitors that fixture topic; the observable behaviour —
 # a real A→B tool chain with a Telegram-shaped delivery — is the same.
+# The setup turn creates the watch but must NOT compare the run: the baseline is
+# consumed host-side later, so no matching item becomes seen as a candidate.
 NOTIFICATIONS_SETUP_QUESTION = (
-    "Please set up a Telegram notification watch for the official Python "
-    "documentation. Read the latest saved search run of this chat and use the "
-    "keyword 'python'. Compare the run with the watch now, but do not send "
-    "anything yet: this first check is only the starting point."
+    "Please create a Telegram notification watch for the official Python "
+    "documentation with the keyword 'python', interval_seconds=60 and "
+    "summary_interval_seconds=3600. Read the latest saved search run of this "
+    "chat first, and link the watch to that scheduled task by passing its task "
+    "id as 'source_task_id'. Do not compare the run with the watch and do not "
+    "send anything yet: the starting point is set up later."
 )
-NOTIFICATIONS_CHECK_QUESTION = (
-    "Now check that notification watch again and send me any new matching "
-    "items in Telegram."
+# The check turn names the watch id (the chat path does not inject it); the model
+# must read the watch's own ``source_task_id`` and pass it as the A ``task_id``,
+# because the monitor/host does not own the read scope on the chat path.
+NOTIFICATIONS_CHECK_QUESTION_TEMPLATE = (
+    "Now check the notification watch with id '{watch_id}' and send me any new "
+    "matching items in Telegram. Read that watch with "
+    "'list_notification_watches' to get its 'source_task_id', read the latest "
+    "saved search run of that task with 'get_latest_search_run' by passing its "
+    "task id as 'task_id', compare the run with 'evaluate_run', and call "
+    "'send_notification' with 'new_items' when it returned 'should_notify' true."
 )
 NOTIFICATIONS_UI_QUESTION = (
     "Read the latest saved search run of this chat and create a Telegram "
@@ -2044,6 +2054,71 @@ def _completed_payload(records: list, request_id: str | None, tool: str) -> dict
     return result if isinstance(result, dict) else {}
 
 
+def created_watch_id_from_trace(records: list, request_id: str | None) -> str:
+    """The watch id created by one request, from its tool result.
+
+    The watch is identified by the structured ``create_notification_watch``
+    result (``watch_id``), never by the free-text ``query`` the model chose: the
+    same watch may be requested with different wording, so matching the query
+    text produces false negatives.
+    """
+    payload = _completed_payload(records, request_id, "create_notification_watch")
+    return str(payload.get("watch_id") or "")
+
+
+def _watch_by_id(client, chat_id: str, watch_id: str) -> dict | None:
+    """Read one watch item from server B by its id (never by its query text)."""
+    if not watch_id:
+        return None
+    listed = asyncio.run(
+        client.call_tool("list_notification_watches", {"chat_id": str(chat_id)})
+    )
+    watches = (listed.structured or {}).get("watches") or []
+    for watch in watches:
+        if isinstance(watch, dict) and str(watch.get("watch_id")) == str(watch_id):
+            return watch
+    return None
+
+
+def resolve_notifications_watch(
+    records: list, request_id: str | None, client, chat_id: str, expected_task_id: str
+) -> dict:
+    """Resolve the watch created by ``request_id`` and its A-read scope.
+
+    Combines the deterministic trace identification with a server-B read of the
+    watch's ``source_task_id``. The result ``ok`` requires that the watch exists
+    and is linked to the expected task; a watch found by the free-text query is
+    never used.
+    """
+    watch_id = created_watch_id_from_trace(records, request_id)
+    watch = _watch_by_id(client, chat_id, watch_id) if watch_id else None
+    source_task_id = str((watch or {}).get("source_task_id") or "")
+    expected = str(expected_task_id or "")
+    return {
+        "ok": bool(watch_id) and bool(source_task_id) and source_task_id == expected,
+        "watch_id": watch_id,
+        "source_task_id": source_task_id,
+        "expected_task_id": expected,
+        "watch": watch,
+    }
+
+
+def chat_run_task_id(records: list, request_id: str | None) -> str:
+    """The ``task_id`` of the last ``get_latest_search_run`` call in a request."""
+    selected = [
+        record
+        for record in records
+        if record.get("event") == "tool_selected"
+        and record.get("tool") == "get_latest_search_run"
+        and (request_id is None or record.get("request_id") == request_id)
+    ]
+    if not selected:
+        return ""
+    arguments = selected[-1].get("arguments")
+    arguments = arguments if isinstance(arguments, dict) else {}
+    return str(arguments.get("task_id") or "")
+
+
 def verify_notifications_delivery(
     records: list,
     request_id: str | None,
@@ -2140,12 +2215,16 @@ def monitor_trace_state(records: list, watch_id: str) -> dict:
     }
 
 
-def monitor_run_scope(records: list, watch_id: str) -> dict:
+def monitor_run_scope(
+    records: list, watch_id: str, expected_task_id: str | None = None
+) -> dict:
     """The effective A-read scope of one watch's monitor turns, from the trace.
 
-    The host injects an empty ``task_id`` before validation, so the recorded
-    ``tool_selected`` arguments are the real call arguments: an empty ``task_id``
-    proves the model did not smuggle the watch id into the read scope.
+    The host injects the watch's ``source_task_id`` before validation, so the
+    recorded ``tool_selected`` arguments are the real call arguments. With
+    ``expected_task_id`` every monitor read must equal it; without it the legacy
+    contract applies (every monitor read is the empty ``task_id`` of the old
+    host default). In both cases the watch id must never appear as ``task_id``.
     """
     id_set = set(_monitor_request_ids(records, watch_id))
     reads: list = []
@@ -2164,8 +2243,21 @@ def monitor_run_scope(records: list, watch_id: str) -> dict:
                 "task_id": arguments.get("task_id"),
             }
         )
-    ok = bool(reads) and all(read["task_id"] == "" for read in reads)
-    return {"ok": ok, "count": len(reads), "reads": reads}
+    if expected_task_id is None:
+        expected = ""
+    else:
+        expected = str(expected_task_id)
+    ok = (
+        bool(reads)
+        and all(read["task_id"] == expected for read in reads)
+        and all(read["task_id"] != str(watch_id) for read in reads)
+    )
+    return {
+        "ok": ok,
+        "count": len(reads),
+        "expected_task_id": expected,
+        "reads": reads,
+    }
 
 
 def _seen_count(watch) -> int:
@@ -2429,11 +2521,14 @@ def _run_notifications_turns(
 ) -> str:
     """Run the LIVE chat A→B turns of the notifications scenario.
 
-    A deterministic starting point is seeded first: a real server A task whose
-    run finishes ``empty``. The first model turn reads that run and creates the
-    watch, so the baseline records nothing to send; the harness then replaces the
-    empty task with one that returns the fixture links, and the second turn must
-    compare and deliver them with ``send_notification``.
+    The result task is seeded first and stays for the whole scenario: the watch
+    must read its **own** task (``source_task_id``), so the harness never swaps the
+    task after the watch exists. The setup turn creates the watch linked to that
+    task without comparing it; the harness then consumes the baseline host-side
+    with an empty run (no message), and the check turn reads the watch's
+    ``source_task_id``, reads that task's ``ok`` run and delivers the new items
+    with ``send_notification``. The watch is identified by its structured tool
+    result (``watch_id``), never by the free-text query.
     """
     if not model_ready:
         report["notifications_live_reason"] = "no local OpenAI-compatible model"
@@ -2442,20 +2537,34 @@ def _run_notifications_turns(
     chat_id = _create_chat(backend_url, "Notifications live")
     report["notifications_chat_id"] = chat_id
     a_client = SdkMcpClient(mcp_url, call_timeout_s=30.0)
+    b_client = SdkMcpClient(notifier_url, call_timeout_s=30.0)
 
+    # The result task stays active for the whole scenario.
     seeded = asyncio.run(
         a_client.call_tool(
             "schedule_search_task",
-            {"query": EMPTY_MARKER, "interval_seconds": 3600, "chat_id": chat_id},
+            {"query": WATCH_QUERY, "interval_seconds": 3600, "chat_id": chat_id},
         )
     )
     if not seeded.ok:
         report["notifications_seed_error"] = seeded.text
         return "FAIL"
-    empty_task = (seeded.structured or {}).get("task_id", "")
-    empty_run = _wait_for_run(a_client, chat_id, empty_task, ("empty",))
-    report["notifications_empty_run"] = empty_run.get("status")
+    result_task = (seeded.structured or {}).get("task_id", "")
+    result_run = _wait_for_run(a_client, chat_id, result_task, ("ok",))
+    if result_run.get("status") != "ok":
+        report["notifications_seed_error"] = (
+            "the result task run did not finish ok: "
+            f"status={result_run.get('status')}"
+        )
+        return "FAIL"
+    report["notifications_seed_run"] = {
+        "status": result_run.get("status"),
+        "task_id": result_task,
+        "result_count": result_run.get("result_count"),
+    }
 
+    # Setup turn: the model links the watch to the result task, with no baseline
+    # and no send. The watch is resolved by its result, not by its query text.
     events_setup = collect_sse(
         f"{backend_url}/api/chat/stream",
         {"chat_id": chat_id, "message": NOTIFICATIONS_SETUP_QUESTION},
@@ -2464,47 +2573,84 @@ def _run_notifications_turns(
     records = read_trace(records_path)
     ids = _request_ids(records)
     setup_id = ids[-1] if ids else None
+    setup_messages = telegram.message_count
+    scope = resolve_notifications_watch(
+        records, setup_id, b_client, chat_id, result_task
+    )
+    watch_id = scope["watch_id"]
+    watch_source = scope["source_task_id"]
+    watch_scope_ok = bool(scope["ok"])
+    baseline_absent = verify_tool_absent(records, setup_id, "evaluate_run")
     setup_trace = {
         "servers": verify_servers_connected(records, setup_id),
         "chain": verify_server_chain(records, setup_id),
         "sse": verify_servers_sse(events_setup),
+        "watch_scope": {
+            "ok": watch_scope_ok,
+            "watch_id": watch_id,
+            "source_task_id": watch_source,
+            "result_task_id": result_task,
+        },
+        "baseline_absent": baseline_absent,
+        "telegram_messages": setup_messages,
     }
     report["notifications_setup"] = setup_trace
 
-    asyncio.run(
-        a_client.call_tool(
-            "stop_search_task", {"task_id": empty_task, "chat_id": chat_id}
-        )
-    )
-    created = asyncio.run(
-        a_client.call_tool(
-            "schedule_search_task",
-            {"query": WATCH_QUERY, "interval_seconds": 3600, "chat_id": chat_id},
-        )
-    )
-    if not created.ok:
-        report["notifications_second_task_error"] = created.text
+    if not watch_id:
+        report["notifications_setup_error"] = "the model created no notification watch"
         return "FAIL"
-    new_task = (created.structured or {}).get("task_id", "")
-    new_run = _wait_for_run(a_client, chat_id, new_task, ("ok",))
-    report["notifications_new_run"] = {
-        "status": new_run.get("status"),
-        "task_id": new_task,
-        "result_count": new_run.get("result_count"),
+
+    # Host-side baseline: an empty run consumes the starting point without a
+    # message, so the result task's links are still new at the check turn.
+    messages_before_baseline = telegram.message_count
+    baseline = asyncio.run(
+        b_client.call_tool(
+            "evaluate_run",
+            {
+                "watch_id": watch_id,
+                "run": {"status": "empty", "results": []},
+                "chat_id": chat_id,
+            },
+        )
+    )
+    baseline_payload = baseline.structured or {}
+    baseline_messages = telegram.message_count - messages_before_baseline
+    baseline_ok = (
+        bool(baseline_payload.get("is_baseline"))
+        and baseline_messages == 0
+        and setup_messages == 0
+    )
+    report["notifications_baseline"] = {
+        "ok": baseline_ok,
+        "is_baseline": bool(baseline_payload.get("is_baseline")),
+        "telegram_messages": baseline_messages,
+        "setup_telegram_messages": setup_messages,
     }
 
+    # Check turn: read the watch's source_task_id, then that task's run, evaluate
+    # and deliver the new items.
     events_check = collect_sse(
         f"{backend_url}/api/chat/stream",
-        {"chat_id": chat_id, "message": NOTIFICATIONS_CHECK_QUESTION},
+        {
+            "chat_id": chat_id,
+            "message": NOTIFICATIONS_CHECK_QUESTION_TEMPLATE.format(watch_id=watch_id),
+        },
         timeout_s=1800.0,
     )
     records = read_trace(records_path)
     ids = _request_ids(records)
     check_id = ids[-1] if ids else None
+    check_task = chat_run_task_id(records, check_id)
+    run_scope_ok = bool(check_task) and check_task == watch_source
     check_trace = {
         "servers": verify_servers_connected(records, check_id),
         "chain": verify_server_chain(records, check_id),
         "sse": verify_servers_sse(events_check),
+        "run_scope": {
+            "ok": run_scope_ok,
+            "task_id": check_task,
+            "source_task_id": watch_source,
+        },
     }
     delivery = verify_notifications_delivery(
         records, check_id, telegram.messages, require_sent=True
@@ -2516,9 +2662,13 @@ def _run_notifications_turns(
         bool(setup_trace["servers"]["ok"])
         and bool(setup_trace["chain"]["ok"])
         and bool(setup_trace["sse"]["ok"])
+        and watch_scope_ok
+        and bool(baseline_absent["ok"])
+        and baseline_ok
         and bool(check_trace["servers"]["ok"])
         and bool(check_trace["chain"]["ok"])
         and bool(check_trace["sse"]["ok"])
+        and run_scope_ok
         and bool(delivery["ok"])
     )
     return "PASS" if ok else "FAIL"
@@ -2536,10 +2686,12 @@ def _run_notifications_monitor(
 ) -> str:
     """Run the monitor-LIVE scenario without the baseline race (ACCEPTANCE §2).
 
-    The steps are ordered on purpose: the empty run is recorded **before** the
-    watch exists, the watch is created host→B (not through the model), the first
-    monitor tick consumes the baseline without sending, then a real ``ok`` run
-    with the fixture links makes the second due tick deliver them.
+    The steps are ordered on purpose: the results task exists first, the watch is
+    created host→B (not through the model) with that task as its
+    ``source_task_id``, the harness consumes the baseline host-side with an empty
+    run (no message), and the first real monitor tick then reads the task's
+    stored ``ok`` run and delivers the fixture links as ``new_items``. The
+    injected A-read scope must equal the watch's ``source_task_id``.
     """
     if not model_ready:
         report["notifications_monitor_reason"] = "no local OpenAI-compatible model"
@@ -2550,18 +2702,24 @@ def _run_notifications_monitor(
     a_client = SdkMcpClient(mcp_url, call_timeout_s=30.0)
     b_client = SdkMcpClient(notifier_url, call_timeout_s=30.0)
 
+    # The watch reads the result of its own scheduled task, so the task must
+    # exist first and the watch is created with its ``source_task_id``.
     seeded = asyncio.run(
         a_client.call_tool(
             "schedule_search_task",
-            {"query": EMPTY_MARKER, "interval_seconds": 3600, "chat_id": chat_id},
+            {"query": WATCH_QUERY, "interval_seconds": 3600, "chat_id": chat_id},
         )
     )
     if not seeded.ok:
         report["monitor_seed_error"] = seeded.text
         return "FAIL"
-    empty_task = (seeded.structured or {}).get("task_id", "")
-    empty_run = _wait_for_run(a_client, chat_id, empty_task, ("empty",))
-    report["monitor_empty_run"] = empty_run.get("status")
+    new_task = (seeded.structured or {}).get("task_id", "")
+    new_run = _wait_for_run(a_client, chat_id, new_task, ("ok",))
+    report["monitor_new_run"] = {
+        "status": new_run.get("status"),
+        "task_id": new_task,
+        "result_count": new_run.get("result_count"),
+    }
 
     created = asyncio.run(
         b_client.call_tool(
@@ -2571,6 +2729,7 @@ def _run_notifications_monitor(
                 "keywords": list(WATCH_KEYWORDS),
                 "interval_seconds": 60,
                 "summary_interval_seconds": 3600,
+                "source_task_id": new_task,
                 "chat_id": chat_id,
             },
         )
@@ -2582,45 +2741,28 @@ def _run_notifications_monitor(
     watch_created = created.structured or {}
     report["monitor_watch_id"] = watch_id
 
+    # Host-side baseline: an empty run consumes the starting point without a
+    # message, so the monitor's first read of the task's stored run finds every
+    # fixture link as new. This keeps the check race-free.
     messages_before_baseline = telegram.message_count
-
-    def _baseline_ready(records: list):
-        state = monitor_trace_state(records, watch_id)
-        return state["baseline_seen"] or None
-
-    _wait_trace(_baseline_ready, records_path, MONITOR_BASELINE_TIMEOUT_SECONDS)
-    baseline_state = monitor_trace_state(read_trace(records_path), watch_id)
-    baseline_messages = telegram.message_count - messages_before_baseline
-    baseline_ok = bool(baseline_state["baseline_seen"]) and baseline_messages == 0
-    report["monitor_baseline"] = {
-        "seen": bool(baseline_state["baseline_seen"]),
-        "telegram_messages": baseline_messages,
-        "incomplete_ids": baseline_state["incomplete_ids"],
-    }
-    # Snapshot the schedule right after the baseline turn, before any later
-    # monitor turn can move it again.
+    baseline = asyncio.run(
+        b_client.call_tool(
+            "evaluate_run",
+            {
+                "watch_id": watch_id,
+                "run": {"status": "empty", "results": []},
+                "chat_id": chat_id,
+            },
+        )
+    )
+    baseline_payload = baseline.structured or {}
     baseline_watch = _list_watch(b_client, chat_id, watch_id)
-
-    asyncio.run(
-        a_client.call_tool(
-            "stop_search_task", {"task_id": empty_task, "chat_id": chat_id}
-        )
-    )
-    second = asyncio.run(
-        a_client.call_tool(
-            "schedule_search_task",
-            {"query": WATCH_QUERY, "interval_seconds": 3600, "chat_id": chat_id},
-        )
-    )
-    if not second.ok:
-        report["monitor_second_task_error"] = second.text
-        return "FAIL"
-    new_task = (second.structured or {}).get("task_id", "")
-    new_run = _wait_for_run(a_client, chat_id, new_task, ("ok",))
-    report["monitor_new_run"] = {
-        "status": new_run.get("status"),
-        "task_id": new_task,
-        "result_count": new_run.get("result_count"),
+    baseline_messages = telegram.message_count - messages_before_baseline
+    baseline_ok = bool(baseline_payload.get("is_baseline")) and baseline_messages == 0
+    report["monitor_baseline"] = {
+        "is_baseline": bool(baseline_payload.get("is_baseline")),
+        "telegram_messages": baseline_messages,
+        "summary_due": bool((baseline_watch or {}).get("summary_due")),
     }
 
     messages_before_send = telegram.message_count
@@ -2645,11 +2787,13 @@ def _run_notifications_monitor(
     }
 
     # Full-path evidence beyond the delivery itself: the host-owned schedule and
-    # the effective A-read scope. A turn that never reached ``evaluate_run``
-    # leaves the schedule frozen and the read scope unproven.
+    # the effective A-read scope. The monitor must read exactly the watch's
+    # ``source_task_id``, never the watch id.
     final_watch = _list_watch(b_client, chat_id, watch_id)
     schedule_state = monitor_schedule_state(watch_created, baseline_watch, final_watch)
-    run_scope = monitor_run_scope(read_trace(records_path), watch_id)
+    run_scope = monitor_run_scope(
+        read_trace(records_path), watch_id, expected_task_id=new_task
+    )
     report["monitor_schedule"] = schedule_state
     report["monitor_seen"] = {
         "baseline": schedule_state["baseline_seen_count"],

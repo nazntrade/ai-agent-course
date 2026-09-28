@@ -86,6 +86,13 @@ class FakeTelegramHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             self._send_json(400, {"ok": False, "description": "invalid json"})
             return
+        failures = getattr(self.server, "failures_remaining", 0)
+        if failures > 0:
+            # A scripted transport-level failure: the harness uses it to prove
+            # that a failed delivery is recorded and retried on the same row.
+            self.server.failures_remaining = failures - 1
+            self._send_json(500, {"ok": False, "description": "scripted failure"})
+            return
         requests = getattr(self.server, "requests", None)
         if requests is None:
             requests = []
@@ -110,6 +117,7 @@ class _FakeTelegramHttpServer(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.requests: list = []
+        self.failures_remaining: int = 0
 
 
 class FakeTelegramServer:
@@ -148,6 +156,11 @@ class FakeTelegramServer:
     @property
     def message_count(self) -> int:
         return len(self._httpd.requests) if self._httpd is not None else 0
+
+    def fail_next(self, count: int = 1) -> None:
+        """Script the next ``count`` sendMessage requests to fail with HTTP 500."""
+        if self._httpd is not None:
+            self._httpd.failures_remaining = max(int(count), 0)
 
     def start(self) -> "FakeTelegramServer":
         self._httpd = _FakeTelegramHttpServer(

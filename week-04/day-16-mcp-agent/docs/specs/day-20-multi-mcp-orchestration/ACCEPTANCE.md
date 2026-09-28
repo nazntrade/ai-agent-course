@@ -8,8 +8,12 @@ B + реальный HTTP + `tools/list` каждого + loopback-фейк Tele
 (ручной чек-лист).
 
 Каждый критерий трассируется к реализации в `PLAN.md` и к решению в `SPEC.md`.
-Команды и harness-шаги дня 20 встраиваются в существующие режимы; `.bat` не
-меняются.
+Команды и harness-шаги дня 20 встраиваются в существующие режимы; существующие
+`.bat` не переписываются. Осознанное исключение — `deploy_vps.bat`/`deploy_vps.sh`,
+расширенные под день 20 (D20-32); на VPS ничего не запускалось.
+
+Реализация дня 20 выполнена; UNIT/INT/RESTART подтверждены, LIVE/UI проверяются
+`test.bat acceptance`. Реальный VPS-деплой и реальный Telegram не выполнялись.
 
 ## 1. Таблица критериев
 
@@ -41,9 +45,12 @@ B + реальный HTTP + `tools/list` каждого + loopback-фейк Tele
 | D20-24 | Внутренний прямой вызов A→B запрещён; оркестрация только через `McpHub` и модель | UNIT + LIVE | `tests/test_mcp_hub.py` (source-guard), `NOTIFICATIONS_LIVE_STATUS` | В trace цепочка идёт через `tool_selected(server)`, а не через вложенный вызов внутри сервера; в коде B нет обращений к A |
 | D20-25 | Регрессии дней 16–19 сохранены | UNIT + INT + LIVE + UI | `test.bat`; `smoke_test.bat`; `test.bat acceptance` | Существующие статусы (`MCP_*`, `SEARCH_*`, `TASKS_*`, `COMPOSITION_*`, `REPORTS_*`, `*_UI_STATUS`) зелёные; инструменты A и 9 контрактов не изменены |
 | D20-26 | Ж/д сценарий — только в документации; отмечает необходимость достоверного источника наличия/цены; сниппеты не считаются проверкой | Документация | ревью SPEC §17 | SPEC §17 содержит формулировку ограничения; кода нет |
-| D20-27 | Не изменяются `.bat`, `deploy_vps.*`, governance-файлы, Control Center, Templates; нет VPS-развёртывания, commit/push/деплоя; автоматика не вызывает реальный Tavily/Telegram | Границы | `git status --short`; ревью diff | В diff нет перечисленных файлов; автоматические тесты не делают реальных сетевых вызовов |
+| D20-27 | Существующие `.bat` (`test.bat`/`smoke_test.bat`/`run_app.bat`/`setup.bat`), governance-файлы, Control Center, Templates не изменяются; **осознанное исключение** — `deploy_vps.bat`/`deploy_vps.sh` расширены под день 20 (D20-32). Нет VPS-развёртывания, commit/push/деплоя; автоматика не вызывает реальный Tavily/Telegram | Границы | `git status --short`; ревью diff | В diff нет `test.bat`/`smoke_test.bat`/`run_app.bat`/`setup.bat`, governance-файлов, Control Center, Templates; `deploy_vps.*` изменены осознанно и перечислены в отчёте; на VPS ничего не запускалось; автоматические тесты не делают реальных сетевых вызовов |
 | D20-28 | Накопленные за простой/рестарт монитора прогоны: A хранит до 50/задание, но обрабатывается **ровно последний**; промежуточные сознательно не «догоняются» (no backfill); items последнего (не seen) уведомляются, items только промежуточных пропущены, seen не повторяются; baseline не рассылает историческую выдачу, если ещё не поглощён | UNIT + INT | `tests/test_notifier_watches.py`, `tests/integration/test_notifier_live.py`, `harness/notifier_restart.py` | Несколько `run`-payload/прогонов → используется только последний (`new_items` из последнего, промежуточных нет); уже seen не повторяются; baseline при непоглощении не отправляет |
 | D20-29 | Разные новые материалы в одном периоде не подавляются: для `new_items` `period_key` **контентный** (хэш множества отпечатков), не временной; два разных материала → два ключа и две доставки `sent`; повтор того же → `duplicate`; временной ключ только у `summary`; один вызов с двумя items — одна доставка | UNIT + INT | `tests/test_notifier_watches.py` (UNIT) + `tests/integration/test_notifier_live.py` (**INT**: реальные A+B, два разных материала → два `period_key`/две строки `deliveries` `sent`; повтор → `duplicate`, loopback-фейк Telegram) | UNIT: два разных множества в одном периоде → две строки `deliveries` `sent`; INT: через реальные A+B та же картина, повтор → `duplicate` без сети; `summary` использует `floor(now/summary_interval_seconds)`; два вызова → два сообщения |
+| D20-30 | Периодическая сводка: `period_key="summary:"+floor(now/max(interval,1))`; `summary_due`/`next_summary_at` в `list_notification_watches` и `evaluate_run`; `matched_items` в `evaluate_run`; `send_notification(kind="summary")` шлёт честное сообщение даже с пустым списком; `new_items` пустой → `not_required`; `duplicate` только по `status="sent"`; после рестарта дубль внутри периода не создаётся; второй monitor-ход с `summary_evaluate_absent`/`summary_send_missing`/`summary_send_failed` | UNIT + RESTART | `tests/test_notifier_watches.py` (`SummaryDueTest`, `EmptySummaryTest`), `tests/test_monitor.py` (`SummaryCompletenessRuleTest`, второй ход); `harness/notifier_restart.py` | `summary_due` false до baseline/после `sent`, true в новом периоде; пустая сводка → `sent` с честным текстом; `new_items` пустой → `not_required`; `failed`→сводка остаётся due→`sent`; после рестарта `duplicate` того же периода; неполный summary-ход → `monitor_incomplete` с `summary_*` |
+| D20-31 | Привязка к заданию A: `source_task_id` в `list_notification_watches`; монитор per-watch инжектит `task_id`; пустой `source_task_id` → `unknown_task` без вызова A и без fallback на «последний прогон чата»; модель не может подменить `task_id` (в т.ч. `watch_id`); два задания/две подписки в одном чате не смешиваются | UNIT + RESTART | `tests/test_monitor.py` (`test_each_watch_injects_its_own_task_id`, `test_watch_without_source_task_id_is_skipped`), `harness/notifier_restart.py` (две подписки) | `injected_arguments` каждого monitor-хода равен `source_task_id` своей подписки; пустой/пробельный → `tick()["unknown_task"]` растёт, `orchestrator.runs == []`; в INT две подписки имеют разные `source_task_id` и раздельные seen/deliveries |
+| D20-32 | Деплой-гейт A=9/B=6: `tool_names` в `GET /api/mcp/servers`; `deploy_vps.*` осознанно расширены (сервис `day16-notifier`, БД B вне Git-каталога, Telegram только у B, порядок рестарта A→B→backend, проверка `/api/health` и `/api/mcp/servers` против `mcp_server/server.py`=9 и `notifier_server/server.py`=6); `DEPLOY_STATUS: PASS` только после всех проверок; секреты не в логе; SHA/fast-forward сохранены; на VPS ничего не запускалось | UNIT + статический разбор | `tests/test_deploy_tools.py` (`servers_match`); `tests/test_notifier_api.py` (`tool_names`); ревью `deploy_vps.sh`/`deploy_vps.bat`/`docs/vps-setup-day20.md` | `servers_match` принимает оба сервера с совпадающими `tool_names` и отклоняет disconnected/stale/extra/дубли; deploy-скрипт вызывает двухсерверную проверку и печатает PASS только при backend healthy и совпадении A=9 и B=6; VPS-прогон остаётся ручным (`BLOCKED`) |
 
 ## 2. Что подтверждается реальным запуском / fake-данными / BLOCKED
 
@@ -58,37 +65,38 @@ B + реальный HTTP + `tools/list` каждого + loopback-фейк Tele
   (Qwen) ведёт межсерверную цепочку `get_latest_search_run(A)` →
   `evaluate_run(B)` → `send_notification(B)`. Внешний Tavily и Telegram —
   фейки; это явно фиксируется в отчёте.
-* **Monitor-LIVE (D20-14, D20-20)**: `NOTIFICATIONS_MONITOR_LIVE_STATUS`.
-  Механизм новых items использует **существующие маркеры** фейка
-  (`tests/support/fake_search.py`, `EMPTY_MARKER` и обычная выдача `RESULTS`);
-  правка фейка не требуется. Шаги сценария:
-   1. создать A-задание с запросом, содержащим `EMPTY_MARKER = "__test_empty__"`
-      (пустая выдача); для сценария выставить `MCP_TASK_TICK_SECONDS=0.5` в
-      окружении A;
-   2. дождаться, пока host→A `get_latest_search_run` вернёт `status="empty"`
-      (прогон реально записан, а не `pending`);
-   3. **только после этого** создать watch **host→B напрямую**
-      (`create_notification_watch`, `interval_seconds=60`, `next_check_at=now`), не
-      через модель;
-   4. дождаться первого monitor-чека — baseline: `evaluate_run` вызван,
-      `is_baseline=true`, **отправки нет** (fake Telegram не получил сообщений);
-   5. вызвать `stop_search_task` для пустого задания и создать **второй** A-таск с
-      обычным запросом (без маркера): его `ok`-прогон отдаёт `RESULTS`
-      (`RESULT_URLS`), которые подходят под `keywords` watch;
-   6. дождаться второго due-чека (тик `NOTIFIER_MONITOR_TICK_SECONDS=1`,
-      ожидание ≤ 75 c для `interval_seconds=60`);
-   7. проверить в trace `trigger=monitor`, отсутствие `monitor_incomplete`,
-      `send_notification.structured.status=="sent"` и payload fake Telegram,
-      содержащий URL из `RESULT_URLS`.
+* **Monitor-LIVE (D20-14, D20-20, D20-31)**: `NOTIFICATIONS_MONITOR_LIVE_STATUS`.
+  Механизм использует **существующие маркеры** фейка
+  (`tests/support/fake_search.py`, обычная выдача `RESULTS`); правка фейка не
+  требуется. Watch привязан к заданию A через `source_task_id`, baseline
+  поглощается host-side, а не «случайным» latest-run чата. Шаги сценария:
+   1. создать A-задание с обычным запросом и дождаться его `ok`-прогона
+      (`RESULTS`/`RESULT_URLS`); для сценария выставить
+      `MCP_TASK_TICK_SECONDS=0.5` в окружении A;
+   2. создать watch **host→B напрямую** (`create_notification_watch`,
+      `interval_seconds=60`, `summary_interval_seconds=3600`,
+      `source_task_id=<id этого задания>`, `next_check_at=now`), не через модель;
+   3. поглотить baseline host→B пустым прогоном
+      (`evaluate_run` с `{"status":"empty","results":[]}`): `is_baseline=true`,
+      **отправки нет**; после этого `summary_due=true`;
+   4. дождаться первого реального monitor-тика: он читает результат **своего**
+      задания (`source_task_id`) и доставляет ссылки как `new_items`
+      (`send_notification.structured.status=="sent"`); при `summary_due=true` в
+      том же тике выполняется второй ход-сводка (пустой или по `matched_items`);
+   5. проверить в trace `trigger=monitor`, отсутствие `monitor_incomplete`,
+      инжектированный `task_id == source_task_id` (никогда не `watch_id`) и
+      payload fake Telegram, содержащий URL из `RESULT_URLS`.
 
-  **Порядок обязателен.** Если создать watch раньше, чем записан прогон, первый
-  чек может получить `pending`: baseline **не** поглотится (§7), расписание уедет
-  на `+interval_seconds`, и следующий достоверный прогон поглотит baseline **без
-  отправки** — сценарий станет ложным. Ожидание `status="empty"` до создания watch
-  устраняет эту гонку и делает baseline детерминированным.
+  **Порядок обязателен.** Задание-результаты существует до создания watch, а
+  baseline поглощается host-side пустым прогоном — поэтому первый monitor-чек не
+  может получить `pending` и не зависит от того, какой прогон «последний в чате».
+  Два задания и две подписки в одном чате не смешиваются: монитор читает задание
+  своей подписки (D20-31).
 
   PASS возможен только при совпадении всех шагов; иначе `FAIL`/`BLOCKED` (нет
-  модели). Реальный Telegram не вызывается.
+  модели). Реальный Telegram не вызывается. В сценарии `notifications`
+  (D20-20) watch создаёт **модель** и обязана передать непустой
+  `source_task_id`; сценарий проверяет это host→B чтением списка наблюдений.
 * **UI (D20-16, D20-22)**: Playwright + системный браузер; оба сервера и строки
   вызовов A/B.
 
@@ -105,6 +113,15 @@ B + реальный HTTP + `tools/list` каждого + loopback-фейк Tele
 * **Разные новые материалы в одном периоде (D20-29)** проверяются на fake/fake
   Telegram: две доставки `sent` с разными контентными ключами, реальный Telegram
   не вызывается.
+* **Периодическая сводка (D20-30)** проверяется UNIT (инъектируемые часы/
+  `deliveries`) и RESTART: честная пустая сводка, дедуп периода, `failed`→retry,
+  дубль после рестарта. Реальный Telegram не вызывается.
+* **Привязка `source_task_id` (D20-31)** проверяется UNIT (`_FakeNotifier`/
+  `_FakeOrchestrator` + инжект аргументов) и RESTART (две подписки с разными
+  заданиями); фактическое следование реальной модели проверяется LIVE.
+* **Деплой-гейт A=9/B=6 (D20-32)** проверяется UNIT-функцией `servers_match` на
+  фиктивных ответах `/api/mcp/servers`; сам `deploy_vps.sh` на VPS не
+  запускается.
 * Логика выбора инструментов моделью воспроизводима только на фиксированных
   промптах; UNIT-тесты используют `ScriptedProvider`, что подтверждает логику
   оркестратора, но не свободу выбора реальной модели.
@@ -116,8 +133,10 @@ B + реальный HTTP + `tools/list` каждого + loopback-фейк Tele
   `harness/notifier_real_live.py`; отсутствие opt-in даёт
   `NOTIFIER_REAL_STATUS: BLOCKED` и **не** переводит шаг в `FAIL`.
 * **Реальный Tavily**: `BLOCKED` (вне дня 20; автоматика его не вызывает).
-* **VPS-развёртывание**: `BLOCKED` (ручной чек-лист, SPEC §15; вне границ
-  задачи).
+* **VPS-развёртывание**: `BLOCKED` — `deploy_vps.bat`/`deploy_vps.sh` осознанно
+  расширены и проверены статически/UNIT-парсером, но сам деплой и первичная
+  настройка сервиса B на реальном VPS не выполнялись (ручной чек-лист,
+  SPEC §15; D20-32).
 * **D20-26 ж/д билеты**: реализации нет; требуется отдельный источник.
 
 ## 3. Регрессии дней 16–19
@@ -206,7 +225,13 @@ monitor_incomplete(watch_id=<id>, reason="send_notification_missing")
 
 ## 6. Итог приёмки
 
-Заполняется после реализации (Developer, затем Tester). До реализации —
-`TEST_STATUS: BLOCKED` по критериям D20-20…D20-23 (нужны реальные процессы,
-локальная модель и opt-in), `D20-12` — после `smoke_test.bat`, остальные — по
-факту прогонов.
+Реализация дня 20 **выполнена**. Подтверждено локально: UNIT (`test.bat`),
+INT + RESTART (`smoke_test.bat`), включая `NOTIFIER_RESTART_STATUS: PASS`.
+Проверки LIVE/UI (D20-20, D20-22) выполняются `test.bat acceptance` с реальной
+локальной моделью. Итоговый `TEST_STATUS` выставляет Tester; самопроверка
+Developer не является приёмкой.
+
+Остаются `BLOCKED` до отдельного разрешения/запуска: REAL Telegram (D20-23,
+только opt-in `NOTIFIER_REAL_ALLOW=1`), реальный Tavily и фактический
+VPS-деплой (D20-32: скрипты расширены и проверены статически, на VPS ничего не
+запускалось).

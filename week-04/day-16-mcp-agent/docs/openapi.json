@@ -1125,6 +1125,13 @@
             "title": "Tools Count",
             "default": 0
           },
+          "tool_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tool Names"
+          },
           "error": {
             "anyOf": [
               {

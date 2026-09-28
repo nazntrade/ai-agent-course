@@ -35,10 +35,15 @@ def create_notification_watch(
     in its title or description) and an optional ``exclude`` list that removes
     items. ``interval_seconds`` is how often the watch is checked and
     ``summary_interval_seconds`` how often a regular summary is allowed; both are
-    whole seconds of at least 60. ``source_task_id`` optionally links the watch
-    to a scheduled search. The first check is the starting point: it records the
-    current matching items and sends nothing, so historical results are never
-    delivered. The criterion and the schedules are stored and returned.
+    whole seconds of at least 60. ``source_task_id`` is the id of the scheduled
+    search in server A that this watch monitors: pass the id returned by
+    'schedule_search_task' (or 'list_search_tasks') so the watch reads the result
+    of its own task; an empty value leaves the watch without a task to read. The
+    first check is the starting point: it records the current matching items and
+    sends nothing, so historical results are never delivered. Once that baseline
+    exists, a summary is sent once per ``summary_interval_seconds`` period even
+    when there are no matching results. The criterion and the schedules are
+    stored and returned.
     """
     return watch_service.default_watch_service().create_watch(
         chat_id,
@@ -56,7 +61,11 @@ def list_notification_watches(chat_id: str = "") -> dict[str, Any]:
 
     Use it to find a watch id before evaluating a run, sending a notification or
     stopping a watch, and to report the stored criterion, the schedule and the
-    last delivery of each watch.
+    last delivery of each watch. Each item also reports ``source_task_id`` (the
+    scheduled task in server A this watch reads), ``summary_due`` (whether the
+    watch still owes a summary for the current period) and ``next_summary_at``
+    (when the next summary period starts, or ``null`` when summaries are not
+    configured).
     """
     return watch_service.default_watch_service().list_watches(chat_id)
 
@@ -66,10 +75,13 @@ def evaluate_run(watch_id: str, run: dict, chat_id: str = "") -> dict[str, Any]:
 
     Pass the whole structured result of 'get_latest_search_run' unchanged. The
     answer reports how many items matched, how many were already seen and which
-    ones are new. A malformed result or an unknown watch is reported in the
-    'status' field instead of raising. This call sends nothing and does not
-    record a delivery: call 'send_notification' when 'should_notify' is true and
-    pass the returned 'new_items'.
+    ones are new. It also reports ``matched_items`` (every matching item of the
+    run, deduplicated, including already-seen ones) for a summary, plus
+    ``summary_due`` and ``next_summary_at``. A malformed result or an unknown
+    watch is reported in the 'status' field instead of raising. This call sends
+    nothing and does not record a delivery: call 'send_notification' with
+    'new_items' when 'should_notify' is true, or with 'matched_items' and
+    ``kind='summary'`` when a summary is due.
     """
     return watch_service.default_watch_service().evaluate_run(
         watch_id, run, chat_id
@@ -84,13 +96,17 @@ def send_notification(
 ) -> dict[str, Any]:
     """Send the matching items of a watch to the configured Telegram chat.
 
-    This is the only tool that sends a message. Call it only after
-    'evaluate_run' returned 'should_notify' true, and pass the returned
-    'new_items' unchanged. Delivery is idempotent: sending the same content
-    again returns 'duplicate' without a second message. A failed or
-    unconfigured delivery can be retried, and the retry updates the same
-    delivery. Do not claim a message was sent unless the returned 'status' is
-    'sent'.
+    This is the only tool that sends a message. For ``kind='new_items'`` call it
+    only after 'evaluate_run' returned 'should_notify' true and pass the returned
+    'new_items' unchanged; an empty ``new_items`` needs no delivery. For
+    ``kind='summary'`` pass the 'matched_items' of 'evaluate_run': the message is
+    labelled as a summary (never as new items) and an empty list still sends an
+    honest "no matching results in this period" message. Delivery is idempotent
+    per watch, kind and period: sending the same content again returns
+    'duplicate' without a second message, and a summary is sent at most once per
+    summary period even across a restart. A failed or unconfigured delivery can
+    be retried, and the retry updates the same delivery. Do not claim a message
+    was sent unless the returned 'status' is 'sent'.
     """
     return watch_service.default_watch_service().send_notification(
         watch_id, chat_id, kind, items

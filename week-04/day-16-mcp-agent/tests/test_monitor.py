@@ -8,10 +8,12 @@ from datetime import datetime, timezone
 
 from agent.monitor import (
     MONITOR_ALLOWED_TOOLS,
-    MONITOR_INJECTED_ARGUMENTS,
+    MONITOR_SUMMARY_SYSTEM_PROMPT,
     MONITOR_TRIGGER,
     NotifierMonitor,
+    monitor_injected_arguments,
     monitor_result_incomplete,
+    summary_result_incomplete,
 )
 from agent.notifier_client import NotifierUnavailable
 
@@ -61,12 +63,21 @@ class _FakeOrchestrator:
             yield _event
 
 
-def _watch(watch_id, *, status="active", next_check_at):
+def _watch(
+    watch_id,
+    *,
+    status="active",
+    next_check_at,
+    source_task_id="task-1",
+    summary_due=False,
+):
     return {
         "watch_id": watch_id,
         "status": status,
         "next_check_at": next_check_at,
         "interval_seconds": 60,
+        "source_task_id": source_task_id,
+        "summary_due": summary_due,
     }
 
 
@@ -126,6 +137,68 @@ class CompletenessRuleTest(unittest.TestCase):
             self.assertIsNone(monitor_result_incomplete(outcomes))
 
 
+class SummaryCompletenessRuleTest(unittest.TestCase):
+    """The summary turn requires an actually delivered ``summary`` delivery."""
+
+    def _evaluate(self, structured=None):
+        from agent.mcp_adapter import McpCallResult
+
+        return McpCallResult(
+            ok=True, text="", structured=structured or {"summary_due": True}
+        )
+
+    def test_absent_evaluate_is_incomplete(self):
+        self.assertEqual(
+            summary_result_incomplete({}), "summary_evaluate_absent"
+        )
+
+    def test_missing_send_is_incomplete(self):
+        outcomes = {"evaluate_run": self._evaluate()}
+        self.assertEqual(
+            summary_result_incomplete(outcomes), "summary_send_missing"
+        )
+
+    def test_wrong_kind_is_incomplete(self):
+        from agent.mcp_adapter import McpCallResult
+
+        outcomes = {
+            "evaluate_run": self._evaluate({"should_notify": True}),
+            "send_notification": McpCallResult(
+                ok=True, text="", structured={"kind": "new_items", "status": "sent"}
+            ),
+        }
+        self.assertEqual(
+            summary_result_incomplete(outcomes), "summary_send_failed"
+        )
+
+    def test_failed_summary_is_incomplete(self):
+        from agent.mcp_adapter import McpCallResult
+
+        outcomes = {
+            "evaluate_run": self._evaluate(),
+            "send_notification": McpCallResult(
+                ok=True, text="", structured={"kind": "summary", "status": "failed"}
+            ),
+        }
+        self.assertEqual(
+            summary_result_incomplete(outcomes), "summary_send_failed"
+        )
+
+    def test_sent_summary_is_complete(self):
+        from agent.mcp_adapter import McpCallResult
+
+        for status in ("sent", "duplicate"):
+            outcomes = {
+                "evaluate_run": self._evaluate({"should_notify": False}),
+                "send_notification": McpCallResult(
+                    ok=True,
+                    text="",
+                    structured={"kind": "summary", "status": status},
+                ),
+            }
+            self.assertIsNone(summary_result_incomplete(outcomes))
+
+
 class TickTest(unittest.IsolatedAsyncioTestCase):
     """One tick lists chats, filters due watches and aborts on a down B."""
 
@@ -170,7 +243,9 @@ class TickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orchestrator.runs, [])
 
     async def test_monitor_turn_uses_the_restricted_contract(self):
-        notifier = _FakeNotifier({"c1": [_watch("w1", next_check_at=_iso(900))]})
+        notifier = _FakeNotifier(
+            {"c1": [_watch("w1", next_check_at=_iso(900), source_task_id="task-7")]}
+        )
         orchestrator = _FakeOrchestrator()
         monitor = NotifierMonitor(
             chats=_FakeChats(["c1"]),
@@ -185,13 +260,120 @@ class TickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(run["allowed_tools"]), set(MONITOR_ALLOWED_TOOLS))
         self.assertTrue(run["system_prompt"])
         self.assertIs(run["require_result"], monitor_result_incomplete)
-        # The monitor host owns the A-read scope: the orchestrator receives the
-        # fixed override so the model cannot copy the watch id into ``task_id``.
-        self.assertEqual(run["injected_arguments"], MONITOR_INJECTED_ARGUMENTS)
+        # The monitor host owns the A-read scope per watch: the orchestrator
+        # receives the watch's ``source_task_id``, never the watch id.
+        self.assertEqual(run["injected_arguments"], monitor_injected_arguments("task-7"))
         # The monitor session carries the chat id for tool injection and has no
         # persistence callback, so a monitor turn never writes chat history.
         self.assertEqual(run["session"].chat_id, "c1")
         self.assertIsNone(getattr(run["session"], "_on_success", None))
+
+    async def test_each_watch_injects_its_own_task_id(self):
+        notifier = _FakeNotifier(
+            {
+                "c1": [
+                    _watch("w1", next_check_at=_iso(900), source_task_id="task-a"),
+                    _watch("w2", next_check_at=_iso(900), source_task_id="task-b"),
+                ]
+            }
+        )
+        orchestrator = _FakeOrchestrator()
+        monitor = NotifierMonitor(
+            chats=_FakeChats(["c1"]),
+            notifier=notifier,
+            orchestrator_factory=lambda: orchestrator,
+            clock=lambda: 1000.0,
+        )
+        await monitor.tick()
+        by_watch = {run["watch_id"]: run for run in orchestrator.runs}
+        self.assertEqual(
+            by_watch["w1"]["injected_arguments"],
+            {"get_latest_search_run": {"task_id": "task-a"}},
+        )
+        self.assertEqual(
+            by_watch["w2"]["injected_arguments"],
+            {"get_latest_search_run": {"task_id": "task-b"}},
+        )
+
+    async def test_watch_without_source_task_id_is_skipped(self):
+        notifier = _FakeNotifier(
+            {
+                "c1": [
+                    _watch("w1", next_check_at=_iso(900), source_task_id=""),
+                    _watch("w2", next_check_at=_iso(900), source_task_id="   "),
+                ]
+            }
+        )
+        orchestrator = _FakeOrchestrator()
+        monitor = NotifierMonitor(
+            chats=_FakeChats(["c1"]),
+            notifier=notifier,
+            orchestrator_factory=lambda: orchestrator,
+            clock=lambda: 1000.0,
+        )
+        summary = await monitor.tick()
+        self.assertEqual(summary["unknown_task"], 2)
+        self.assertEqual(summary["due"], 0)
+        self.assertEqual(orchestrator.runs, [])
+
+    async def test_due_summary_adds_a_second_summary_turn(self):
+        notifier = _FakeNotifier(
+            {
+                "c1": [
+                    _watch(
+                        "w1",
+                        next_check_at=_iso(900),
+                        source_task_id="task-7",
+                        summary_due=True,
+                    )
+                ]
+            }
+        )
+        orchestrator = _FakeOrchestrator()
+        monitor = NotifierMonitor(
+            chats=_FakeChats(["c1"]),
+            notifier=notifier,
+            orchestrator_factory=lambda: orchestrator,
+            clock=lambda: 1000.0,
+        )
+        summary = await monitor.tick()
+        self.assertEqual(len(orchestrator.runs), 2)
+        self.assertEqual(summary["runs"], 1)
+        self.assertEqual(summary["summaries"], 1)
+        ordinary, summary_run = orchestrator.runs
+        self.assertIs(ordinary["require_result"], monitor_result_incomplete)
+        self.assertIs(summary_run["require_result"], summary_result_incomplete)
+        self.assertEqual(summary_run["system_prompt"], MONITOR_SUMMARY_SYSTEM_PROMPT)
+        self.assertEqual(summary_run["watch_id"], "w1")
+        self.assertEqual(
+            summary_run["injected_arguments"],
+            monitor_injected_arguments("task-7"),
+        )
+        self.assertIn("summary", summary_run["user_message"].lower())
+
+    async def test_no_summary_turn_when_not_due(self):
+        notifier = _FakeNotifier(
+            {
+                "c1": [
+                    _watch(
+                        "w1",
+                        next_check_at=_iso(900),
+                        source_task_id="task-7",
+                        summary_due=False,
+                    )
+                ]
+            }
+        )
+        orchestrator = _FakeOrchestrator()
+        monitor = NotifierMonitor(
+            chats=_FakeChats(["c1"]),
+            notifier=notifier,
+            orchestrator_factory=lambda: orchestrator,
+            clock=lambda: 1000.0,
+        )
+        summary = await monitor.tick()
+        self.assertEqual(len(orchestrator.runs), 1)
+        self.assertEqual(summary["summaries"], 0)
 
     async def test_monitor_turn_tells_the_model_the_watch_id(self):
         # Regression (LIVE): the watch id is not part of any system prompt, so

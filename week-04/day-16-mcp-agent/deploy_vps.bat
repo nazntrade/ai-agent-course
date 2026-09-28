@@ -36,6 +36,13 @@ if errorlevel 1 (
     goto :fail
 )
 
+git -C "%REPO_DIR%" cat-file -e HEAD:week-04/day-16-mcp-agent/notifier_server/server.py 2>nul
+if errorlevel 1 (
+    echo ERROR: The current commit does not contain the Day 20 notifier server.
+    echo Commit and push the reviewed Day 20 changes before deploying.
+    goto :fail
+)
+
 set "REMOTE_SHA="
 for /f "tokens=1" %%H in ('git -C "%REPO_DIR%" ls-remote origin refs/heads/main 2^>nul') do set "REMOTE_SHA=%%H"
 if not defined REMOTE_SHA (

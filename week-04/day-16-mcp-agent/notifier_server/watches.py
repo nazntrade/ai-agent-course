@@ -191,6 +191,21 @@ def _content_period_key(items) -> str:
     return "new_items:" + digest
 
 
+def _matched_items(matched) -> list:
+    """Return the run's matching items deduplicated by fingerprint.
+
+    Seen and new items are both kept in the order of the run, so a caller can
+    build a summary over everything that matched the criterion.
+    """
+    deduped: dict = {}
+    for item in matched:
+        deduped.setdefault(_fingerprint(item), item)
+    return [
+        {"title": _collapse(item.get("title")), "url": item.get("url") or ""}
+        for item in deduped.values()
+    ]
+
+
 class WatchService:
     """Business rules and persistence of notification watches."""
 
@@ -251,7 +266,11 @@ class WatchService:
 
     def list_watches(self, chat_id: str = "") -> dict:
         chat_key = self._require_chat(chat_id)
-        watches = [self._watch_item(watch) for watch in self._watches.list_watches(chat_key)]
+        now = float(self._clock())
+        watches = [
+            self._watch_item(watch, now)
+            for watch in self._watches.list_watches(chat_key)
+        ]
         if not watches:
             return {"count": 0, "watches": [], "note": NO_WATCHES_NOTE}
         return {"count": len(watches), "watches": watches}
@@ -267,27 +286,32 @@ class WatchService:
             return {
                 "status": "unknown_watch",
                 "new_items": [],
+                "matched_items": [],
                 "matched_count": 0,
                 "known_count": 0,
                 "is_baseline": False,
                 "should_notify": False,
+                "summary_due": False,
+                "next_summary_at": None,
                 "note": UNKNOWN_WATCH_NOTE,
             }
 
+        now = float(self._clock())
         parsed = _parse_run(run)
         if parsed is None:
             return {
                 "status": "error",
                 "new_items": [],
+                "matched_items": [],
                 "matched_count": 0,
                 "known_count": 0,
                 "is_baseline": False,
                 "should_notify": False,
                 "note": MALFORMED_RUN_NOTE,
+                **self._summary_fields(watch, now),
             }
 
         status, results = parsed
-        now = float(self._clock())
         interval = int(watch["interval_seconds"])
 
         if status in ("error", "pending"):
@@ -300,11 +324,13 @@ class WatchService:
             return {
                 "status": status,
                 "new_items": [],
+                "matched_items": [],
                 "matched_count": 0,
                 "known_count": 0,
                 "is_baseline": False,
                 "should_notify": False,
                 "note": RUN_ERROR_NOTE if status == "error" else RUN_PENDING_NOTE,
+                **self._summary_fields(watch, now),
             }
 
         matched = [
@@ -340,11 +366,13 @@ class WatchService:
             return {
                 "status": status,
                 "new_items": [],
+                "matched_items": _matched_items(matched),
                 "matched_count": len(matched),
                 "known_count": len(known),
                 "is_baseline": True,
                 "should_notify": False,
                 "note": BASELINE_NOTE,
+                **self._summary_fields(watch, now),
             }
 
         should_notify = bool(fresh)
@@ -364,11 +392,13 @@ class WatchService:
                 {"title": _collapse(item.get("title")), "url": item.get("url") or ""}
                 for item in fresh
             ],
+            "matched_items": _matched_items(matched),
             "matched_count": len(matched),
             "known_count": len(known),
             "is_baseline": False,
             "should_notify": should_notify,
             "note": NEW_ITEMS_NOTE if should_notify else NO_NEW_ITEMS_NOTE,
+            **self._summary_fields(watch, now),
         }
 
     def send_notification(
@@ -399,7 +429,10 @@ class WatchService:
         normalized = _normalize_items(items)
         now = float(self._clock())
 
-        if not normalized:
+        # An empty ``new_items`` needs no delivery, but a scheduled summary is
+        # due even without matching results: it must send an honest "no results"
+        # message instead of silently returning ``not_required``.
+        if not normalized and kind_key != "summary":
             self._move_schedule(watch, now)
             return {
                 "delivery_id": None,
@@ -428,7 +461,10 @@ class WatchService:
                 "note": DUPLICATE_NOTE,
             }
 
-        message = self._build_message(watch, normalized)
+        if kind_key == "summary":
+            message = self._build_summary_message(watch, normalized)
+        else:
+            message = self._build_message(watch, normalized)
         result = self._telegram_client().send_message(message)
         status = str(getattr(result, "status", STATUS_FAILED))
         error = getattr(result, "error", None)
@@ -551,6 +587,37 @@ class WatchService:
         interval = max(int(watch["summary_interval_seconds"]), 1)
         return "summary:" + str(int(now // interval))
 
+    def _summary_due(self, watch: dict, now: float) -> bool:
+        """Whether the current watch owes a summary for the current period.
+
+        A summary is due only after the first trustworthy check (``last_check_at``)
+        and while no ``sent`` summary delivery exists for the current time period.
+        The answer is derived from the persisted ``deliveries`` table, so it
+        survives a restart without any schema change.
+        """
+        interval = int(watch["summary_interval_seconds"])
+        if interval <= 0:
+            return False
+        if watch["last_check_at"] is None:
+            return False
+        period_key = self._summary_period_key(watch, now)
+        existing = self._deliveries.find(watch["id"], "summary", period_key)
+        return not (existing is not None and existing["status"] == STATUS_SENT)
+
+    def _next_summary_at(self, watch: dict, now: float) -> str | None:
+        """ISO start of the next summary period, or ``None`` when not configured."""
+        interval = int(watch["summary_interval_seconds"])
+        if interval <= 0:
+            return None
+        next_start = (int(now // interval) + 1) * interval
+        return _iso(next_start)
+
+    def _summary_fields(self, watch: dict, now: float) -> dict:
+        return {
+            "summary_due": self._summary_due(watch, now),
+            "next_summary_at": self._next_summary_at(watch, now),
+        }
+
     def _build_message(self, watch: dict, items) -> str:
         heading = f"{watch['query']}: {len(items)} new item(s)"
         lines = [heading]
@@ -562,7 +629,25 @@ class WatchService:
                 lines.append(item["url"])
         return "\n".join(lines)
 
-    def _watch_item(self, watch: dict) -> dict:
+    def _build_summary_message(self, watch: dict, items) -> str:
+        """Build a summary message that is never presented as ``new``.
+
+        An empty summary is honest about the absence of results instead of
+        sending nothing or inventing items.
+        """
+        if not items:
+            return f"{watch['query']}: summary — no matching results in this period."
+        heading = f"{watch['query']}: summary — {len(items)} matching item(s)"
+        lines = [heading]
+        for item in items[:5]:
+            label = item.get("title") or item.get("url") or ""
+            if label:
+                lines.append(f"- {label}")
+            if item.get("url"):
+                lines.append(item["url"])
+        return "\n".join(lines)
+
+    def _watch_item(self, watch: dict, now: float) -> dict:
         return {
             "watch_id": watch["id"],
             "query": watch["query"],
@@ -570,10 +655,13 @@ class WatchService:
             "exclude": watch["exclude"],
             "interval_seconds": watch["interval_seconds"],
             "summary_interval_seconds": watch["summary_interval_seconds"],
+            "source_task_id": watch["source_task_id"],
             "status": watch["status"],
             "created_at": _iso(watch["created_at"]),
             "next_check_at": _iso(watch["next_check_at"]),
             "last_check_at": _iso(watch["last_check_at"]),
+            "summary_due": self._summary_due(watch, now),
+            "next_summary_at": self._next_summary_at(watch, now),
             "seen_count": self._seen.count(watch["id"]),
             "last_delivery": self._delivery_payload(
                 self._deliveries.last_for_watch(watch["id"])

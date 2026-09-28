@@ -521,6 +521,172 @@ class SummaryTest(_WatchTestCase):
         self.assertEqual(third["period_key"], "summary:1")
 
 
+class SummaryDueTest(_WatchTestCase):
+    """``summary_due``/``next_summary_at`` are deterministic and persisted."""
+
+    def test_summary_is_not_due_before_the_baseline(self):
+        watch = self.create(summary_interval_seconds=3600)
+        stored = self.service.list_watches("chat-1")["watches"][0]
+        self.assertFalse(stored["summary_due"])
+        self.assertIsNone(stored["last_check_at"])
+        # The next period boundary is reported even before the baseline.
+        self.assertEqual(stored["next_summary_at"], "1970-01-01T01:00:00Z")
+
+    def test_summary_becomes_due_after_the_baseline(self):
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        stored = self.service.list_watches("chat-1")["watches"][0]
+        self.assertTrue(stored["summary_due"])
+        self.assertEqual(stored["next_summary_at"], "1970-01-01T01:00:00Z")
+
+    def test_sent_summary_clears_the_due_flag_and_survives_the_period(self):
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        sent = self.service.send_notification(
+            watch["watch_id"], "chat-1", "summary", []
+        )
+        self.assertEqual(sent["status"], STATUS_SENT)
+        self.assertEqual(len(self.telegram.calls), 1)
+        stored = self.service.list_watches("chat-1")["watches"][0]
+        self.assertFalse(stored["summary_due"])
+        self.assertEqual(stored["next_summary_at"], "1970-01-01T01:00:00Z")
+
+        # Same period: still not due, even after new items.
+        self.clock.advance(30)
+        self.assertFalse(
+            self.service.list_watches("chat-1")["watches"][0]["summary_due"]
+        )
+
+        # Next period: due again, with the next boundary.
+        self.clock.advance(3600)
+        stored = self.service.list_watches("chat-1")["watches"][0]
+        self.assertTrue(stored["summary_due"])
+        self.assertEqual(stored["next_summary_at"], "1970-01-01T02:00:00Z")
+
+    def test_summary_due_is_false_when_summaries_are_not_configured(self):
+        # A watch with a stored zero summary interval (legacy row) is never due.
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE watches SET summary_interval_seconds = 0 WHERE id = ?",
+                (watch["watch_id"],),
+            )
+        stored = self.service.list_watches("chat-1")["watches"][0]
+        self.assertFalse(stored["summary_due"])
+        self.assertIsNone(stored["next_summary_at"])
+
+    def test_evaluate_run_reports_matched_items_and_summary_fields(self):
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        result = self.service.evaluate_run(
+            watch["watch_id"],
+            run_ok(
+                [
+                    item("Xbox one", "https://a.test/1"),
+                    # A duplicate URL inside the run collapses to one item.
+                    item("Xbox one again", "https://a.test/1/#fragment"),
+                    item("Other", "https://b.test/2"),
+                ]
+            ),
+            "chat-1",
+        )
+        self.assertTrue(result["summary_due"])
+        self.assertEqual(result["next_summary_at"], "1970-01-01T01:00:00Z")
+        self.assertEqual(
+            result["matched_items"], [{"title": "Xbox one", "url": "https://a.test/1"}]
+        )
+
+    def test_matched_items_include_already_seen_ones(self):
+        watch = self.create(keywords=["xbox"], summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        first = self.service.evaluate_run(
+            watch["watch_id"], run_ok([item("Xbox one", "https://a.test/1")]), "chat-1"
+        )
+        self.service.send_notification(
+            watch["watch_id"], "chat-1", "new_items", first["new_items"]
+        )
+        second = self.service.evaluate_run(
+            watch["watch_id"],
+            run_ok(
+                [
+                    item("Xbox one", "https://a.test/1"),
+                    item("Xbox two", "https://b.test/2"),
+                ]
+            ),
+            "chat-1",
+        )
+        self.assertEqual(second["known_count"], 1)
+        urls = [entry["url"] for entry in second["matched_items"]]
+        self.assertEqual(urls, ["https://a.test/1", "https://b.test/2"])
+
+
+class EmptySummaryTest(_WatchTestCase):
+    """A scheduled summary is honest even with no matching results."""
+
+    def test_empty_summary_sends_a_message(self):
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        result = self.service.send_notification(
+            watch["watch_id"], "chat-1", "summary", []
+        )
+        self.assertEqual(result["status"], STATUS_SENT)
+        self.assertEqual(result["items_count"], 0)
+        self.assertEqual(result["period_key"], "summary:0")
+        self.assertEqual(len(self.telegram.calls), 1)
+        message = self.telegram.calls[0]
+        self.assertIn("summary", message)
+        self.assertIn("no matching results", message)
+        # The honest summary is never labelled as a new-items alert.
+        self.assertNotIn("new item", message.lower())
+
+    def test_empty_new_items_is_still_not_required(self):
+        # Regression: an empty ``new_items`` keeps its old ``not_required``.
+        watch = self.create(summary_interval_seconds=3600)
+        result = self.service.send_notification(
+            watch["watch_id"], "chat-1", "new_items", []
+        )
+        self.assertEqual(result["status"], "not_required")
+        self.assertEqual(len(self.telegram.calls), 0)
+
+    def test_empty_summary_is_deduplicated_within_the_period(self):
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        first = self.service.send_notification(
+            watch["watch_id"], "chat-1", "summary", []
+        )
+        second = self.service.send_notification(
+            watch["watch_id"], "chat-1", "summary", []
+        )
+        self.assertEqual(first["status"], STATUS_SENT)
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(second["delivery_id"], first["delivery_id"])
+        self.assertEqual(len(self.telegram.calls), 1)
+
+    def test_failed_summary_is_retried_on_the_same_row(self):
+        watch = self.create(summary_interval_seconds=3600)
+        self.consume_baseline(watch["watch_id"])
+        self.telegram.status = STATUS_FAILED
+        self.telegram.error = "The Telegram API is unreachable."
+        failed = self.service.send_notification(
+            watch["watch_id"], "chat-1", "summary", []
+        )
+        self.assertEqual(failed["status"], STATUS_FAILED)
+        self.assertEqual(failed["attempts"], 1)
+        # A failed delivery still leaves the summary due for a retry.
+        self.assertTrue(
+            self.service.list_watches("chat-1")["watches"][0]["summary_due"]
+        )
+        self.telegram.status = STATUS_SENT
+        sent = self.service.send_notification(
+            watch["watch_id"], "chat-1", "summary", []
+        )
+        self.assertEqual(sent["status"], STATUS_SENT)
+        self.assertEqual(sent["delivery_id"], failed["delivery_id"])
+        self.assertEqual(sent["attempts"], 2)
+        self.assertEqual(len(self.telegram.calls), 2)
+
+
 class AccumulatedRunsTest(_WatchTestCase):
     """Only the latest run is processed; intermediate items are not backfilled."""
 

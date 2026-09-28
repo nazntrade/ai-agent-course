@@ -1,15 +1,20 @@
 # SPEC — Day 20: межсерверная оркестрация MCP (мониторинг и уведомления)
 
 Идентификатор задачи: `day-20-multi-mcp-orchestration`.
-Статус: черновик архитектурного решения (Spec-Driven Development). Реализация не
-начата; начинается только после `SPEC_GATE_STATUS: PASS` и явной команды
-пользователя.
+Статус: архитектурное решение зафиксировано, **реализация дня 20 выполнена**
+(UNIT, INT и RESTART подтверждены; LIVE/UI проверяются `test.bat acceptance`).
+Реальный VPS-деплой и реальная отправка Telegram **не выполнялись** (opt-in и
+ручной чек-лист остаются за оператором). Ниже поведение приведено к факту после
+доделки: периодическая сводка, привязка к заданию A (`source_task_id`) и
+осознанно расширенный деплой-гейт. Уровни проверок и трассировка — в
+`ACCEPTANCE.md`/`PLAN.md`.
 Источник задания: Task Contract пользователя (цель дня 20) и архитектурные
 решения, зафиксированные ниже.
 
-Соглашение о терминах документа: имя, помеченное **предлагаемое**, в текущем
-коде отсутствует. Существующие имена (`mcp_server`, `agent.*`, `storage.*`,
-`normalize_url`, `get_latest_search_run`) взяты из репозитория как есть.
+Соглашение о терминах документа: имя, помеченное **предлагаемое**, было
+отсутствующим на момент планирования и реализовано этой задачей. Существующие
+имена (`mcp_server`, `agent.*`, `storage.*`, `normalize_url`,
+`get_latest_search_run`) взяты из репозитория как есть.
 
 ## 1. Назначение
 
@@ -59,6 +64,18 @@ trace и SSE.
 * HTTP API `/api/mcp/servers`, backend-endpoint подписок/доставок, UI-панель
   `Notification watches` и показ обоих серверов в `MCP status`.
 * Новые переменные окружения в `.env.example`.
+* Периодическая сводка: `summary_interval_seconds`, `summary_due`/
+  `next_summary_at`, `matched_items`, честная пустая сводка и второй
+  monitor-ход (§5.2–§5.4, §11).
+* Привязка подписки к заданию A: `source_task_id` в списке наблюдений и
+  per-watch инжект `task_id` монитором; пустой `source_task_id` → `unknown_task`
+  без вызова A (§5.2, §11).
+* Осознанное расширение `deploy_vps.bat`/`deploy_vps.sh` под день 20: отдельный
+  systemd-сервис B `day16-notifier`, БД B вне Git-каталога, Telegram только у B,
+  порядок рестарта A→B→backend, проверка реальных списков инструментов (A=9,
+  B=6), `DEPLOY_STATUS: PASS` только после всех проверок; инструкция первичной
+  настройки `docs/vps-setup-day20.md` (§15). На VPS ничего не запускалось.
+* Аддитивное поле `tool_names` в `GET /api/mcp/servers` (§12).
 * Тесты UNIT/INT/RESTART/LIVE/UI и opt-in REAL Telegram.
 * Документация дня 20.
 
@@ -68,7 +85,11 @@ trace и SSE.
   `calculate`, `get_server_info`, `search_web`, `schedule_search_task`,
   `list_search_tasks`, `get_latest_search_run`, `stop_search_task`,
   `digest_search_results`, `save_report`.
-* Изменение `.bat`-файлов, `deploy_vps.*`, governance-файлов.
+* Переписывание действующих `.bat`-файлов (`test.bat`, `smoke_test.bat`,
+  `run_app.bat`, `setup.bat`); исключение — только осознанное расширение
+  `deploy_vps.bat`/`deploy_vps.sh` под день 20 (§15).
+* Изменение governance-файлов (`AGENTS.md`, `PROJECT_RULES.md`,
+  `opencode.json`, `.opencode/**`).
 * Изменение AI-SERVER-Control-Center, AI-Project-Templates.
 * Развёртывание на VPS, `git commit`/`git push`/деплой.
 * Вызов реального Tavily и реального Telegram в автоматических проверках.
@@ -185,12 +206,17 @@ trace и SSE.
     приложения (`AGENT_MODEL_NAME`) — не то же самое, что модель ролей в Control
     Center; в отчёте называется фактическая модель live-прогона. Обязательные
     проверки запускаются только через доверенные `.bat` (`test.bat`,
-    `smoke_test.bat`, `test.bat acceptance`); `.bat` не меняются, проверки
-    встраиваются в существующие режимы через `harness/`.
-14. **Вне границ:** изменение `.bat`, `deploy_vps.*`, governance-файлов,
-    AI-SERVER-Control-Center, AI-Project-Templates; VPS-развёртывание;
-    commit/push/деплой; переписывание действующих функций A; вызов реального
-    Tavily/Telegram в автоматике.
+    `smoke_test.bat`, `test.bat acceptance`); существующие `.bat` не
+    переписываются, проверки встраиваются в существующие режимы через
+    `harness/`. Исключение — осознанное расширение `deploy_vps.bat`/`deploy_vps.sh`
+    под день 20 (§15).
+14. **Вне границ:** governance-файлы, AI-SERVER-Control-Center,
+    AI-Project-Templates; VPS-развёртывание; commit/push/деплой; переписывание
+    действующих функций A; вызов реального Tavily/Telegram в автоматике.
+    `deploy_vps.bat`/`deploy_vps.sh` изменяются **осознанно** под день 20
+    (отдельный сервис B, БД B вне Git-каталога, Telegram только у B, порядок
+    рестарта, проверка списков инструментов A=9/B=6); сам VPS при этом не
+    запускается (§15).
 15. **Ж/д билеты** — только как развитие в документации (§17).
 
 ## 4. Архитектура
@@ -306,20 +332,36 @@ McpHub
 4. `interval_seconds` и `summary_interval_seconds` — integer (не bool), не ниже
    минимума (согласуется с днём 18: `TASK_MIN_INTERVAL_SECONDS = 60`); иначе
    `ToolError` с понятным текстом;
-5. `source_task_id` — опциональная ссылка на задание A (может быть пустой).
+5. `source_task_id` — id задания A, результат которого читает эта подписка (id из
+   `schedule_search_task`/`list_search_tasks`); может быть пустым, но тогда
+   подписка не проверяется монитором (`unknown_task`, §11). Fallback на «последний
+   прогон чата» запрещён.
 
 Успех: `{watch_id, status:"active", query, keywords, exclude, interval_seconds,
 summary_interval_seconds, source_task_id, created_at (ISO-8601 UTC),
 next_check_at, note}`. При создании **`next_check_at = now`** (немедленный первый
 baseline-чек); **критерий и расписание сохраняются и возвращаются** явно, а не
-выводятся моделью.
+выводятся моделью. После baseline (когда `last_check_at` уже выставлен) подписка
+начинает «задолжать» регулярную сводку за текущий период `summary_interval_seconds`
+(см. §5.2–§5.4).
 
 ### 5.2 `list_notification_watches(chat_id="")`
 
-Список подписок с состоянием: `{count, watches:[{watch_id, query, keywords,
-exclude, interval_seconds, summary_interval_seconds, status, created_at,
-next_check_at, last_check_at, seen_count, last_delivery}]}`. Пусто →
+Список подписок с состоянием (аддитивные поля добавлены доделкой — сводка и
+привязка к заданию): `{count, watches:[{watch_id, query, keywords, exclude,
+interval_seconds, summary_interval_seconds, source_task_id, status, created_at,
+next_check_at, last_check_at, summary_due, next_summary_at, seen_count,
+last_delivery}]}`. Пусто →
 `{count:0, watches:[], note:"No notification watches in this chat."}`.
+
+* `source_task_id` — id задания A этой подписки (может быть `""`).
+* `summary_due` — `true`, если `summary_interval_seconds > 0`, baseline уже
+  поглощён (`last_check_at is not None`) и за текущий период нет доставки
+  `kind="summary"` со `status="sent"`. Значение вычисляется из персистентной
+  таблицы `deliveries`, поэтому восстанавливается после рестарта без миграции.
+* `next_summary_at` — ISO-8601 UTC начала следующего периода
+  `summary:<floor(now/interval)>`, либо `null`, если сводка не настроена
+  (`summary_interval_seconds <= 0`).
 
 ### 5.3 `evaluate_run(watch_id, run, chat_id="")`
 
@@ -331,10 +373,13 @@ next_check_at, last_check_at, seen_count, last_delivery}]}`. Пусто →
 {
   "status": "ok|empty|error|pending|unknown_watch",
   "new_items": [{"title": "...", "url": "..."}],
+  "matched_items": [{"title": "...", "url": "..."}],
   "matched_count": 0,
   "known_count": 0,
   "is_baseline": false,
   "should_notify": false,
+  "summary_due": false,
+  "next_summary_at": null,
   "note": "..."
 }
 ```
@@ -345,6 +390,13 @@ next_check_at, last_check_at, seen_count, last_delivery}]}`. Пусто →
   выдуманных новостей): `new_items: []`, `should_notify: false`;
 * `matched_count` — сколько items подходят под критерий; `known_count` — сколько
   из них уже в seen-set; `new_items` — подходящие и ещё не seen;
+* `matched_items` — **все** подходящие items прогона, дедуплицированные по
+  отпечатку, включая уже seen, в порядке прогона; это вход для сводки
+  (`send_notification(kind="summary", items=matched_items)`); `new_items` —
+  по-прежнему только новые;
+* `summary_due`/`next_summary_at` — те же значения, что в §5.2 (та же функция от
+  подписки и часов), присутствуют во всех ветках, кроме `unknown_watch`
+  (`summary_due: false`, `next_summary_at: null`);
 * **evaluate не меняет seen-set в обычном режиме**; исключение — baseline
   (§7); baseline поглощается **только** первым прогоном со
   `status in {"ok","empty"}`; `pending`/`error` baseline **не** поглощают (чек
@@ -377,9 +429,15 @@ seen-set/доставки. Идемпотентно:
   новых материала (разные множества отпечатков) в одном временном периоде дают
   **разные** `period_key` → две отдельные доставки `sent`, ни одна не подавлена;
 * временной период применяется **только** к `kind="summary"`:
-  `period_key = floor(now / summary_interval_seconds)` — по смыслу допускается
-  одна сводка за период;
-* повтор **того же** множества отпечатков → `duplicate` (без сети);
+  `period_key = "summary:" + floor(now / max(summary_interval_seconds, 1))` — по
+  смыслу допускается одна сводка за период;
+* **честная сводка.** `send_notification(kind="summary")` отправляет сообщение
+  **всегда**, даже если список `items` пуст: при наличии items — сводку,
+  явно помеченную как summary (не «new»), при пустом списке — честный текст
+  «no matching results in this period». `new_items` с пустым списком по-прежнему
+  не требует доставки (`not_required`, строка не создаётся);
+* повтор **того же** множества отпечатков (`new_items`) или того же
+  `summary`-периода → `duplicate` (без сети);
 * при **частичном** пересечении ранее доставленный item уже в seen-set, поэтому
   `evaluate_run` вернёт только новые items: новый материал доставляется отдельным
   (контентным) ключом, старый не дублируется;
@@ -402,6 +460,11 @@ seen-set/доставки. Идемпотентно:
 повторит тот же чек — это и есть согласованность со «следующий тик повторяет»
 (решение 6). После того как ход завершён вызовом `send_notification`,
 расписание двигается, и следующий чек наступает через `interval_seconds`.
+
+Сводка не зависит от `should_notify`: монитор выполняет **второй** ход, если
+`summary_due=true` (§11). `duplicate`/дедуп сводки считается только по строке
+`status="sent"`; `failed`/`not_configured` повторяются через ту же строку, поэтому
+после рестарта внутри периода второй раз сообщение не уходит.
 
 ### 5.5 `get_delivery_status(watch_id="", chat_id="")`
 
@@ -431,7 +494,10 @@ kind, status, period_key, items_count, error|null, created_at}]}`.
 
 * `interval_seconds` — как часто подписка проверяется монитором;
 * `summary_interval_seconds` — как часто допускается регулярная сводка
-  (`kind="summary"`); период дедупликации `floor(now / summary_interval_seconds)`.
+  (`kind="summary"`); период дедупликации
+  `period_key = "summary:" + floor(now / max(summary_interval_seconds, 1))`.
+  `summary_due`/`next_summary_at` в `list_notification_watches`/`evaluate_run`
+  вычисляются по этому же периоду (§5.2/§5.3).
 
 ## 7. Первый прогон (baseline)
 
@@ -447,7 +513,10 @@ Baseline поглощается **только** первым прогоном �
 считается baseline. Это осознанный контракт, а не побочный эффект: пользователь
 подписывается на **будущие** новости и не получает лавину исторических ссылок.
 `send_notification` для baseline не вызывается; baseline не создаёт доставку
-`sent`.
+`sent`. Сразу после поглощения baseline у подписки появляется «долг» сводки:
+следующий `list_notification_watches` (или `evaluate_run`) вернёт
+`summary_due=true` и `next_summary_at` начала следующего периода — сводка за
+текущий период ещё не отправлена (§5.2–§5.4, §11).
 
 ## 8. Дедупликация и её ключи
 
@@ -470,7 +539,15 @@ Baseline поглощается **только** первым прогоном �
   `duplicate` (без сети). Контентный ключ не даёт одному новому материалу
   подавить другой.
 * `summary` — единственный вид, где `period_key` временной:
-  `floor(now / summary_interval_seconds)` (один период = одна доставка).
+  `"summary:" + floor(now / max(summary_interval_seconds, 1))` (один период =
+  одна доставка). `send_notification(kind="summary")` не требует непустого
+  списка: честная пустая сводка тоже создаёт строку `sent` и дедуплицируется в
+  пределах периода. `new_items` с пустым списком — по-прежнему `not_required`.
+* **Восстановление после рестарта.** `summary_due` выводится из персистентной
+  таблицы `deliveries` (не из памяти), поэтому после рестарта B сводка внутри
+  уже отправленного периода не повторяется (повтор → `duplicate`), а незакрытый
+  период остаётся `summary_due=true`; схема БД не меняется (используются
+  существующие `deliveries`/`last_check_at`).
 * Одна доставка может содержать несколько items (несколько ссылок в одном
   сообщении) — это по-прежнему одна строка `deliveries` с одним контентным
   ключом; разные вызовы с разными множествами создают разные строки.
@@ -593,17 +670,37 @@ Monitor-ход отличается `trigger=monitor` и `watch_id`; непол�
   `next_check_at <= now`. На **первом же** недоступном B монитор **прерывает
   тик** (одна неудачная сессия, без 5 повторов), **не** вызывает модель и **не**
   открывает БД B напрямую.
+* **Привязка к заданию A (per-watch).** Хост после разбора аргументов модели и
+  до валидации подставляет в `get_latest_search_run` аргумент
+  `task_id = source_task_id` **этой** подписки. Модель не может подменить
+  `task_id` — ни значением `watch_id`, ни значением другого задания, — поэтому
+  два задания и две подписки в одном чате не смешиваются. Если
+  `source_task_id` пуст/пробельный, ход **не запускается**: причина
+  `unknown_task` (лог + счётчик в `tick()` summary), клиент A не вызывается,
+  fallback на «последний прогон чата» запрещён.
 * Для каждой подходящей подписки запускает **тот же** `Orchestrator` с тем же
   провайдером, `trigger="monitor"`, `system_prompt=<monitor>`,
   `allowed_tools` — **ограниченное** подмножество (A: `get_latest_search_run`;
   B: `evaluate_run`, `send_notification`), и `require_result` (S7), чтобы
   **модель** построила цепочку.
+* **Второй ход — сводка.** Если `summary_due=true`, после обычного хода
+  (`new_items`) запускается **второй** monitor-ход для той же подписки с
+  отдельными system prompt и user message: `get_latest_search_run` →
+  `evaluate_run` → `send_notification(kind="summary", items=matched_items)`.
+  Отдельный `require_result` для сводки: `evaluate_run` отсутствует →
+  `summary_evaluate_absent`; `send_notification` отсутствует →
+  `summary_send_missing`; его structured `kind != "summary"` или `status` не в
+  `{sent, duplicate}` → `summary_send_failed`. Промпт явно запрещает помечать
+  старые результаты как новые и требует отправить сводку с пустым списком, если
+  результатов нет.
 * Один monitor-ход = одна трасса (`trigger=monitor`, `watch_id`, `chat_id`).
 * **Полнота хода** = `evaluate_run` вызван и (`should_notify=false` или
   `send_notification` со статусом `sent`/`duplicate`). Неполный ход → в трассе
   **только** `monitor_incomplete{watch_id, reason}` вместо `request_done`;
   причины: `evaluate_run_absent`, `send_notification_missing`,
-  `send_notification_failed`. Успех не объявляется.
+  `send_notification_failed`, а для сводки — `summary_evaluate_absent`,
+  `summary_send_missing`, `summary_send_failed`. Успех не объявляется. Промпт
+  для сводки — тоже `trigger=monitor` с тем же `watch_id`.
 * **Retry-семантика «следующий тик повторяет»** относится **только** к случаю,
   когда `send_notification` **не вызывался вообще**: при `should_notify=true`
   `evaluate_run` не двигает расписание (§5.3), поэтому неполный ход оставляет
@@ -630,6 +727,12 @@ Monitor-ход отличается `trigger=monitor` и `watch_id`; непол�
 | Метод и путь | Назначение | Успех | Ошибки |
 | --- | --- | --- | --- |
 | `GET /api/mcp/servers` | список обоих серверов | `{servers:[ServerInfo...]}`; один вызов `probe_servers()` | 200 с `connected:false` для недоступного |
+
+`ServerInfo` дополняется аддитивным полем `tool_names` (список имён реально
+опрошенных инструментов сервера) — оно нужно деплой-гейту для сверки «фактический
+`tools/list` ↔ зарегистрированные инструменты в `mcp_server/server.py` и
+`notifier_server/server.py`» (§15). Поле присутствует и при `connected:false`
+(пустой список), порядок имён не гарантируется.
 | `GET /api/chats/{chat_id}/watches` | подписки/доставки чата через B (host→B) | `{chat_id, available:true, watches, deliveries}` | неизвестный chat → **404 `chat_not_found`** (до обращения к B); B недоступен → **HTTP 200** `{available:false, error:{category}}` |
 
 Правила:
@@ -646,9 +749,9 @@ Monitor-ход отличается `trigger=monitor` и `watch_id`; непол�
   подписки + доставки).
 
 `ServerInfo = {label, url|host:port, connected, protocol_version, server:{name,
-version}, tools_count, error}`. Недоступность B **не** роняет `/api/mcp/status` и
-**не** выдаётся за успех: endpoint возвращает `connected:false` и санитизированную
-`error.category`.
+version}, tools_count, tool_names, error}`. Недоступность B **не** роняет
+`/api/mcp/status` и **не** выдаётся за успех: endpoint возвращает
+`connected:false` и санитизированную `error.category`.
 
 UI (English):
 
@@ -720,18 +823,48 @@ UI (English):
 
 ## 15. VPS
 
-VPS-развёртывание **не выполняется** в этой задаче; `deploy_vps.*` не меняется.
-Чек-лист оператора (ручной, после отдельного решения пользователя):
+**На VPS ничего не запускалось.** Деплой-скрипты `deploy_vps.bat`/`deploy_vps.sh`
+**осознанно расширены** под день 20 (это единственное исключение из правила «не
+менять существующие точки входа»); сам VPS-прогон выполняет оператор вручную
+после отдельного решения пользователя. Инструкция первичной настройки —
+`docs/vps-setup-day20.md` (без настоящих секретов).
 
-1. Запустить третий сервис B (`notifier_server`) под process manager с
-   `Restart=always`, отдельный порт 8766.
-2. `NOTIFIER_DB_PATH` задать абсолютным путём вне деплой-каталога (например
-   `/var/lib/day16/day20-notifier.sqlite3`) в юните B; каталог принадлежит
-   пользователю сервиса.
-3. `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` — только в окружении сервиса B
-   (EnvironmentFile), права файла ограничены.
-4. `MCP_NOTIFIER_URL` в backend-юните указывает на loopback-порт B.
-5. Проверить, что `/api/mcp/servers` показывает A и B, а недоступность B даёт
+Что добавлено в деплой-гейт:
+
+1. **Отдельный systemd-сервис B** `day16-notifier` (рядом с существующими
+   `day16-mcp`, `day16-backend`); drop-in
+   `/etc/systemd/system/day16-notifier.service.d/day20-telegram.conf` с
+   `EnvironmentFile=/etc/day16/notifier.env` и
+   `Environment=NOTIFIER_LOAD_DOTENV=0`; запуск `python -m notifier_server` из
+   `.venv`.
+2. **БД B вне Git-каталога:**
+   `NOTIFIER_DB_PATH=/var/lib/day16/notifier/day20-notifier.sqlite3`; каталог
+   принадлежит пользователю `day16`. Деплой проверяет, что путь не внутри
+   `$REPO` и каталог существует.
+3. **Telegram только у B:** `/etc/day16/notifier.env` (`root:root`, mode 600) с
+   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` и `NOTIFIER_DB_PATH`; наличие файла,
+   владельца и прав, а также токена проверяется **без печати значения**. Деплой
+   также отказывается работать, если `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
+   присутствуют в проектном `.env` (его читает backend).
+4. **Порядок рестарта:** `day16-mcp` (A) → `day16-notifier` (B) →
+   `day16-backend`; после каждого — `systemctl is-active`.
+5. **Проверка реальных списков инструментов:** `/api/health`, затем
+   `/api/mcp/servers`; A и B должны быть `connected`, а `tool_names` —
+   совпадать с зарегистрированными инструментами (`mcp_server/server.py` —
+   **9**, `notifier_server/server.py` — **6**). Проверку выполняет
+   `harness/check_deploy_tools.py` (двухсерверный режим).
+6. **`DEPLOY_STATUS: PASS`** печатается только если backend healthy и совпали
+   инструменты A **и** B; иначе — `FAIL` без выдачи за успех. Секреты в лог не
+   печатаются. Существующие проверки SHA и fast-forward сохранены.
+
+Ручной чек-лист оператора (после первичной настройки):
+
+1. Запустить сервис B `day16-notifier` под systemd, отдельный порт 8766.
+2. Задать `NOTIFIER_DB_PATH` абсолютным путём вне деплой-каталога.
+3. Держать `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` только в
+   `/etc/day16/notifier.env` (EnvironmentFile сервиса B).
+4. `MCP_NOTIFIER_URL` в backend-окружении указывает на loopback-порт B.
+5. Проверить `/api/mcp/servers`: A=9 и B=6 инструментов, недоступность B даёт
    `connected:false`, не 5xx.
 6. Убедиться, что существующий деплой A/backend не требует изменений (A не
    переписывается).
@@ -776,6 +909,15 @@ VPS-развёртывание **не выполняется** в этой за�
 * **Тема уведомлений в автоматике.** Детерминированный `fake_search` отдаёт
   Python-фикстуры, поэтому LIVE/INT-сценарий уведомлений мониторит эту тему;
   Xbox-сценарий из §1 остаётся пользовательским демо-прогоном.
+* **`source_task_id` обязателен для монитора.** Подписка без непустого
+  `source_task_id` монитором не проверяется (`unknown_task`); ошибка не
+  маскируется чтением «последнего прогона чата» (§11).
+* **VPS не разворачивался.** `deploy_vps.bat`/`deploy_vps.sh` расширены под
+  день 20 и проверены статически/UNIT-парсером контрактов, но сам деплой на
+  реальном VPS и первичная настройка сервиса B оператором не выполнялись (§15).
+* **Реальный Telegram сводки.** Пустая честная сводка проверяется на loopback-
+  фейке Telegram; фактическая доставка в реальный Telegram — только opt-in
+  `NOTIFIER_REAL_ALLOW=1` (D20-23).
 
 ## 17. Будущее развитие (тренировочный сценарий ж/д билетов)
 
@@ -787,7 +929,7 @@ VPS-развёртывание **не выполняется** в этой за�
 потребует отдельного источника/провайдера и отдельного SPEC; в дне 20 фиксируется
 как известное ограничение и направление развития.
 
-## 18. Критерии приёмки (D20-01 … D20-29)
+## 18. Критерии приёмки (D20-01 … D20-32)
 
 Полные уровни проверки и команды — в `ACCEPTANCE.md`; трассировка реализации — в
 `PLAN.md`.
@@ -820,6 +962,9 @@ VPS-развёртывание **не выполняется** в этой за�
 | D20-24 | Внутренний прямой вызов A→B запрещён; оркестрация только через `McpHub` и модель, что видно в trace |
 | D20-25 | Регрессии дней 16–19 (инструменты A, SSE, `Technical details`, задания/планировщик, отчёты, лимит 5 чатов, discovery) сохранены |
 | D20-26 | Ж/д сценарий — только в документации; отмечает необходимость достоверного источника наличия/цены; сниппеты не считаются проверкой |
-| D20-27 | Не изменяются `.bat`, `deploy_vps.*`, governance-файлы, Control Center, Templates; нет VPS-развёртывания, commit/push/деплоя; автоматика не вызывает реальный Tavily/Telegram |
+| D20-27 | Существующие `.bat` (`test.bat`/`smoke_test.bat`/`run_app.bat`/`setup.bat`), governance-файлы, Control Center и Templates не изменяются; **осознанное исключение** — `deploy_vps.bat`/`deploy_vps.sh` расширены под день 20 (D20-32). VPS-развёртывание не выполняется, commit/push/деплой не делаются; автоматика не вызывает реальный Tavily/Telegram |
 | D20-28 | Накопленные за простой/рестарт монитора прогоны: A хранит до 50 прогонов/задание (`storage/tasks.py::MAX_RUNS_PER_TASK`), но `get_latest_search_run` отдаёт только последний; монитор обрабатывает ровно последний, промежуточные сознательно не «догоняются» (no backfill); items последнего прогона, не seen, уведомляются; items только промежуточных прогонов пропущены; уже seen не повторяются; baseline не рассылает историческую выдачу, если ещё не поглощён (§14/§7) |
 | D20-29 | Разные новые материалы в одном периоде не подавляются: для `kind="new_items"` `period_key` **контентный** (хэш множества отпечатков), а не временной период; два разных материала → два разных `period_key` и две доставки `sent`; повтор того же множества → `duplicate` (без сети); временной `period_key` применяется только к `kind="summary"`; один вызов с двумя items — одна доставка, два вызова с разными множествами — два сообщения (§5.4/§8) |
+| D20-30 | **Периодическая сводка.** `summary_interval_seconds` задаёт период `period_key = "summary:" + floor(now / max(interval, 1))`; `list_notification_watches` и `evaluate_run` аддитивно отдают `summary_due` (после baseline и пока нет `sent`-сводки за период) и `next_summary_at` (ISO UTC или `null`); `evaluate_run` отдаёт `matched_items` (все подходящие, дедуплицированные); `send_notification(kind="summary")` шлёт честное сообщение всегда, включая пустой список; `new_items` с пустым списком остаётся `not_required`; `duplicate` только при существующей `status="sent"`, `failed`/`not_configured` повторяются через ту же строку; после рестарта B дубль внутри периода не создаётся (состояние в `deliveries`); при `summary_due=true` монитор выполняет второй ход со своим `require_result` (`summary_evaluate_absent`/`summary_send_missing`/`summary_send_failed`) (§5.2–§5.4, §8, §11) |
+| D20-31 | **Привязка к заданию A.** `list_notification_watches` отдаёт `source_task_id`; монитор per-watch инжектит `task_id` из `source_task_id` после разбора аргументов модели, поэтому модель не может подменить его `watch_id` или значением другого задания; два задания и две подписки в одном чате не смешиваются; пустой/пробельный `source_task_id` → `unknown_task` (лог + счётчик `tick()`), клиент A не вызывается, fallback на «последний прогон чата» запрещён (§5.2, §11) |
+| D20-32 | **Деплой-гейт A=9/B=6.** `GET /api/mcp/servers` аддитивно отдаёт `tool_names`; `deploy_vps.bat`/`deploy_vps.sh` осознанно расширены: сервис `day16-notifier`, БД B вне Git-каталога, Telegram только у B (`/etc/day16/notifier.env` root/600), порядок рестарта A→B→backend, проверка `/api/health` и `/api/mcp/servers` против `mcp_server/server.py` (9) и `notifier_server/server.py` (6); `DEPLOY_STATUS: PASS` только при backend healthy и совпадении обоих списков, иначе `FAIL`; секреты в лог не печатаются; SHA/fast-forward сохранены; на VPS ничего не запускалось (§15) |
