@@ -7,22 +7,6 @@
     "auto": true,
     "prune": true
   },
-  "provider": {
-    "llama-server": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "llama-server (local)",
-      "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
-        "apiKey": "{env:OPENCODE_LOCAL_LLM_API_KEY}"
-      },
-      "models": {
-        "qwen3.8-27b-local": {
-          "name": "Qwen3.8 27B (local)",
-          "tool_call": true
-        }
-      }
-    }
-  },
   "permission": {
     "read": {
       "*": "allow",

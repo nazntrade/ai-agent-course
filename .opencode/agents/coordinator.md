@@ -1,7 +1,7 @@
 ---
 description: Основной агент, принимающий обычные задания пользователя. Маршрутизирует разработку в developer, архитектурные решения в architect, приёмку — в tester; сам редактирует только README.
 mode: primary
-model: llama-server/qwen3.8-27b-local
+model: deepseek/deepseek-flash
 steps: 60
 temperature: 0.2
 permission:
