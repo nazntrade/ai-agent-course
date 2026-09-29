@@ -1,0 +1,83 @@
+"""Application entrypoint: ``python -m knowledge_agent``."""
+
+from __future__ import annotations
+
+import dataclasses
+import sys
+from pathlib import Path
+
+from .api.app import create_app
+from .chunking.fixed import FixedChunker
+from .chunking.structure import StructureChunker
+from .config import Settings, apply_env_file, load_settings
+from .embedding.ollama_embedder import OllamaEmbedder
+from .service.knowledge_service import KnowledgeService
+from .sources import DefaultSourceResolver
+from .storage.sqlite_store import SqliteIndexStore
+from .text.tokenizer import LexicalTokenizer
+
+MODULE_DIR = Path(__file__).resolve().parent.parent
+
+
+def build_service(settings: Settings) -> tuple[KnowledgeService, SqliteIndexStore]:
+    db_path = Path(settings.db_path)
+    if not db_path.is_absolute():
+        db_path = MODULE_DIR / db_path
+    store = SqliteIndexStore(db_path)
+    # Hanging builds from a previous process become failed; ready/active stay intact.
+    store.mark_stale_builds_failed("interrupted")
+
+    embedder = OllamaEmbedder(
+        settings.embed_base_url,
+        settings.embed_model,
+        batch_size=settings.embed_batch_size,
+        timeout=settings.embed_timeout_seconds,
+        document_prefix=settings.document_prefix,
+        query_prefix=settings.query_prefix,
+    )
+    tokenizer = LexicalTokenizer()
+    chunkers = {
+        "fixed": FixedChunker(tokenizer, settings.chunk_size, settings.chunk_overlap),
+        "structure": StructureChunker(
+            tokenizer,
+            max_tokens=settings.structure_max_tokens,
+            min_tokens=settings.structure_min_tokens,
+            overlap=0,
+            max_chars=settings.structure_max_chars,
+        ),
+    }
+    resolver = DefaultSourceResolver(settings.pdf_useful_page_min_chars)
+    service = KnowledgeService(
+        store,
+        embedder,
+        tokenizer,
+        chunkers,
+        resolver,
+        batch_size=settings.embed_batch_size,
+        embed_timeout_seconds=settings.embed_timeout_seconds,
+    )
+    return service, store
+
+
+def main() -> int:
+    apply_env_file(MODULE_DIR / ".env")
+    settings = load_settings()
+    db_path = settings.db_path
+    if not Path(db_path).is_absolute():
+        settings = dataclasses.replace(settings, db_path=str(MODULE_DIR / db_path))
+
+    service, store = build_service(settings)
+    app = create_app(service, title=settings.ui_title)
+    try:
+        import uvicorn
+
+        uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    except KeyboardInterrupt:  # pragma: no cover - interactive stop
+        return 0
+    finally:
+        store.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

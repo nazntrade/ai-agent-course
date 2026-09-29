@@ -1,0 +1,11 @@
+# Knowledge Agent (Week 5, Day 21) - pinned dependencies.
+# Web/API stack (Backend AI profile).
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+# PDF text layer extraction (primary) with a fallback backend.
+pdfplumber==0.11.5
+pypdfium2==4.30.0
+# Tests (TestClient needs httpx); no network access is used in unit/integration.
+pytest==8.3.4
+httpx==0.28.1

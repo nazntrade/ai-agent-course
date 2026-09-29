@@ -1,0 +1,4 @@
+Agent memory stores observations and reflections over time.
+Planning decomposes a goal into smaller executable steps.
+Tool use connects the agent to external capabilities and services.
+Retrieval augments the agent with external knowledge from a corpus.

@@ -12,6 +12,10 @@ permission:
     "**/PROJECT_RULES.md": ask
     "PROJECT_STATE.md": ask
     "**/PROJECT_STATE.md": ask
+    "MODULE_RULES.md": ask
+    "**/MODULE_RULES.md": ask
+    "MODULE_STATE.md": ask
+    "**/MODULE_STATE.md": ask
     "STACK_PROFILE.md": ask
     "**/STACK_PROFILE.md": ask
     "STACK_PROFILES.md": ask

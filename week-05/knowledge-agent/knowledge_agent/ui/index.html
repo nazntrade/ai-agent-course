@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Knowledge Agent</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Knowledge Agent</h1>
+    <div id="health" class="health">Checking embedding provider…</div>
+  </header>
+
+  <div id="error" class="error hidden"></div>
+
+  <main>
+    <section class="panel">
+      <h2>Collection</h2>
+      <div class="row">
+        <select id="collection-select"></select>
+        <input id="collection-name" type="text" placeholder="New collection name" />
+        <button id="collection-create">Create collection</button>
+        <button id="refresh">Refresh</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Build index</h2>
+      <div class="row">
+        <select id="strategy">
+          <option value="fixed">Fixed</option>
+          <option value="structure">Structure</option>
+        </select>
+        <input id="source-path" type="text" placeholder="Explicit source path (PDF/TXT/MD)" />
+        <input id="source-label" type="text" placeholder="Label (optional)" />
+        <button id="add-source">Add source</button>
+        <button id="build" class="primary">Build</button>
+      </div>
+      <ul id="source-list" class="source-list"></ul>
+      <div id="progress-wrap" class="progress-wrap hidden">
+        <div class="progress"><div id="progress-bar" class="progress-bar"></div></div>
+        <span id="progress-text"></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Index versions</h2>
+      <table id="versions">
+        <thead>
+          <tr><th>ID</th><th>Strategy</th><th>Status</th><th>Chunks</th><th>Active</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Search fragments</h2>
+      <div class="row">
+        <input id="query" type="text" placeholder="Search query" />
+        <select id="search-strategy" title="Which index to search">
+          <option value="active">Active index</option>
+          <option value="fixed">Fixed</option>
+          <option value="structure">Structure</option>
+        </select>
+        <input id="top-k" type="number" value="5" min="1" max="50" />
+        <button id="search" class="primary">Search</button>
+      </div>
+      <div id="fragments"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Compare strategies</h2>
+      <div class="row">
+        <button id="compare">Load comparison</button>
+      </div>
+      <div id="compare-result"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Chunks</h2>
+      <div class="row">
+        <label><input id="chunks-active" type="checkbox" checked /> Active index only</label>
+        <button id="load-chunks">Load chunks</button>
+      </div>
+      <div id="chunks"></div>
+      <details id="chunk-detail" class="detail hidden">
+        <summary>Chunk metadata</summary>
+        <pre id="chunk-detail-body"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
