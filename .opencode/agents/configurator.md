@@ -6,6 +6,23 @@ variant: high
 permission:
   edit:
     "*": deny
+    ".project-bootstrap.json": ask
+    "**/.project-bootstrap.json": ask
+    ".project-bootstrap-policy.json": ask
+    "**/.project-bootstrap-policy.json": ask
+    "bootstrap-contract.json": ask
+    "**/bootstrap-contract.json": ask
+    "Test-ProjectBootstrap.ps1": ask
+    "**/Test-ProjectBootstrap.ps1": ask
+    "Test-BootstrapRegression.ps1": ask
+    "**/Test-BootstrapRegression.ps1": ask
+    "test_bootstrap.bat": ask
+    "**/test_bootstrap.bat": ask
+    "bootstrap-guide.md": ask
+    "**/bootstrap-guide.md": ask
+    ".project-bootstrap.json.template": ask
+    "**/.project-bootstrap.json.template": ask
+    ".bootstrap/audit-existing-modules.md": ask
     "AGENTS.md": ask
     "**/AGENTS.md": ask
     "PROJECT_RULES.md": ask
@@ -20,6 +37,8 @@ permission:
     "**/STACK_PROFILE.md": ask
     "STACK_PROFILES.md": ask
     "**/STACK_PROFILES.md": ask
+    "opencode.jsonc": ask
+    "**/opencode.jsonc": ask
     "opencode.json": ask
     "**/opencode.json": ask
     ".opencode/agents/*.md": ask

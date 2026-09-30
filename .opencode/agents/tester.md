@@ -8,6 +8,7 @@ permission:
   edit: deny
   bash:
     "*": deny
+    "powershell -NoProfile -ExecutionPolicy Bypass -File .bootstrap/Test-ProjectBootstrap.ps1 *": allow
     "git status*": allow
     "git diff*": allow
     "git log*": allow
@@ -117,3 +118,7 @@ permission:
 - Не перечитывай уже изученные файлы без причины.
 
 Правила AGENTS.md обязательны всегда. Ограничения permission — дополнительная техническая защита, а не замена инструкций.
+
+## Проверка переходов и снимка задачи
+
+Перед приёмкой требуй исходный снимок tracked/untracked текущей задачи; сравнивай результат со снимком, а не с общим dirty diff. Отсутствующий или не соответствующий задаче снимок — BLOCKED. После любой реализации нужен текущий ARCHITECTURE_REVIEW: PASS. Bootstrap Scaffold не заменяет Specification, Specification не заменяет Implementation; auditOnly не выдаёт runtime допуск.

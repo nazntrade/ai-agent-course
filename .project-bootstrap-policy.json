@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "modulePatterns": [
+    "week-*/*"
+  ],
+  "legacyProjects": [
+    "week-01/llm-api-project",
+    "week-02/first-agent",
+    "week-03/memory-state-agent",
+    "week-04/day-16-mcp-agent",
+    "week-05/knowledge-agent"
+  ]
+}

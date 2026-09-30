@@ -5,6 +5,22 @@ model: deepseek/deepseek-flash
 variant: high
 permission:
   edit:
+    ".project-bootstrap.json": deny
+    "**/.project-bootstrap.json": deny
+    ".project-bootstrap-policy.json": deny
+    "**/.project-bootstrap-policy.json": deny
+    "bootstrap-contract.json": deny
+    "**/bootstrap-contract.json": deny
+    "Test-ProjectBootstrap.ps1": deny
+    "**/Test-ProjectBootstrap.ps1": deny
+    "Test-BootstrapRegression.ps1": deny
+    "**/Test-BootstrapRegression.ps1": deny
+    "test_bootstrap.bat": deny
+    "**/test_bootstrap.bat": deny
+    "bootstrap-guide.md": deny
+    "**/bootstrap-guide.md": deny
+    ".project-bootstrap.json.template": deny
+    "**/.project-bootstrap.json.template": deny
     "AGENTS.md": deny
     "**/AGENTS.md": deny
     "PROJECT_RULES.md": deny
@@ -41,6 +57,7 @@ permission:
     "**/publish_to_github.bat": deny
   bash:
     "*": deny
+    "powershell -NoProfile -ExecutionPolicy Bypass -File .bootstrap/Test-ProjectBootstrap.ps1 *": allow
     "git status*": allow
     "git diff*": allow
     "git log*": allow
@@ -122,3 +139,7 @@ Shell и разрешения:
 - Недоступные значения помечай «н/д» с причиной. Не смешивай токены проверяемой локальной модели с токенами OpenCode-агента и не учитывай один вызов дважды.
 
 Правила AGENTS.md обязательны всегда. Ограничения permission — дополнительная техническая защита, а не замена инструкций.
+
+## Допуск нового проекта
+
+Не создавай SPEC до Specification readiness. Не реализуй до Implementation readiness, актуального review SPEC/PLAN/ACCEPTANCE и разрешения пользователя. При отсутствии допуска верни BOOTSTRAP_REQUIRED без записи файлов. Marker и bootstrap policy изменяет только Configurator; не подменяй маркером проверку. После реализации требуется Architect post-review перед Tester.
