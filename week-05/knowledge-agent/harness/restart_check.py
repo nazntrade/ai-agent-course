@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -59,41 +60,38 @@ def request(method: str, url: str, payload: dict | None = None):
         return response.status, (json.loads(body.decode("utf-8")) if body else {})
 
 
-def main() -> int:
+def run_check(root: Path) -> int:
     stub_port = free_port()
     api_port = free_port()
     server = embed_stub.create_server("127.0.0.1", stub_port, dimension=64)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    db_path = MODULE_DIR / "local-data" / "restart" / "index.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    settings = Settings(
-        host="127.0.0.1",
-        port=api_port,
-        db_path=str(db_path),
-        source_path="",
-        embed_base_url=f"http://127.0.0.1:{stub_port}",
-        embed_model="embeddinggemma:300m",
-        embed_batch_size=16,
-        embed_timeout_seconds=30,
-        document_prefix="",
-        query_prefix="",
-        chunk_size=500,
-        chunk_overlap=75,
-        structure_max_tokens=800,
-        structure_min_tokens=64,
-        structure_max_chars=3200,
-        pdf_useful_page_min_chars=500,
-        ui_title="Knowledge Agent",
-    )
-
-    source = MODULE_DIR / "local-data" / "restart" / "source.md"
-    source.write_text("# Memory\n\n" + "Agent memory stores observations. " * 50, encoding="utf-8")
-
+    store = None
     try:
+        db_path = root / "index.db"
+        settings = Settings(
+            host="127.0.0.1",
+            port=api_port,
+            db_path=str(db_path),
+            source_path="",
+            embed_base_url=f"http://127.0.0.1:{stub_port}",
+            embed_model="embeddinggemma:300m",
+            embed_batch_size=16,
+            embed_timeout_seconds=30,
+            document_prefix="",
+            query_prefix="",
+            chunk_size=500,
+            chunk_overlap=75,
+            structure_max_tokens=800,
+            structure_min_tokens=64,
+            structure_max_chars=3200,
+            pdf_useful_page_min_chars=500,
+            ui_title="Knowledge Agent",
+        )
+
+        source = root / "source.md"
+        source.write_text("# Memory\n\n" + "Agent memory stores observations. " * 50, encoding="utf-8")
         service, store = build_service(settings)
         collection = service.create_collection("restart-check")["collection_id"]
         result = service.build(collection, [{"path": str(source)}], "fixed", wait=True)
@@ -105,6 +103,7 @@ def main() -> int:
         env = dict(os.environ)
         env.update(
             {
+                "KNOWLEDGE_SKIP_ENV_FILE": "1",
                 "KNOWLEDGE_HOST": "127.0.0.1",
                 "KNOWLEDGE_PORT": str(api_port),
                 "KNOWLEDGE_DB_PATH": str(db_path),
@@ -157,12 +156,20 @@ def main() -> int:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=10)
     except Exception as exc:  # noqa: BLE001 - report and fail
         print(f"RESTART_STATUS: FAIL ({exc})")
         return 1
     finally:
+        if store is not None:
+            store.close()
         server.shutdown()
         server.server_close()
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="knowledge-restart-") as directory:
+        return run_check(Path(directory))
 
 
 if __name__ == "__main__":

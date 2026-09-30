@@ -21,6 +21,10 @@ class TextSourceAdapter(SourceAdapter):
     kind = "text"
     extraction_version = EXTRACTION_VERSION
 
+    def effective_extraction_version(self, source_ref: SourceRef) -> str:
+        mode = "markdown" if Path(source_ref.uri).suffix.lower() in {".md", ".markdown"} else "plain"
+        return f"{self.extraction_version}:{mode}"
+
     def extract(self, source_ref: SourceRef) -> Document:
         path = Path(source_ref.uri)
         if path.suffix.lower() not in SUPPORTED_TEXT_SUFFIXES:
@@ -51,9 +55,10 @@ class TextSourceAdapter(SourceAdapter):
         if not any(section.text.strip() for section in sections):
             raise SourceEmpty(f"Source contains no usable text: {source_ref.label}.")
 
-        document_id = _document_id(source_ref, EXTRACTION_VERSION)
+        extraction_version = self.effective_extraction_version(source_ref)
+        document_id = _document_id(source_ref, extraction_version)
         extraction = ExtractionInfo(
-            extraction_version=EXTRACTION_VERSION,
+            extraction_version=extraction_version,
             adapter="text",
             page_count=None,
             useful_pages=None,
@@ -70,12 +75,13 @@ class TextSourceAdapter(SourceAdapter):
         )
 
     def _sections(self, text: str, source_ref: SourceRef) -> list[Section]:
+        version = self.effective_extraction_version(source_ref)
         if Path(source_ref.uri).suffix.lower() in {".md", ".markdown"}:
-            return _markdown_sections(text, source_ref)
+            return _markdown_sections(text, source_ref, version)
         body = normalize_text(text)
         return [
             Section(
-                section_id=_section_id(source_ref, "Document", 0),
+                section_id=_section_id(source_ref, "Document", 0, version),
                 section_path="Document",
                 level=1,
                 role="body",
@@ -86,7 +92,7 @@ class TextSourceAdapter(SourceAdapter):
         ]
 
 
-def _markdown_sections(text: str, source_ref: SourceRef) -> list[Section]:
+def _markdown_sections(text: str, source_ref: SourceRef, version: str) -> list[Section]:
     sections: list[Section] = []
     current_path = "Document"
     current_level = 1
@@ -99,7 +105,7 @@ def _markdown_sections(text: str, source_ref: SourceRef) -> list[Section]:
         if body:
             sections.append(
                 Section(
-                    section_id=_section_id(source_ref, current_path, index),
+                    section_id=_section_id(source_ref, current_path, index, version),
                     section_path=current_path,
                     level=current_level,
                     role=_role_for(current_path),
@@ -124,7 +130,7 @@ def _markdown_sections(text: str, source_ref: SourceRef) -> list[Section]:
     if not sections:
         sections.append(
             Section(
-                section_id=_section_id(source_ref, "Document", 0),
+                section_id=_section_id(source_ref, "Document", 0, version),
                 section_path="Document",
                 level=1,
                 role="body",
@@ -151,6 +157,6 @@ def _document_id(source_ref: SourceRef, extraction_version: str) -> str:
     ).hexdigest()[:32]
 
 
-def _section_id(source_ref: SourceRef, path: str, index: int) -> str:
-    payload = f"{source_ref.source_id}:{EXTRACTION_VERSION}:{path}:{index}"
+def _section_id(source_ref: SourceRef, path: str, index: int, version: str) -> str:
+    payload = f"{source_ref.source_id}:{version}:{path}:{index}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]

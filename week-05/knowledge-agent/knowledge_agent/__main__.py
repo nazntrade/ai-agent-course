@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import sys
 from pathlib import Path
 
@@ -60,7 +61,8 @@ def build_service(settings: Settings) -> tuple[KnowledgeService, SqliteIndexStor
 
 
 def main() -> int:
-    apply_env_file(MODULE_DIR / ".env")
+    if os.environ.get("KNOWLEDGE_SKIP_ENV_FILE") != "1":
+        apply_env_file(MODULE_DIR / ".env")
     settings = load_settings()
     db_path = settings.db_path
     if not Path(db_path).is_absolute():

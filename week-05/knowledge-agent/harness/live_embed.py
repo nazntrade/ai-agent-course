@@ -1,21 +1,27 @@
-"""Opt-in LIVE embedding check against local Ollama (MODEL_CHECK_KIND: LOCAL).
-
-Runs a real ``embeddinggemma:300m`` embedding over the user-provided PDF and a
-small second source, persists the index and searches it. Never downloads models
-and never calls paid APIs. Exit codes: 0 = PASS, 1 = FAIL, 3 = BLOCKED.
-"""
+"""Opt-in LIVE check on a fresh owned index, never an existing working database."""
 
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
+import os
+import sqlite3
 import sys
+import tempfile
+from collections import Counter
+from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlparse
 
 MODULE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(MODULE_DIR))
 
 from knowledge_agent.__main__ import build_service  # noqa: E402
-from knowledge_agent.config import load_settings  # noqa: E402
+from knowledge_agent.config import Settings, load_settings  # noqa: E402
+from knowledge_agent.domain.models import ChunkMetadata  # noqa: E402
+from knowledge_agent.sources import pdf_source  # noqa: E402
+from knowledge_agent.sources.pdf_layout import order_lines, strip_headers_footers  # noqa: E402
 
 PDF_PATH = MODULE_DIR / "local-data" / "input" / "agents-survey.pdf"
 SEARCH_QUERY = "planning in LLM agents"
@@ -25,190 +31,153 @@ def emit(status: str, message: str) -> None:
     print(f"{status}: {message}")
 
 
-def _find_or_create_collection(service, name: str) -> str:
-    """Reuse the newest collection with ``name`` so its older versions remain."""
+def indexable_pdf_pages(service, source: Path, threshold: int) -> int:
+    """Count useful cleaned paragraph text after the same section-role exclusions."""
 
-    matches = [
-        collection["collection_id"]
-        for collection in service.list_collections()
-        if collection.get("name") == name
-    ]
-    if matches:
-        return matches[-1]
-    return service.create_collection(name)["collection_id"]
-
-
-def _print_versions(service, collection_id: str, label: str) -> None:
-    versions = service.list_index_versions(collection_id)
-    print(f"  versions[{label}]: total={len(versions)}")
-    for version in versions:
-        pipeline = (version.get("manifest") or {}).get("pipeline") or {}
-        print(
-            f"    id={version['index_version_id']} strategy={version['strategy']}"
-            f" status={version['status']}"
-            f" extraction_versions={pipeline.get('extraction_versions')}"
-            f" created_at={version.get('created_at')}"
-        )
+    prepared = service._prepare_sources([{"path": str(source)}])[0]  # noqa: SLF001
+    adapter = prepared["adapter"]
+    reference = prepared["source_ref"]
+    lines, heights, widths = adapter._extract_layout(source.read_bytes(), reference)  # noqa: SLF001
+    cleaned, _ = strip_headers_footers(lines, heights)
+    ordered = [order_lines(page, width) for page, width in zip(cleaned, widths)]
+    sizes = [line.size for page in ordered for line in page if line.size > 0]
+    body_size = pdf_source._dominant_size(sizes)  # noqa: SLF001
+    page_chars = Counter()
+    role = "body"
+    for page in ordered:
+        for heading, paragraph in pdf_source._page_units(page, body_size):  # noqa: SLF001
+            if heading:
+                role = pdf_source._role_for(paragraph.text)  # noqa: SLF001
+            elif role not in service.excluded_roles:
+                page_chars[paragraph.page] += len(paragraph.text)
+    count = sum(chars >= threshold for chars in page_chars.values())
+    print(f"LIVE_CORPUS: total_pages={len(lines)} indexed_useful_pages={count} minimum_chars={threshold}")
+    return count
 
 
-def _snippet(text: str, limit: int = 180) -> str:
-    return " ".join(text.split())[:limit]
+def validate_ready_index(service, store, version_id: str) -> dict:
+    version = service.get_index_version(version_id)
+    assert version["status"] == "ready", version.get("error")
+    chunks = store.iter_chunk_vectors(version_id)
+    assert chunks and len(chunks) == version["counts"]["chunks"]
+    dimension = version["dimension"]
+    assert isinstance(dimension, int) and dimension > 0
+    required = set(ChunkMetadata.model_fields)
+    for chunk in chunks:
+        assert required <= set(chunk["metadata"])
+        vector = chunk["vector"]
+        assert len(vector) == dimension and all(math.isfinite(value) for value in vector)
+        assert "/" not in chunk["metadata"]["source_uri"] and "\\" not in chunk["metadata"]["source_uri"]
+    print(f"LIVE_VECTOR_CHECK: PASS chunks={len(chunks)} dimension={dimension} metadata=complete finite=true")
+    return version
 
 
-def main() -> int:
-    settings = load_settings()
-    live_db = MODULE_DIR / "local-data" / "live" / "index.db"
-    settings = dataclasses.replace(settings, db_path=str(live_db))
-    service, _store = build_service(settings)
+def row_counts(store) -> dict:
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        return {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("sources", "documents", "sections", "chunks", "index_versions")
+        }
 
+
+def run_scenario(settings: Settings, root: Path, source: Path) -> int:
+    service = store = None
+    inference_observed = False
     print("MODEL_CHECK_KIND: LOCAL")
-    preflight = service._embedder.preflight()  # noqa: SLF001 - explicit diagnostic
-    if not preflight.get("reachable"):
-        emit("LOCAL_MODEL_START", "FAIL (Ollama is not reachable)")
-        emit("EMBEDDING_LIVE_STATUS", "BLOCKED")
-        print("Start the local Ollama service, then retry.")
-        return 3
-    emit("LOCAL_MODEL_START", f"PASS (Ollama version {preflight.get('version')})")
-
-    if not preflight.get("model_present"):
-        emit("LOCAL_MODEL_INFERENCE", "BLOCKED (embedding model is missing)")
-        emit("EMBEDDING_LIVE_STATUS", "BLOCKED")
-        print("Run: ollama pull embeddinggemma:300m")
-        return 3
-
-    if not PDF_PATH.is_file():
-        emit("LOCAL_MODEL_INFERENCE", "BLOCKED (the input PDF was not found)")
-        emit("EMBEDDING_LIVE_STATUS", "BLOCKED")
-        print(f"Expected the corpus at {PDF_PATH.name} under local-data/input/.")
-        return 3
-
     try:
-        dimension = preflight.get("dimension")
-        emit(
-            "LOCAL_MODEL_INFERENCE",
-            f"PASS (model={service._embedder.model}, digest={preflight.get('digest')},"
-            f" dimension={dimension})",
-        )
+        assert urlparse(settings.embed_base_url).hostname in {"127.0.0.1", "localhost", "::1"}, "LIVE requires a loopback Ollama endpoint"
+        settings = dataclasses.replace(settings, db_path=str(root / "index.db"))
+        service, store = build_service(settings)
+        preflight = service._embedder.preflight()  # noqa: SLF001
+        if not preflight.get("reachable") or not preflight.get("model_present"):
+            emit("LOCAL_MODEL_START", "FAIL (Ollama or the configured embedding model is unavailable)")
+            emit("LOCAL_MODEL_INFERENCE", "NOT_RUN")
+            emit("EMBEDDING_LIVE_STATUS", "BLOCKED")
+            return 3
+        emit("LOCAL_MODEL_START", f"PASS (model={settings.embed_model}, Ollama version {preflight.get('version')})")
+        if not source.is_file():
+            emit("LOCAL_MODEL_INFERENCE", "NOT_RUN (the explicitly configured PDF is missing)")
+            emit("EMBEDDING_LIVE_STATUS", "BLOCKED")
+            return 3
+        assert indexable_pdf_pages(service, source, settings.pdf_useful_page_min_chars) >= 20, "fewer than 20 useful indexed PDF pages after exclusions"
 
-        pdf_collection = _find_or_create_collection(service, "live-pdf")
-        _print_versions(service, pdf_collection, "before")
-
-        versions: dict[str, dict] = {}
+        collection = service.create_collection("live-pdf")["collection_id"]
+        versions = {}
         for strategy in ("fixed", "structure"):
-            result = service.build(
-                pdf_collection, [{"path": str(PDF_PATH)}], strategy, wait=True
-            )
-            versions[strategy] = service.get_index_version(result["index_version_id"])
-            metrics = versions[strategy].get("metrics") or {}
-            tokens = metrics.get("chunk_tokens") or {}
-            print(
-                f"  {strategy}: index_version_id={result['index_version_id']}"
-                f" reused={result['reused']}"
-                f" chunks={versions[strategy]['counts']['chunks']}"
-                f" build_seconds={metrics.get('build_seconds')}"
-                f" input_tokens={metrics.get('input_tokens')}"
-                f" embed_latency_median_ms={metrics.get('embed_latency_median_ms')}"
-                f" chunks_per_second={metrics.get('chunks_per_second')}"
-                f" tokens(min/median/p95/max)="
-                f"{tokens.get('min')}/{tokens.get('median')}/{tokens.get('p95')}/{tokens.get('max')}"
-                f" overlap_overhead={metrics.get('overlap_overhead')}"
-                f" section_crossing_ratio={metrics.get('section_crossing_ratio')}"
-                f" vector_bytes={metrics.get('vector_bytes')}"
-                f" db_size_bytes={metrics.get('db_size_bytes')}"
-                f" excluded_roles={versions[strategy]['manifest'].get('excluded_roles')}"
-                f" finished_at={versions[strategy].get('finished_at') is not None}"
-            )
+            result = service.build(collection, [{"path": str(source)}], strategy, wait=True)
+            assert result["reused"] is False, "fresh LIVE must execute document embeddings"
+            version = validate_ready_index(service, store, result["index_version_id"])
+            versions[strategy] = version
+            if not inference_observed:
+                inference_observed = True
+                emit("LOCAL_MODEL_INFERENCE", f"PASS (fresh document embeddings persisted; model={version['model']}, digest={version['digest']}, dimension={version['dimension']})")
+            print(f"LIVE_METRICS[{strategy}]: {json.dumps(version['metrics'], sort_keys=True)}")
+            manifest = version["manifest"]
+            print(f"LIVE_INDEX[{strategy}]: chunks={version['counts']['chunks']} extraction_versions={manifest['pipeline']['extraction_versions']} excluded_roles={manifest['excluded_roles']}")
+            chunks = store.iter_chunk_vectors(version["index_version_id"])
+            preview = next((chunk for chunk in chunks if "introduction" in chunk["metadata"]["section_path"].lower()), chunks[0])
+            print(f"LIVE_TEXT[{strategy}]: section={preview['metadata']['section_path']!r} page={preview['metadata']['page_start']} :: {' '.join(preview['text'].split())[:700]}")
 
-        _print_versions(service, pdf_collection, "after")
-
-        for strategy in ("fixed", "structure"):
-            # Search the freshly built version explicitly: an activation pointer
-            # left by an older run must not silently select a stale version.
-            search = service.search(
-                pdf_collection,
-                SEARCH_QUERY,
-                top_k=3,
-                index_version_id=versions[strategy]["index_version_id"],
-            )
-            print(
-                f"  search[{strategy}] query={search['query']!r}"
-                f" index_version_id={search['index_version_id']}"
-                f" fragments={len(search['fragments'])}"
-            )
+            search = service.search(collection, SEARCH_QUERY, top_k=3, index_version_id=version["index_version_id"])
+            assert search["fragments"] and search["index_version_id"] == version["index_version_id"]
             for fragment in search["fragments"]:
-                metadata = fragment["metadata"]
-                print(
-                    f"    rank={fragment['rank']} score={fragment['score']}"
-                    f" section_path={metadata.get('section_path')!r}"
-                    f" page_start={metadata.get('page_start')}"
-                    f" :: {_snippet(fragment['text'])}"
-                )
+                assert math.isfinite(fragment["score"])
+                print(f"LIVE_SEARCH[{strategy}]: rank={fragment['rank']} score={fragment['score']} section={fragment['metadata']['section_path']!r} page={fragment['metadata']['page_start']} :: {' '.join(fragment['text'].split())[:220]}")
 
-        for strategy in ("fixed", "structure"):
-            repeat = service.build(
-                pdf_collection, [{"path": str(PDF_PATH)}], strategy, wait=True
-            )
-            print(
-                f"  repeat build {strategy}: reused={repeat['reused']}"
-                f" index_version_id={repeat['index_version_id']}"
-                f" same_id={repeat['index_version_id'] == versions[strategy]['index_version_id']}"
-            )
+            before = row_counts(store)
+            repeat = service.build(collection, [{"path": str(source)}], strategy, wait=True)
+            assert repeat["reused"] is True and repeat["index_version_id"] == version["index_version_id"]
+            assert row_counts(store) == before, "repeat import inserted new rows"
+            print(f"LIVE_REPEAT[{strategy}]: PASS reused=true same_id=true new_rows=0")
 
-        service.set_active_index(pdf_collection, versions["structure"]["index_version_id"])
-        replayed = service.search(
-            pdf_collection, "memory and planning in autonomous agents", top_k=3
-        )
-        if not replayed["fragments"]:
-            raise AssertionError("real search returned no fragments")
-        print(
-            f"  search: top_score={replayed['fragments'][0]['score']} "
-            f"fragments={len(replayed['fragments'])}"
-        )
+        comparison = service.compare(collection, ["fixed", "structure"])
+        assert comparison["comparable"] is True
+        assert versions["fixed"]["manifest"]["cleaned_corpus_sha256"] == versions["structure"]["manifest"]["cleaned_corpus_sha256"]
 
-        notes_dir = MODULE_DIR / "local-data" / "live"
-        notes_dir.mkdir(parents=True, exist_ok=True)
-        notes = notes_dir / "notes.md"
-        notes.write_text(
-            "# Notes\n\nLocal embedding notes about retrieval and chunking. " * 20,
-            encoding="utf-8",
-        )
-        notes_collection = _find_or_create_collection(service, "live-notes")
-        notes_build = service.build(
-            notes_collection, [{"path": str(notes)}], "fixed", wait=True
-        )
-        notes_version = service.get_index_version(notes_build["index_version_id"])
-        notes_search = service.search(
-            notes_collection,
-            "chunking notes",
-            top_k=2,
-            index_version_id=notes_version["index_version_id"],
-        )
-        if not notes_search["fragments"]:
-            raise AssertionError("second collection search returned no fragments")
-        emit(
-            "LOCAL_SCENARIO_TEST",
-            "PASS (build+search on PDF and a small second collection)",
-        )
-        emit(
-            "LIVE_METRICS",
-            "pdf_fixed_chunks=%s pdf_structure_chunks=%s notes_chunks=%s"
-            % (
-                versions["fixed"]["counts"]["chunks"],
-                versions["structure"]["counts"]["chunks"],
-                notes_version["counts"]["chunks"],
-            ),
-        )
-        emit("EMBEDDING_LIVE_STATUS", "PASS")
+        service.set_active_index(collection, versions["structure"]["index_version_id"])
+        active_search = service.search(collection, "memory and planning in autonomous agents", top_k=3)
+        assert active_search["index_version_id"] == versions["structure"]["index_version_id"]
+        assert active_search["fragments"]
+
+        notes = root / "notes.md"
+        notes.write_text("# Notes\n\nLocal embedding notes about retrieval and chunking. " * 20, encoding="utf-8")
+        other = service.create_collection("live-notes")["collection_id"]
+        result = service.build(other, [{"path": str(notes)}], "fixed", wait=True)
+        notes_version = validate_ready_index(service, store, result["index_version_id"])
+        notes_search = service.search(other, "chunking notes", top_k=2)
+        assert notes_search["fragments"] and notes_search["index_version_id"] == notes_version["index_version_id"]
+        print("LIVE_OUTPUT_TOKENS: n/a (embedding, no text generation)")
         return 0
-    except Exception as exc:  # noqa: BLE001 - report and fail
+    except Exception as exc:  # noqa: BLE001 - report the failed real-provider scenario
+        if not inference_observed:
+            emit("LOCAL_MODEL_INFERENCE", "FAIL (no successful fresh index embedding was verified)")
         emit("LOCAL_SCENARIO_TEST", f"FAIL ({exc})")
         emit("EMBEDDING_LIVE_STATUS", "FAIL")
         return 1
     finally:
-        try:
-            service._store.close()  # noqa: SLF001 - close the live store
-        except Exception:  # noqa: BLE001
-            pass
+        if store is not None:
+            store.close()
+
+
+def main() -> int:
+    if os.environ.get("RUN_EMBED_LIVE") != "1":
+        emit("EMBEDDING_LIVE_STATUS", "BLOCKED (explicit RUN_EMBED_LIVE=1 opt-in required)")
+        return 3
+    settings = load_settings()
+    source = Path(settings.source_path) if settings.source_path else PDF_PATH
+    try:
+        with tempfile.TemporaryDirectory(prefix="knowledge-live-") as directory:
+            result = run_scenario(settings, Path(directory), source)
+    except OSError as exc:
+        emit("LIVE_CLEANUP", f"FAIL ({type(exc).__name__})")
+        emit("LOCAL_SCENARIO_TEST", "FAIL (owned temporary data could not be cleaned up)")
+        emit("EMBEDDING_LIVE_STATUS", "FAIL")
+        return 1
+    emit("LIVE_CLEANUP", "PASS")
+    if result == 0:
+        emit("LOCAL_SCENARIO_TEST", "PASS (fresh PDF and notes indexes, finite vectors, complete metadata, search, switching, zero-row dedup and owned cleanup)")
+        emit("EMBEDDING_LIVE_STATUS", "PASS")
+    return result
 
 
 if __name__ == "__main__":

@@ -7,6 +7,12 @@ const state = {
   sources: [],
   activeVersionId: null,
   polling: null,
+  searching: false,
+  chunkLoadId: 0,
+  versionsRequestId: 0,
+  collectionsRequestId: 0,
+  searchRequestId: 0,
+  compareRequestId: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -46,7 +52,10 @@ async function refreshHealth() {
   const health = await api("/api/health");
   const embedding = health.embedding || {};
   const badge = $("health");
-  if (embedding.reachable) {
+  if (embedding.reachable && embedding.model_present === false) {
+    badge.textContent = "Embedding model absent (" + embedding.model + ") — run: " + (embedding.hint || "ollama pull " + embedding.model);
+    badge.className = "health bad";
+  } else if (embedding.reachable) {
     badge.textContent = `Embedding: reachable (${embedding.model}${embedding.dimension ? ", dim " + embedding.dimension : ""})`;
     badge.className = "health ok";
   } else {
@@ -55,8 +64,35 @@ async function refreshHealth() {
   }
 }
 
+
+function selectCollection(collectionId) {
+  if (collectionId === state.collectionId) return;
+  state.collectionId = collectionId;
+  state.versions = [];
+  state.versionsRequestId += 1;
+  state.chunkLoadId += 1;
+  state.searchRequestId += 1;
+  state.compareRequestId += 1;
+  state.searching = false;
+  $("versions").querySelector("tbody").innerHTML = "";
+  $("fragments").textContent = "";
+  $("compare-result").textContent = "";
+  $("chunks").textContent = "Load chunks for the selected collection.";
+  $("chunk-detail").classList.add("hidden");
+  $("chunk-detail-body").textContent = "";
+  $("progress-wrap").classList.add("hidden");
+  $("progress-text").textContent = "";
+  $("progress-bar").style.width = "0%";
+  $("search").disabled = false;
+  $("search").textContent = "Search";
+  if (state.polling) clearInterval(state.polling);
+  state.polling = null;
+  showError("");
+}
 async function refreshCollections() {
+  const requestId = ++state.collectionsRequestId;
   const data = await api("/api/collections");
+  if (requestId !== state.collectionsRequestId) return;
   state.collections = data.collections || [];
   const select = $("collection-select");
   select.innerHTML = "";
@@ -67,31 +103,42 @@ async function refreshCollections() {
     select.appendChild(option);
   }
   if (state.collections.length && !state.collections.some((c) => c.collection_id === state.collectionId)) {
-    state.collectionId = state.collections[0].collection_id;
+    selectCollection(state.collections[0].collection_id);
   }
   if (state.collectionId) select.value = state.collectionId;
   await refreshVersions();
 }
 
 async function refreshVersions() {
-  if (!state.collectionId) {
-    state.versions = [];
-  } else {
-    const data = await api(`/api/collections/${state.collectionId}/index-versions`);
-    state.versions = data.index_versions || [];
+  const collectionId = state.collectionId;
+  const requestId = ++state.versionsRequestId;
+  let versions = [];
+  if (collectionId) {
+    const data = await api("/api/collections/" + encodeURIComponent(collectionId) + "/index-versions");
+    versions = data.index_versions || [];
   }
+  if (collectionId !== state.collectionId || requestId !== state.versionsRequestId) return;
+  state.versions = versions.filter((version) => version.collection_id === collectionId);
   const body = $("versions").querySelector("tbody");
   body.innerHTML = "";
   for (const version of state.versions) {
     const row = document.createElement("tr");
     const active = version.index_version_id === selectedVersion();
-    row.innerHTML = `
-      <td>${version.index_version_id.slice(0, 8)}…</td>
-      <td>${version.strategy}</td>
-      <td>${version.status}</td>
-      <td>${version.counts ? version.counts.chunks : 0}</td>
-      <td>${active ? "yes" : ""}</td>
-      <td></td>`;
+    for (const value of [
+      version.index_version_id.slice(0, 8) + "…",
+      version.strategy,
+      version.status,
+      version.counts ? version.counts.sources : 0,
+      version.counts ? version.counts.documents : 0,
+      version.counts ? version.counts.sections : 0,
+      version.counts ? version.counts.chunks : 0,
+      active ? "yes" : "",
+      "",
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.appendChild(cell);
+    }
     const actions = row.lastElementChild;
     if (version.status === "ready" && !active) {
       const button = document.createElement("button");
@@ -118,7 +165,9 @@ function renderSources() {
   list.innerHTML = "";
   state.sources.forEach((source, index) => {
     const item = document.createElement("li");
-    item.innerHTML = `<span>${source.label || source.path}</span>`;
+    const label = document.createElement("span");
+    label.textContent = source.label || source.path;
+    item.appendChild(label);
     const remove = document.createElement("button");
     remove.textContent = "Remove";
     remove.onclick = () => {
@@ -139,42 +188,54 @@ async function buildIndex() {
     showError("Add at least one source with an explicit path.");
     return;
   }
+  const collectionId = state.collectionId;
   showError("");
   $("progress-wrap").classList.remove("hidden");
   try {
     const result = await api("/api/index/build", {
       method: "POST",
       body: JSON.stringify({
-        collection_id: state.collectionId,
+        collection_id: collectionId,
         sources: state.sources,
         strategy: $("strategy").value,
       }),
     });
+    if (collectionId !== state.collectionId) return;
     if (result.reused) {
       $("progress-text").textContent = `Reused existing ready index ${result.index_version_id.slice(0, 8)}…`;
       $("progress-bar").style.width = "100%";
       await refreshCollections();
       return;
     }
-    pollProgress(result.index_version_id);
+    pollProgress(result.index_version_id, collectionId);
   } catch (error) {
-    $("progress-wrap").classList.add("hidden");
-    showError(error.message);
+    if (collectionId === state.collectionId) {
+      $("progress-wrap").classList.add("hidden");
+      showError(error.message);
+    }
   }
 }
 
-function pollProgress(indexVersionId) {
+function pollProgress(indexVersionId, collectionId) {
   if (state.polling) clearInterval(state.polling);
   state.polling = setInterval(async () => {
     try {
+      if (collectionId !== state.collectionId) return;
       const version = await api(`/api/index-versions/${indexVersionId}`);
+      if (collectionId !== state.collectionId) return;
       const progress = version.progress || {};
       $("progress-bar").style.width = `${progress.percent || 0}%`;
-      $("progress-text").textContent = `${version.status} · ${progress.stage || ""} · ${progress.percent || 0}%`;
+      const counts = version.counts || {};
+      const countText = version.status === "building"
+        ? "Sources " + (progress.sources_done || 0) + "/" + (progress.sources_total || 0) + " · Chunks " + (progress.chunks_total || counts.chunks || 0)
+        : "Sources " + (counts.sources || 0) + " · Documents " + (counts.documents || 0) + " · Sections " + (counts.sections || 0) + " · Chunks " + (counts.chunks || 0);
+      $("progress-text").textContent = version.status + " · " + (progress.stage || "") + " · " + (progress.percent || 0) + "% · " + countText;
       if (version.status !== "building") {
         clearInterval(state.polling);
         state.polling = null;
+        if (version.status === "failed") showError(version.error || "Index build failed.");
         await refreshCollections();
+        await refreshHealth();
       }
     } catch (error) {
       clearInterval(state.polling);
@@ -185,27 +246,45 @@ function pollProgress(indexVersionId) {
 }
 
 async function search() {
+  if (state.searching) return;
   if (!state.collectionId) {
     showError("Select a collection first.");
     return;
   }
+  const collectionId = state.collectionId;
+  const requestId = ++state.searchRequestId;
   showError("");
   const searchStrategy = $("search-strategy").value;
   const payload = {
-    collection_id: state.collectionId,
+    collection_id: collectionId,
     query: $("query").value,
     top_k: Number($("top-k").value) || 5,
   };
   // Do not force a strategy when the collection has an active index.
   if (searchStrategy !== "active") payload.strategy = searchStrategy;
+  const button = $("search");
+  const buttonText = button.textContent;
+  state.searching = true;
+  button.disabled = true;
+  button.textContent = "Searching…";
+  $("fragments").textContent = "Searching for fragments…";
   try {
     const result = await api("/api/search", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    renderFragments(result.fragments || []);
+    if (collectionId === state.collectionId && requestId === state.searchRequestId) {
+      renderFragments(result.fragments || []);
+    }
   } catch (error) {
-    showError(error.message);
+    if (collectionId === state.collectionId && requestId === state.searchRequestId) showError(error.message);
+  } finally {
+    if (requestId === state.searchRequestId) {
+      state.searching = false;
+      button.disabled = false;
+      button.textContent = buttonText;
+    }
+    refreshHealth().catch(markHealthUnavailable);
   }
 }
 
@@ -221,13 +300,20 @@ function renderFragments(fragments) {
     const card = document.createElement("div");
     card.className = "fragment";
     const pages = metadata.page_start ? `pages ${metadata.page_start}–${metadata.page_end}` : "n/a";
-    card.innerHTML = `
-      <div class="meta">
-        <span class="score">#${fragment.rank} · ${fragment.score}</span>
-        · ${metadata.section_path} · ${pages} · ${metadata.source_label} · ${metadata.language}
-      </div>
-      <div class="text"></div>`;
-    card.querySelector(".text").textContent = fragment.text;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const score = document.createElement("span");
+    score.className = "score";
+    score.textContent = "#" + fragment.rank + " · " + fragment.score;
+    meta.appendChild(score);
+    meta.appendChild(document.createTextNode(
+      " · " + metadata.section_path + " · " + pages + " · " + metadata.source_label + " · " + metadata.language
+    ));
+    const text = document.createElement("div");
+    text.className = "text";
+    text.textContent = fragment.text;
+    card.appendChild(meta);
+    card.appendChild(text);
     container.appendChild(card);
   }
 }
@@ -237,12 +323,16 @@ async function loadCompare() {
     showError("Select a collection first.");
     return;
   }
+  const collectionId = state.collectionId;
+  const requestId = ++state.compareRequestId;
   showError("");
   try {
-    const result = await api(`/api/compare?collection_id=${encodeURIComponent(state.collectionId)}`);
-    renderCompare(result.strategies || [], result);
+    const result = await api(`/api/compare?collection_id=${encodeURIComponent(collectionId)}`);
+    if (collectionId === state.collectionId && requestId === state.compareRequestId) {
+      renderCompare(result.strategies || [], result);
+    }
   } catch (error) {
-    showError(error.message);
+    if (collectionId === state.collectionId && requestId === state.compareRequestId) showError(error.message);
   }
 }
 
@@ -259,56 +349,138 @@ function renderCompare(rows, result) {
     warning.textContent = `Not directly comparable: ${result.note}`;
     container.appendChild(warning);
   }
-  let html = "<table><thead><tr><th>Strategy</th><th>Status</th><th>Chunks</th>" +
-    "<th>Token min/median/p95/max</th><th>Overlap overhead</th><th>Section crossing</th>" +
-    "<th>Build seconds</th></tr></thead><tbody>";
+  const table = document.createElement("table");
+  const header = document.createElement("tr");
+  for (const title of [
+    "Strategy", "Status", "Chunks", "Token min/median/p95/max",
+    "Overlap overhead", "Section crossing", "Build seconds",
+  ]) {
+    const cell = document.createElement("th");
+    cell.textContent = title;
+    header.appendChild(cell);
+  }
+  const head = document.createElement("thead");
+  head.appendChild(header);
+  table.appendChild(head);
+  const body = document.createElement("tbody");
   for (const row of rows) {
     const metrics = row.metrics || {};
     const tokens = metrics.chunk_tokens || {};
-    html += `<tr><td>${row.strategy}</td><td>${row.status}</td>` +
-      `<td>${row.counts ? row.counts.chunks : 0}</td>` +
-      `<td>${tokens.min}/${tokens.median}/${tokens.p95}/${tokens.max}</td>` +
-      `<td>${metrics.overlap_overhead ?? "n/a"}</td>` +
-      `<td>${metrics.section_crossing_ratio ?? "n/a"}</td>` +
-      `<td>${metrics.build_seconds ?? "n/a"}</td></tr>`;
+    const line = document.createElement("tr");
+    for (const value of [
+      row.strategy, row.status, row.counts ? row.counts.chunks : 0,
+      [tokens.min, tokens.median, tokens.p95, tokens.max].join("/"),
+      metrics.overlap_overhead ?? "n/a",
+      metrics.section_crossing_ratio ?? "n/a",
+      metrics.build_seconds ?? "n/a",
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      line.appendChild(cell);
+    }
+    body.appendChild(line);
   }
-  container.insertAdjacentHTML("beforeend", html + "</tbody></table>");
+  table.appendChild(body);
+  container.appendChild(table);
+}
+
+function appendChunk(container, chunk) {
+  const row = document.createElement("div");
+  row.className = "fragment chunk-row";
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = chunk.metadata.section_path + " · tokens " + chunk.token_count + " · chars " + chunk.char_count;
+  const text = document.createElement("div");
+  text.className = "text";
+  text.textContent = chunk.text.slice(0, 400);
+  row.appendChild(meta);
+  row.appendChild(text);
+  row.onclick = () => {
+    $("chunk-detail").classList.remove("hidden");
+    $("chunk-detail-body").textContent = JSON.stringify(chunk, null, 2);
+  };
+  container.appendChild(row);
+}
+
+async function createChunkGroup(container, version, loadId) {
+  const group = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = version.strategy + " · " + version.index_version_id.slice(0, 8) + "…";
+  group.appendChild(title);
+  const status = document.createElement("div");
+  status.className = "meta";
+  group.appendChild(status);
+  const items = document.createElement("div");
+  group.appendChild(items);
+  const more = document.createElement("button");
+  more.textContent = "Load more";
+  more.className = "hidden";
+  group.appendChild(more);
+  container.appendChild(group);
+  let offset = 0;
+
+  async function nextPage() {
+    more.disabled = true;
+    status.textContent = "Loading chunks…";
+    try {
+      const page = await api(
+        "/api/index-versions/" + encodeURIComponent(version.index_version_id) + "/chunks?limit=50&offset=" + offset
+      );
+      if (loadId !== state.chunkLoadId) return;
+      for (const chunk of page.items) appendChunk(items, chunk);
+      offset += page.items.length;
+      status.textContent = "Showing " + offset + " of " + page.total + " chunks.";
+      more.classList.toggle("hidden", offset >= page.total || !page.items.length);
+      more.textContent = "Load more (" + Math.max(0, page.total - offset) + " remaining)";
+      if (!page.total) items.textContent = "No chunks.";
+    } catch (error) {
+      status.textContent = "Chunk page could not be loaded.";
+      showError(error.message);
+      throw error;
+    } finally {
+      more.disabled = false;
+    }
+  }
+  more.onclick = () => nextPage().catch(() => {});
+  await nextPage();
 }
 
 async function loadChunks() {
-  const indexVersionId = selectedVersion();
-  if (!indexVersionId) {
-    showError("No active index for this collection.");
+  const loadId = ++state.chunkLoadId;
+  if (!state.collectionId) {
+    showError("Select a collection first.");
+    return;
+  }
+  const activeOnly = $("chunks-active").checked;
+  const active = selectedVersion();
+  const versions = state.versions.filter(
+    (version) => version.collection_id === state.collectionId && version.status === "ready" && (!activeOnly || version.index_version_id === active)
+  );
+  if (!versions.length) {
+    $("chunks").textContent = activeOnly ? "No active ready index." : "No ready indexes in this collection.";
     return;
   }
   showError("");
+  const button = $("load-chunks");
+  button.disabled = true;
+  $("chunks").innerHTML = "";
+  $("chunk-detail").classList.add("hidden");
   try {
-    const result = await api(`/api/index-versions/${indexVersionId}/chunks?limit=50`);
-    const container = $("chunks");
-    container.innerHTML = "";
-    for (const chunk of result.items) {
-      const row = document.createElement("div");
-      row.className = "fragment chunk-row";
-      row.innerHTML = `
-        <div class="meta">${chunk.metadata.section_path} · tokens ${chunk.token_count} · chars ${chunk.char_count}</div>
-        <div class="text"></div>`;
-      row.querySelector(".text").textContent = chunk.text.slice(0, 400);
-      row.onclick = () => {
-        $("chunk-detail").classList.remove("hidden");
-        $("chunk-detail-body").textContent = JSON.stringify(chunk, null, 2);
-      };
-      container.appendChild(row);
+    for (const version of versions) {
+      if (loadId !== state.chunkLoadId) return;
+      await createChunkGroup($("chunks"), version, loadId);
     }
-    if (!result.items.length) container.textContent = "No chunks.";
   } catch (error) {
     showError(error.message);
+  } finally {
+    button.disabled = false;
   }
 }
 
 function wire() {
-  $("refresh").onclick = () => refreshCollections().catch((e) => showError(e.message));
+  $("refresh").onclick = () => Promise.all([refreshCollections(), refreshHealth()]).catch((e) => showError(e.message));
   $("collection-select").onchange = (event) => {
-    state.collectionId = event.target.value;
+    selectCollection(event.target.value);
     refreshVersions().catch((e) => showError(e.message));
   };
   $("collection-create").onclick = async () => {
@@ -319,7 +491,7 @@ function wire() {
         method: "POST",
         body: JSON.stringify({ name }),
       });
-      state.collectionId = collection.collection_id;
+      selectCollection(collection.collection_id);
       $("collection-name").value = "";
       await refreshCollections();
     } catch (error) {
@@ -338,8 +510,16 @@ function wire() {
   $("search").onclick = () => search();
   $("compare").onclick = () => loadCompare();
   $("load-chunks").onclick = () => loadChunks();
+  $("chunks-active").onchange = () => loadChunks();
+}
+
+function markHealthUnavailable() {
+  const badge = $("health");
+  badge.textContent = "Embedding: unreachable — check the backend and local model.";
+  badge.className = "health bad";
 }
 
 wire();
-refreshHealth().catch(() => {});
+refreshHealth().catch(markHealthUnavailable);
+setInterval(() => refreshHealth().catch(markHealthUnavailable), 10000);
 refreshCollections().catch((e) => showError(e.message));

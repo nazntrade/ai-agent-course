@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -56,9 +57,7 @@ def request_text(path: str) -> tuple[int, str]:
         return exc.code, exc.read().decode("utf-8", "replace")
 
 
-def write_sources() -> tuple[str, str]:
-    # local-data is git-ignored; smoke sources are recreated on each run.
-    root = MODULE_DIR / "local-data" / "smoke"
+def write_sources(root: Path) -> tuple[str, str]:
     root.mkdir(parents=True, exist_ok=True)
     doc_a = root / "smoke_agents.md"
     doc_b = root / "smoke_notes.txt"
@@ -81,12 +80,12 @@ def must(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def main() -> int:
+def run_scenario(root: Path) -> int:
     try:
         status, health = request("GET", "/api/health")
         must(status == 200, f"health failed: {status} {health}")
 
-        doc_a, doc_b = write_sources()
+        doc_a, doc_b = write_sources(root)
 
         _, collection_a = request("POST", "/api/collections", {"name": "smoke-a"})
         _, collection_b = request("POST", "/api/collections", {"name": "smoke-b"})
@@ -196,6 +195,11 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - report and fail the run
         print(f"SMOKE ERROR: {exc}")
         return 1
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="knowledge-smoke-") as directory:
+        return run_scenario(Path(directory))
 
 
 if __name__ == "__main__":

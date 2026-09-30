@@ -9,19 +9,21 @@ cd /d "%~dp0"
 
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+set "KNOWLEDGE_SKIP_ENV_FILE=1"
 
 set "VENV_DIR=.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
-if not defined KNOWLEDGE_HOST set "KNOWLEDGE_HOST=127.0.0.1"
+set "KNOWLEDGE_HOST=127.0.0.1"
 if not defined KNOWLEDGE_PORT set "KNOWLEDGE_PORT=8770"
 set "EMBED_STUB_HOST=127.0.0.1"
 if not defined EMBED_STUB_PORT set "EMBED_STUB_PORT=8769"
 REM Point the backend at the local stub for this smoke run. An explicit process
-REM environment value wins over .env, so the smoke run never calls a real Ollama.
+REM environment value and skip flag prevent .env reads and real Ollama calls.
 set "EMBED_BASE_URL=http://%EMBED_STUB_HOST%:%EMBED_STUB_PORT%"
 
-set "HEALTH_URL=http://%KNOWLEDGE_HOST%:%KNOWLEDGE_PORT%/api/health"
+set "KNOWLEDGE_BASE_URL=http://%KNOWLEDGE_HOST%:%KNOWLEDGE_PORT%"
+set "HEALTH_URL=%KNOWLEDGE_BASE_URL%/api/health"
 set "TIMEOUT_SECONDS=120"
 if not "%SMOKE_TIMEOUT%"=="" set "TIMEOUT_SECONDS=%SMOKE_TIMEOUT%"
 
@@ -32,12 +34,25 @@ call :ensure_venv
 if errorlevel 1 exit /b 2
 
 echo Checking that %HEALTH_URL% is free ...
-powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri '%HEALTH_URL%' | Out-Null; exit 0 } catch { exit 1 }"
+powershell -NoProfile -Command "try { $client=New-Object System.Net.Sockets.TcpClient; $client.Connect('%KNOWLEDGE_HOST%',%KNOWLEDGE_PORT%); $client.Close(); exit 0 } catch { exit 1 }"
 if not errorlevel 1 (
     echo ERROR: something already responds at %HEALTH_URL%.
     echo Stop the running service and run this smoke test again.
     exit /b 2
 )
+
+powershell -NoProfile -Command "try { $client=New-Object System.Net.Sockets.TcpClient; $client.Connect('%EMBED_STUB_HOST%',%EMBED_STUB_PORT%); $client.Close(); exit 0 } catch { exit 1 }"
+if not errorlevel 1 (
+    echo ERROR: the embedding stub port is already in use; no processes were started.
+    exit /b 2
+)
+
+REM Allocate a fresh database outside the module; never use the working index.
+set "SMOKE_WORK_DIR="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$smokeDir=Join-Path ([IO.Path]::GetTempPath()) ('knowledge-smoke-db-'+[Guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($smokeDir); $smokeDir"`) do set "SMOKE_WORK_DIR=%%I"
+if not defined SMOKE_WORK_DIR exit /b 2
+set "KNOWLEDGE_DB_PATH=%SMOKE_WORK_DIR%\index.sqlite3"
+set "KNOWLEDGE_SOURCE_PATH="
 
 echo Starting the embedding stub on %EMBED_STUB_HOST%:%EMBED_STUB_PORT% ...
 call :start_stub
@@ -86,7 +101,7 @@ exit /b 1
 
 :start_stub
 set "STUB_PID="
-for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList 'harness\embed_stub.py','--host','%EMBED_STUB_HOST%','--port','%EMBED_STUB_PORT%' -WorkingDirectory '%CD%' -PassThru -WindowStyle Minimized).Id"`) do set "STUB_PID=%%I"
+for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList 'harness\embed_stub.py','--host','%EMBED_STUB_HOST%','--port','%EMBED_STUB_PORT%' -WorkingDirectory '%CD%' -PassThru -WindowStyle Hidden).Id"`) do set "STUB_PID=%%I"
 if not defined STUB_PID exit /b 2
 powershell -NoProfile -Command "$stubPid=[int]%STUB_PID%; $deadline=(Get-Date).AddSeconds(30); while((Get-Date) -lt $deadline){ if(-not (Get-Process -Id $stubPid -ErrorAction SilentlyContinue)){ exit 2 }; try { $c=New-Object System.Net.Sockets.TcpClient; $c.Connect('%EMBED_STUB_HOST%',%EMBED_STUB_PORT%); $c.Close(); exit 0 } catch { }; Start-Sleep -Milliseconds 400 }; exit 1"
 if errorlevel 2 exit /b 2
@@ -95,7 +110,7 @@ exit /b 0
 
 :start_backend
 set "BACKEND_PID="
-for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList '-m','knowledge_agent' -WorkingDirectory '%CD%' -PassThru -WindowStyle Minimized).Id"`) do set "BACKEND_PID=%%I"
+for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList '-m','knowledge_agent' -WorkingDirectory '%CD%' -PassThru -WindowStyle Hidden).Id"`) do set "BACKEND_PID=%%I"
 if not defined BACKEND_PID exit /b 2
 echo Backend process %BACKEND_PID%; waiting for %HEALTH_URL% ...
 powershell -NoProfile -Command "$backendPid=[int]%BACKEND_PID%; $timeout=[int]$env:TIMEOUT_SECONDS; $deadline=(Get-Date).AddSeconds($timeout); while((Get-Date) -lt $deadline){ if(-not (Get-Process -Id $backendPid -ErrorAction SilentlyContinue)){ exit 2 }; try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri '%HEALTH_URL%'; if($r.StatusCode -eq 200){ exit 0 } } catch { }; Start-Sleep -Seconds 1 }; exit 1"

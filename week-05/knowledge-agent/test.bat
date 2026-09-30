@@ -8,6 +8,7 @@ cd /d "%~dp0"
 
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+set "KNOWLEDGE_SKIP_ENV_FILE=1"
 
 set "VENV_DIR=.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"

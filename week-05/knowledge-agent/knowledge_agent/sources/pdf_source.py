@@ -89,14 +89,14 @@ class PdfSourceAdapter(SourceAdapter):
         )
         warnings.append(f"useful_pages:{useful_pages}/{page_count}")
 
-        sections, structure_warning = _build_sections(units, source_ref)
+        sections, structure_warning = _build_sections(units, source_ref, self.extraction_version)
         if structure_warning:
             warnings.append(structure_warning)
 
         all_text = "\n\n".join(p.text for p in paragraphs)
-        document_id = _document_id(source_ref)
+        document_id = _document_id(source_ref, self.extraction_version)
         extraction = ExtractionInfo(
-            extraction_version=EXTRACTION_VERSION,
+            extraction_version=self.extraction_version,
             adapter="pdf",
             page_count=page_count,
             useful_pages=useful_pages,
@@ -275,7 +275,8 @@ def _role_heading(text: str) -> tuple[str, str | None] | None:
 
 
 def _build_sections(
-    units: list[tuple[int | None, Paragraph]], source_ref: SourceRef
+    units: list[tuple[int | None, Paragraph]], source_ref: SourceRef,
+    extraction_version: str = EXTRACTION_VERSION,
 ) -> tuple[list[Section], str | None]:
     sections: list[dict] = []
     current: dict | None = None
@@ -318,7 +319,7 @@ def _build_sections(
         path = section["path"] or f"Section {index + 1}"
         result.append(
             Section(
-                section_id=_section_id(source_ref, path, index),
+                section_id=_section_id(source_ref, path, index, extraction_version),
                 section_path=path,
                 level=max(1, section["level"]),
                 role=_role_for(path),
@@ -400,14 +401,14 @@ def _dominant_size(values: list[float]) -> float:
     return max(counts.items(), key=lambda item: item[1])[0]
 
 
-def _document_id(source_ref: SourceRef) -> str:
+def _document_id(source_ref: SourceRef, extraction_version: str = EXTRACTION_VERSION) -> str:
     return hashlib.sha256(
-        f"{source_ref.source_id}:{EXTRACTION_VERSION}".encode("utf-8")
+        f"{source_ref.source_id}:{extraction_version}".encode("utf-8")
     ).hexdigest()[:32]
 
 
-def _section_id(source_ref: SourceRef, path: str, index: int) -> str:
-    payload = f"{source_ref.source_id}:{EXTRACTION_VERSION}:{path}:{index}"
+def _section_id(source_ref: SourceRef, path: str, index: int, extraction_version: str) -> str:
+    payload = f"{source_ref.source_id}:{extraction_version}:{path}:{index}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -96,13 +98,13 @@ class KnowledgeService:
     def list_index_versions(self, collection_id: str) -> list[dict[str, Any]]:
         if self._store.get_collection(collection_id) is None:
             raise KeyError(collection_id)
-        return self._store.list_index_versions(collection_id)
+        return [_public_index_version(version) for version in self._store.list_index_versions(collection_id)]
 
     def get_index_version(self, index_version_id: str) -> dict[str, Any]:
         version = self._store.get_index_version(index_version_id)
         if version is None:
             raise KeyError(index_version_id)
-        return version
+        return _public_index_version(version)
 
     def mark_stale_builds_failed(self, reason: str = "interrupted") -> int:
         return self._store.mark_stale_builds_failed(reason)
@@ -230,8 +232,8 @@ class KnowledgeService:
             path = item.get("path")
             if not path:
                 raise SourceEmpty("A source entry is missing an explicit path.")
-            file_path = Path(str(path))
-            label = item.get("label") or file_path.name
+            file_path = Path(str(path)).resolve()
+            label = _public_label(item.get("label") or str(path))
             try:
                 data = file_path.read_bytes()
             except OSError as exc:
@@ -243,7 +245,13 @@ class KnowledgeService:
             adapter = self._resolver.resolve(str(file_path))
             content_sha256 = hashlib.sha256(data).hexdigest()
             source_ref = SourceRef(
-                source_id=content_sha256,
+                source_id=_digest({
+                    "version": "source-v2",
+                    "uri": os.path.normcase(str(file_path)),
+                    "kind": adapter.kind,
+                    "content_sha256": content_sha256,
+                    "public_label": label,
+                }),
                 uri=str(file_path),
                 public_uri=str(label),
                 label=str(label),
@@ -282,6 +290,20 @@ class KnowledgeService:
                 raise SourceEmpty(
                     f"Source has no indexable sections after exclusions: {item['label']}."
                 )
+            # Parsed documents are immutable across normalization/exclusion policies.
+            processing = {
+                "normalization": self.normalization_version,
+                "excluded_roles": sorted(self.excluded_roles),
+            }
+            document.document_id = _digest({
+                "adapter_document_id": document.document_id,
+                "processing": processing,
+            })[:32]
+            for section in document.sections:
+                section.section_id = _digest({
+                    "adapter_section_id": section.section_id,
+                    "document_id": document.document_id,
+                })[:32]
             documents.append(document)
             self._store.save_document(index_version_id, document, ordinal)
             chunks.extend(chunker.chunk(document))
@@ -496,7 +518,7 @@ class KnowledgeService:
                 "score": round(score, 6),
                 "chunk_id": row["chunk_id"],
                 "text": row["text"],
-                "metadata": row["metadata"],
+                "metadata": _public_metadata(row["metadata"]),
             }
             for rank, (score, row) in enumerate(top, start=1)
         ]
@@ -541,7 +563,7 @@ class KnowledgeService:
             index_version_id, offset, limit, document_id, section_path
         )
         return {
-            "items": items,
+            "items": [{**item, "metadata": _public_metadata(item["metadata"])} for item in items],
             "total": total,
             "offset": offset,
             "limit": limit,
@@ -590,44 +612,47 @@ class KnowledgeService:
     def _comparison_status(
         self, versions: Sequence[Mapping[str, Any]]
     ) -> tuple[bool, str | None]:
-        """Only equal sources and one embedding identity make metrics comparable."""
+        """Compare only the same cleaned corpus and processing/embedding identity."""
 
         if not versions:
             return False, "no ready indexes to compare"
-        if len(versions) == 1:
-            return True, None
         signatures = [self._comparison_signature(version) for version in versions]
-        if all(signature == signatures[0] for signature in signatures):
+        if all(signature is not None and signature == signatures[0] for signature in signatures):
             return True, None
         return (
             False,
-            "indexes use different sources or embedding identities;"
-            " metrics are not directly comparable",
+            "indexes use different cleaned corpora or processing/embedding identities,"
+            " or lack comparison provenance; metrics are not directly comparable",
         )
 
-    def _comparison_signature(self, version: Mapping[str, Any]) -> tuple[Any, ...]:
+    def _comparison_signature(self, version: Mapping[str, Any]) -> tuple[Any, ...] | None:
         manifest = version.get("manifest") or {}
-        sources = tuple(
-            sorted(
-                (str(item.get("kind")), str(item.get("content_sha256")))
-                for item in manifest.get("sources", [])
-            )
-        )
+        digest = manifest.get("cleaned_corpus_sha256")
+        processing = manifest.get("processing")
+        if not digest or not processing:
+            return None
+        pipeline = manifest.get("pipeline") or {}
         identity = identity_for_compatibility(version)
         return (
-            sources,
+            digest,
+            tuple(pipeline.get("extraction_versions") or []),
+            pipeline.get("normalization"),
+            tuple(processing.get("excluded_roles_policy") or []),
             tuple(sorted((key, str(value)) for key, value in identity.items())),
         )
 
     def health(self) -> dict[str, Any]:
         preflight = self._embedder.preflight()
         reachable = bool(preflight.get("reachable"))
-        hint = None if reachable else "ollama pull embeddinggemma:300m"
+        model_present = bool(preflight.get("model_present"))
+        model = self._embedder.identity().model
+        hint = None if reachable and model_present else f"ollama pull {model}"
         return {
-            "status": "ok" if reachable else "degraded",
+            "status": "ok" if reachable and model_present else "degraded",
             "embedding": {
                 "reachable": reachable,
-                "model": self._embedder.identity().model,
+                "model_present": model_present,
+                "model": model,
                 "digest": self._embedder.identity().digest,
                 "dimension": self._embedder.identity().dimension,
                 "hint": hint,
@@ -644,10 +669,11 @@ class KnowledgeService:
             "excluded_roles": sorted(str(role) for role in self.excluded_roles),
             "sources": [
                 {
+                    "source_id": item["source_ref"].source_id,
                     "kind": item["source_ref"].kind,
                     "content_sha256": item["source_ref"].content_sha256,
-                    "extraction_version": str(
-                        getattr(item["adapter"], "extraction_version", "")
+                    "extraction_version": _extraction_version(
+                        item["adapter"], item["source_ref"]
                     ),
                 }
                 for item in prepared
@@ -725,6 +751,8 @@ class KnowledgeService:
             extraction = document.extraction
             sources.append(
                 {
+                    "source_id": document.source.source_id,
+                    "extraction_version": extraction.extraction_version,
                     "label": document.source.label,
                     "kind": document.source.kind,
                     "content_sha256": document.source.content_sha256,
@@ -740,6 +768,18 @@ class KnowledgeService:
         )
         chunker_params["corpus_schema_version"] = self.corpus_schema_version
         return {
+            "cleaned_corpus_sha256": _digest([
+                {
+                    "kind": document.source.kind,
+                    "extraction_version": document.extraction.extraction_version,
+                    "sections": [
+                        [section.section_path, section.role, section.page_start, section.page_end, section.text]
+                        for section in document.sections
+                    ],
+                }
+                for document in documents
+            ]),
+            "processing": {"excluded_roles_policy": sorted(self.excluded_roles)},
             "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
             "corpus_schema_version": self.corpus_schema_version,
             "index_version_id": index_version_id,
@@ -776,6 +816,55 @@ class KnowledgeService:
             "metrics": dict(metrics),
             "warnings": sorted(set(warnings)),
         }
+
+
+def _public_label(value: Any) -> str:
+    """Strip path prefixes and controls for platform-independent public provenance."""
+
+    label = re.sub(r"[\x00-\x1f\x7f]", "", str(value)).replace("\\", "/")
+    label = label.rstrip("/").rsplit("/", 1)[-1]
+    label = re.sub(r"^[A-Za-z]:", "", label).strip()
+    return label[:200] or "source"
+
+
+def _public_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Project retained public fields safely without mutating stored provenance."""
+
+    projected = dict(metadata)
+    for key in ("source_uri", "source_label", "title"):
+        if projected.get(key) is not None:
+            projected[key] = _public_label(projected[key])
+    return projected
+
+
+def _public_index_version(version: Mapping[str, Any]) -> dict[str, Any]:
+    projected = dict(version)
+    manifest = version.get("manifest")
+    if manifest is not None:
+        projected["manifest"] = {
+            **manifest,
+            "sources": [
+                {
+                    **source,
+                    **{key: _public_label(source[key])
+                       for key in ("label", "public_uri")
+                       if source.get(key) is not None},
+                }
+                for source in manifest.get("sources", [])
+            ],
+        }
+    return projected
+
+
+def _digest(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _extraction_version(adapter: Any, source_ref: SourceRef) -> str:
+    effective = getattr(adapter, "effective_extraction_version", None)
+    return str(effective(source_ref) if effective else adapter.extraction_version)
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:

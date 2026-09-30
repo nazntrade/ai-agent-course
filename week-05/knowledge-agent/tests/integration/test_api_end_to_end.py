@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -59,6 +60,8 @@ class Backend:
         )
         if extra_env:
             env.update(extra_env)
+        env["KNOWLEDGE_SKIP_ENV_FILE"] = "1"
+        env["KNOWLEDGE_DB_PATH"] = str(db_path)
         self.process = subprocess.Popen(
             [sys.executable, "-m", "knowledge_agent"],
             cwd=str(MODULE_DIR),
@@ -87,6 +90,7 @@ class Backend:
             self.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.process.kill()
+            self.process.wait(timeout=10)
 
 
 @pytest.fixture()
@@ -259,3 +263,36 @@ def test_incompatible_identity_after_restart_returns_409(server):
         assert "actual" in payload["error"]["details"]
     finally:
         restarted.stop()
+
+
+def test_equal_bytes_formats_preserve_http_provenance_and_repeat_rows(server):
+    base = server["base"]
+    root = server["source"].parent
+    plain = root / "same.txt"
+    markdown = root / "same.md"
+    text = "# Heading\n\nAgent memory stores observations. " * 30
+    plain.write_text(text, encoding="utf-8")
+    markdown.write_text(text, encoding="utf-8")
+    collection = http("POST", base + "/api/collections", {"name": "formats"})[1]["collection_id"]
+    first = wait_ready(base, build(base, collection, plain, "fixed")["index_version_id"])
+    second_result = build(base, collection, markdown, "fixed")
+    assert second_result["reused"] is False
+    second = wait_ready(base, second_result["index_version_id"])
+    assert first["status"] == second["status"] == "ready"
+    assert first["index_version_id"] != second["index_version_id"]
+    assert first["manifest"]["pipeline"]["extraction_versions"] == ["text-v1:plain"]
+    assert second["manifest"]["pipeline"]["extraction_versions"] == ["text-v1:markdown"]
+    first_chunks = http("GET", f"{base}/api/index-versions/{first['index_version_id']}/chunks")[1]["items"]
+    second_chunks = http("GET", f"{base}/api/index-versions/{second['index_version_id']}/chunks")[1]["items"]
+    assert {item["metadata"]["source_uri"] for item in first_chunks} == {"same.txt"}
+    assert {item["metadata"]["source_uri"] for item in second_chunks} == {"same.md"}
+    with sqlite3.connect(f"file:{server['db'].as_posix()}?mode=ro", uri=True) as connection:
+        saved = connection.execute("SELECT uri FROM sources ORDER BY uri").fetchall()
+        before = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                  for table in ("sources", "documents", "sections", "chunks", "index_versions")}
+    assert (str(plain.resolve()),) in saved and (str(markdown.resolve()),) in saved
+    repeated = build(base, collection, markdown, "fixed")
+    assert repeated["reused"] is True and repeated["index_version_id"] == second["index_version_id"]
+    with sqlite3.connect(f"file:{server['db'].as_posix()}?mode=ro", uri=True) as connection:
+        after = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in before}
+    assert before == after

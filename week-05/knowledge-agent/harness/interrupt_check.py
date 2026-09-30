@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -105,22 +106,19 @@ def stale_document() -> Document:
     )
 
 
-def main() -> int:
+def run_check(root: Path) -> int:
     stub_port = free_port()
     api_port = free_port()
     server = embed_stub.create_server("127.0.0.1", stub_port, dimension=64)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    db_path = MODULE_DIR / "local-data" / "interrupt" / "index.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    settings = build_settings(db_path, stub_port, api_port)
-
-    source = MODULE_DIR / "local-data" / "interrupt" / "source.md"
-    source.write_text("# Ready\n\n" + "Stable content for the active index. " * 40, encoding="utf-8")
-
+    store = None
     try:
+        db_path = root / "index.db"
+        settings = build_settings(db_path, stub_port, api_port)
+
+        source = root / "source.md"
+        source.write_text("# Ready\n\n" + "Stable content for the active index. " * 40, encoding="utf-8")
         service, store = build_service(settings)
         collection = service.create_collection("interrupt-check")["collection_id"]
         ready = service.build(collection, [{"path": str(source)}], "fixed", wait=True)
@@ -143,6 +141,7 @@ def main() -> int:
         env = dict(os.environ)
         env.update(
             {
+                "KNOWLEDGE_SKIP_ENV_FILE": "1",
                 "KNOWLEDGE_HOST": "127.0.0.1",
                 "KNOWLEDGE_PORT": str(api_port),
                 "KNOWLEDGE_DB_PATH": str(db_path),
@@ -166,12 +165,15 @@ def main() -> int:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=10)
 
         check_store = SqliteIndexStore(db_path)
-        stale = check_store.get_index_version(stale_id)
-        collection_state = check_store.get_collection(collection)
-        partial = check_store.count_rows(stale_id)["chunks"]
-        check_store.close()
+        try:
+            stale = check_store.get_index_version(stale_id)
+            collection_state = check_store.get_collection(collection)
+            partial = check_store.count_rows(stale_id)["chunks"]
+        finally:
+            check_store.close()
 
         if stale["status"] != "failed":
             print(f"INTERRUPT_STATUS: FAIL (stale status is {stale['status']})")
@@ -194,8 +196,15 @@ def main() -> int:
         print(f"INTERRUPT_STATUS: FAIL ({exc})")
         return 1
     finally:
+        if store is not None:
+            store.close()
         server.shutdown()
         server.server_close()
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="knowledge-interrupt-") as directory:
+        return run_check(Path(directory))
 
 
 if __name__ == "__main__":

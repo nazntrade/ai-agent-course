@@ -32,7 +32,7 @@ FastAPI + static UI`. Ядро не знает про SQLite, Ollama и PDF-би
 
 Две стратегии чанкинга работают на одном очищенном тексте и одной embedding-конфигурации:
 
-- `fixed` — скользящее окно ~500 токенов с overlap 75;
+- `fixed` — скользящее окно 500 лексических единиц с overlap 75;
 - `structure` — границы реальных разделов, упаковка абзацев, `max_tokens=800`,
   `min_tokens=64`, overlap 0.
 
@@ -44,8 +44,8 @@ FastAPI + static UI`. Ядро не знает про SQLite, Ollama и PDF-би
 | `test.bat unit` | unit-тесты (без сети и `.env`) |
 | `test.bat integration` | интеграционные тесты через локальный stub |
 | `test.bat live` | opt-in LIVE: реальный Ollama `embeddinggemma:300m` |
-| `test.bat acceptance` | агрегатор: unit/integration/restart/interrupt и статистика PDF |
-| `smoke_test.bat` | stub + backend, полный HTTP-сценарий и проверка UI |
+| `test.bat acceptance` | агрегатор unit/integration/restart/interrupt; LIVE и read-only аудит отдельно opt-in |
+| `smoke_test.bat` | stub + backend с TEMP БД; HTTP-сценарий и UI-assets, без браузерной проверки |
 | `run_app.bat` | запуск приложения (режимы `all`, `api`, `ui`, `stub`) |
 
 ### Конфигурация (`.env`)
@@ -61,7 +61,7 @@ FastAPI + static UI`. Ядро не знает про SQLite, Ollama и PDF-би
 1. Запустить `run_app.bat` (при отсутствии Ollama UI всё равно стартует и показывает
    `Embedding: unreachable` с подсказкой `ollama pull embeddinggemma:300m`).
 2. Создать коллекцию, добавить источник (явный путь к PDF/TXT/MD) и нажать **Build**.
-3. Дождаться прогресса; готовая версия индекса помечается активной.
+3. Дождаться ready; первая готовая версия становится активной, дальнейшие выбираются через Set active.
 4. Ввести запрос в **Search** и посмотреть фрагменты; клик по чанку показывает metadata.
 5. **Compare** строит таблицу `fixed` vs `structure` на одном тексте.
 6. Переключение активной версии — кнопкой **Set active** (тот же `PUT`, что и в API).
@@ -72,10 +72,11 @@ FastAPI + static UI`. Ядро не знает про SQLite, Ollama и PDF-би
 (текстовый слой, 42 страницы). Путь к файлу задаёт пользователь; сам файл в Git не
 попадает (каталог `local-data/` игнорируется).
 
-Фактическая проверка (`test.bat acceptance`, извлечение через `pdfplumber`, `pdf-v3`):
+Извлечение через `pdfplumber` (`pdf-v3`); свежий LIVE 30.09.2026 отдельно проверяет объём после исключений:
 
 - `page_count = 42`, `useful_pages = 42`, `useful_chars ≈ 148 547`, язык `en`;
-- порог полезной страницы `PDF_USEFUL_PAGE_MIN_CHARS = 500` преодолевают все страницы;
+- порог `PDF_USEFUL_PAGE_MIN_CHARS = 500` преодолевают все 42 страницы до исключений;
+- **33 полезные индексируемые страницы** после исключения библиографии, проверено свежим LIVE;
 - обнаружено 27 разделов (26 `body` + 1 `references`); реальные заголовки:
   `1 Introduction`, `2.1 Agent Architecture Design`, `2.1.1 Profiling Module`,
   `7 Conclusion` и т. д.;
@@ -106,7 +107,7 @@ x-позиция с минимальным числом пересекающих
 всего ~2.8 pt, разделяются, а слова с трекингом не режутся — проверено фикстурами
 `tests/fixtures/mini_pdf.py` и тестами `tests/unit/test_sources.py`; случай с
 промежуточной строкой закреплён `tests/unit/test_pdf_two_column.py`. Офлайн-диагностика
-(`test.bat acceptance`, только чтение): `PDF_ORDER` для страниц 3, 4, 10–13, 32,
+(`RUN_KNOWLEDGE_READONLY_AUDIT=1 test.bat acceptance`, только чтение): `PDF_ORDER` для страниц 3, 4, 10–13, 32,
 `PDF_FRAGMENT` — сырые слова/символы и итоговый абзац `1 Introduction`,
 `PDF_CHUNKS` — текст новых чанков `fixed`/`structure`. Остаются артефакты исходного
 текстового слоя в подписях к рисункам/таблицам и наложенных правках (например,
@@ -116,70 +117,66 @@ Fallback `pypdfium2` остаётся упрощённым и не примен�
 
 ## Измеренное сравнение `fixed` vs `structure` (LIVE)
 
-Один реальный прогон локальной моделью `embeddinggemma:300m` (Ollama 0.34.4,
-dimension 768, digest `85462619…79f1`) на одном PDF, одна embedding-конфигурация,
-`excluded_roles = ["references"]`:
+Свежий изолированный прогон 30.09.2026: `test.bat live`, exit 0,
+`LIVE_CLEANUP: PASS`, `EMBEDDING_LIVE_STATUS: PASS`. Ollama 0.35.0,
+`embeddinggemma:300m`, dimension 768, digest `85462619…79f1`.
+Один PDF, одна конфигурация embeddings, `pdf-v3`, `references` исключены,
+33 полезные страницы тела. SQLite создаётся в новом TEMP-каталоге;
+каждая стратегия действительно вычисляет векторы, прежняя рабочая БД не используется.
 
 | Метрика | `fixed` | `structure` |
 | --- | --- | --- |
 | chunks | 50 | 61 |
-| tokens min/median/p95/max | н/д* | н/д* |
-| overlap_overhead | н/д* | н/д* |
-| section_crossing_ratio | н/д* | н/д* |
-| build_seconds | 6.18 | 6.95 |
-| input_tokens (usage провайдера) | 27 217 | 23 144 |
-| embed_latency median | 447.4 ms | 396.2 ms |
-| chunks_per_second | 8.09 | 8.78 |
-| vector_bytes (50×768×4 / 61×768×4) | 153 600 | 187 392 |
+| лексические единицы min/median/p95/max | 168/500/500/500 | 36/341/574/631 |
+| overlap_overhead | 0.175058 | 0 |
+| section_crossing_ratio | 0.34 | 0 |
+| build_seconds | 3.608613 | 3.708038 |
+| input_tokens (usage Ollama) | 27 217 | 23 144 |
+| embed_latency median | 276.542 ms | 237.227 ms |
+| chunks_per_second | 13.855739 | 16.450747 |
+| vector_bytes | 153 600 | 187 392 |
 
-`*` Для `pdf-v3` полная разбивка токенов, `overlap_overhead` и
-`section_crossing_ratio` offline-диагностикой не экспонируются (значения `н/д`); на
-предыдущем `pdf-v2`-прогоне они были `fixed` 174/500/500/500 (overlap 0.175,
-crossing 0.340), `structure` 36/347/574/631 (overlap 0.000, crossing 0.000).
+Размеры чанков измеряет `lexical-v1`, а не tokenizer EmbeddingGemma.
+`input_tokens` — отдельный фактический usage провайдера. Минимум Structure 64 —
+порог упаковки; короткие самостоятельные секции могут остаться меньше него.
+`db_size_bytes` отражает только основной SQLite-файл и не включает WAL, поэтому
+не используется как размер всего индекса; `vector_bytes` отражает сохранённые float32.
+Времена получены на прогретой модели и не являются SLA или benchmark.
+Для embeddings output tokens и скорость генерации текста неприменимы.
 
-Вывод: `fixed` даёт меньше чанков с максимальным перекрытием и пересекает разделы
-(`section_crossing_ratio ≈ 0.35`); `structure` не пересекает разделы и не тратит
-токены на overlap, но формирует больше мелких чанков на коротких секциях. Значения —
-результат одного запуска на учебном корпусе, а не бенчмарк. Output tokens и output
-tok/s для embedding не измеряются (`н/д`): у embedding-модели нет генерации текста.
-Времена (`build_seconds`, latency) зависят от прогрева модели и приведены по последнему
-прогону.
+Fixed использует меньше векторов, но повторяет около 17.5% лексического текста
+и пересекает границы разделов в 34% чанков. Structure сохраняет границы и
+тратит меньше фактических входных токенов, но создаёт больше векторов.
+На запрос `planning in LLM agents` Structure первым вернул Planning Module;
+Fixed первым вернул текст диаграммы из Memory Module. Это полезный пример
+влияния chunking и PDF-артефактов, а не доказательство универсального превосходства.
+В браузере английский и русский вопросы о памяти вернули тематические фрагменты
+Memory Module. Полной размеченной оценки качества retrieval ещё нет.
 
-> **Для применения исправленного извлечения нужна пересборка индекса.** Причина
-> пересборки `pdf-v3`: устранена склейка слова при переносе с промежуточной строкой.
-> Для `1 Introduction` было `...enhance the agent capabildifferent ity to complete
-> tasks...`, стало `...enhance the agent capability to complete different tasks...`
-> (слово `capability` соединено; `different` сохранён отдельным токеном, не удалён).
-> `chunks` 50/60 → 50/61, `useful_chars` 148 549 → 148 547, разделов 26 → 27
-> (`6.6 Efficiency` теперь распознаётся). Поиск `planning in LLM agents` возвращает
-> тематические фрагменты из `2.1.2 Memory Module` и `2.1.3 Planning Module`.
->
-> Версия извлечения PDF поднята до `pdf-v3`; per-source `extraction_version` входит в
-> `fingerprint`, но не в сравнение совместимости при поиске. Поэтому сама смена
-> `pdf-v2` на `pdf-v3` не гарантирует `409 index_incompatible`: отказ возникает при
-> расхождении полей `COMPATIBILITY_FIELDS`, включая `corpus_schema_version` и
-> `normalization_version`. Эти два поля входят и в `fingerprint`, и в сравнение
-> совместимости; текущая версия корпуса — `corpus-v3`.
-> Первый `POST /api/index/build` тех же байтов с новым `fingerprint` создаёт **новую**
-> версию индекса — **без** удаления БД (старые `pdf-v1`/`pdf-v2` сохранены). Повтор
-> при неизменном `fingerprint` готовой версии возвращает `reused:true` с тем же
-> `index_version_id`.
-> `CORPUS_SCHEMA_VERSION`/`normalization_version` можно менять и дальше: колонка
-> `normalization_version` добавляется к существующей БД на месте (`ALTER TABLE`).
+### Идентичность обработки и сохранение старых данных
 
-**Версия обработки документа** (детали в manifest `pipeline`): для каждого источника —
-`extraction_version` (`pdf-v3`/`text-v1`), плюс нормализация текста
-`NORMALIZATION_VERSION` (`norm-v1`) с описанием `pipeline.normalization_detail`.
-`manifest.sources[]` версий извлечения не содержит (SPEC §6.4 их и не требует): там
-только `label`/`kind`/`content_sha256`/метрики, а сами версии перечислены в
-`pipeline.extraction_versions` и в `fingerprint`. Поле `pipeline.normalization` содержит
-именно версию нормализации. `normalization_version` — дополнительное поле сверх
-буквального списка SPEC §10; оно зафиксировано в `manifest.pipeline` и участвует в
-сравнении совместимости (`409 index_incompatible`).
+Fingerprint включает упорядоченные источники, содержимое и происхождение,
+effective extraction version, normalization/exclusion policy, chunking и embeddings.
+TXT и Markdown различаются как `text-v1:plain` и `text-v1:markdown`.
+Идентичность parsed document/section также учитывает processing policy;
+новая сборка не изменяет разделы ранее готовой версии.
+`manifest.sources[]` хранит per-source `source_id` и `extraction_version`;
+`pipeline.extraction_versions` содержит сводку. Нормализация — `norm-v1`,
+корпус — `corpus-v3`. Настройки совместимости при поиске проверяются до
+вычисления embedding запроса; изменение источника создаёт новую версию,
+но не означает само по себе несовместимость embedding-пространства.
+
+Сравнение проверяет digest очищенного корпуса, обработку и embedding identity.
+Ready-версии с legacy manifest без достоверного digest остаются читаемыми,
+но не выдаются за сопоставимые с новыми. API безопасно проецирует legacy
+абсолютные labels/URI без изменения сохранённых строк и ID.
+Повтор неизменной ready-сборки возвращает `reused:true`, прежний ID
+и не создаёт новых строк; обе стратегии проверены свежим LIVE.
+Пересборка после исправления извлечения создаёт новую версию без удаления старой БД.
 
 ## Поведение внешнего провайдера
 
-На реальном Ollama 0.34.4 `POST /api/show` не содержит поля `digest`; digest модели
+В исходном прогоне Ollama 0.34.4 `POST /api/show` не содержит поля `digest`; digest модели
 возвращается в `GET /api/tags`. `OllamaEmbedder` учитывает это: digest берётся из
 `/api/tags`, при наличии — из `/api/show`. Расхождение закреплено regression-тестом
 `tests/unit/test_embedder.py::test_digest_comes_from_tags_when_show_omits_it`.
@@ -195,14 +192,20 @@ tok/s для embedding не измеряются (`н/д`): у embedding-мод�
 - LIVE (`test.bat live`): реальная модель, `MODEL_CHECK_KIND: LOCAL`.
 - MANUAL/UI: запуск `run_app.bat`, сервировка статического UI и интерактивная проверка.
 
-Тесты не читают `.env` и не ходят в сеть. Реальные вызовы Ollama — только opt-in.
+Тестовые entrypoints явно задают `KNOWLEDGE_SKIP_ENV_FILE=1`. UNIT работает без сети;
+INT/smoke используют loopback stub и собственные TEMP данные. LIVE вызывает локальную
+Ollama только opt-in и закрывает SQLite до очистки TEMP. Обычный запуск приложения
+по-прежнему может загружать `.env`. Acceptance включает включённый LIVE в automated
+результат, но выдаёт `D21_ACCEPTANCE_STATUS: NOT_ASSESSED`: автоматические тесты
+не подтверждают ручной UI или наличие обязательного видео. Read-only аудит рабочих
+локальных артефактов включается только `RUN_KNOWLEDGE_READONLY_AUDIT=1`.
 Игнорируемые артефакты (`.venv/`, `local-data/`, БД, кэши) в Git не попадают.
 
 ## Сценарий видео (кратко)
 
-1. Запуск `run_app.bat`; при отсутствии модели — `Embedding: unreachable` и подсказка
+1. Запуск `run_app.bat`; при недоступном Ollama — `Embedding: unreachable`; при отсутствующей модели — отдельный badge и подсказка
    `ollama pull embeddinggemma:300m`.
-2. После pull — сборка с прогрессом и числом чанков (остальные счётчики доступны в API/manifest).
+2. С установленной моделью — сборка с прогрессом и счётчиками sources/documents/sections/chunks.
 3. Поиск → фрагменты с происхождением; просмотр чанка и metadata.
 4. Смена активной коллекции/версии индекса параметром.
 5. Таблица сравнения `fixed` vs `structure`.
@@ -221,17 +224,17 @@ tok/s для embedding не измеряются (`н/д`): у embedding-мод�
 - Fallback `pypdfium2`: упрощённое извлечение без масштабируемого порога разбиения слов.
 - `manifest.pipeline.adapter` = `"multi"`, а `pipeline.extraction_version` берётся от
   **первого** документа; при смешанных источниках (PDF + TXT/MD) это лишь сводка.
-  Реальные per-source версии извлечения перечислены в `pipeline.extraction_versions`
-  и входят в `fingerprint`; `manifest.sources[]` их не содержит (SPEC §6.4).
+  Реальные per-source версии записаны в `manifest.sources[]`, сводка — в
+  `pipeline.extraction_versions`; версии входят в `fingerprint`.
 - `chunking/common.build_chunk` принимает `section_level`/`section_role`, которые не
   используются внутри (мёртвые параметры, P3); на результат не влияют.
-- UI: значения чанков в таблице версий и сравнение показывают `chunks`; отдельные
-  счётчики `sources/documents/sections` и переключатель `Active index only` пока не
-  выведены/не подключены (P3). Фрагменты рендерятся через `textContent`, но заголовки
-  карточек собираются `innerHTML` из данных собственных документов (P3).
+- UI показывает все счётчики, ожидание поиска, ошибки сборки и обновляет health.
+  Недоступный Ollama и отсутствующая модель имеют разные статусы с подсказкой.
+  Данные источников выводятся как текст; `Active index only` переключает версии,
+  `Load more` позволяет просмотреть чанки после первых 50.
 - Неизвестный `schema_version` (в т.ч. нечисловое значение) даёт `store_schema_unsupported`,
   а не общий `internal_error`.
 - `compare` помечает `comparable: false` и возвращает `note` (UI показывает его), если
-  версии построены на разных источниках или embedding identity (метрики тогда
+  версии построены на разном очищенном корпусе, processing или embedding identity (метрики тогда
   несопоставимы).
 - Корпус, индексы и модели в Git не добавляются; коммиты и push агентом не выполняются.

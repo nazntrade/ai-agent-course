@@ -482,16 +482,21 @@ def inspect_legacy_indexes() -> None:
 
 def run(args: list[str]) -> int:
     print(f"$ {' '.join(args)}")
-    completed = subprocess.run(args, cwd=str(MODULE_DIR))
+    env = dict(os.environ)
+    env["KNOWLEDGE_SKIP_ENV_FILE"] = "1"
+    completed = subprocess.run(args, cwd=str(MODULE_DIR), env=env)
     return completed.returncode
 
 
 def main() -> int:
     results: dict[str, bool] = {}
 
-    inspect_corpus()
-    inspect_new_chunks()
-    inspect_legacy_indexes()
+    print("ACCEPTANCE_SCOPE: automated checks; manual/UI evidence is assessed separately")
+    if os.environ.get("RUN_KNOWLEDGE_READONLY_AUDIT") == "1":
+        print("READONLY_AUDIT: approved corpus and retained indexes; not isolated test data")
+        inspect_corpus()
+        inspect_new_chunks()
+        inspect_legacy_indexes()
     unit = run([PYTHON, "-m", "pytest", "tests/unit", "-q"])
     results["UNIT"] = unit == 0
     print(f"UNIT_STATUS: {'PASS' if unit == 0 else 'FAIL'}")
@@ -514,8 +519,11 @@ def main() -> int:
         print("EMBEDDING_LIVE_STATUS: not run (set RUN_EMBED_LIVE=1 to enable LIVE)")
 
     mandatory = ["UNIT", "INTEGRATION", "RESTART", "INTERRUPT"]
+    if "LIVE" in results:
+        mandatory.append("LIVE")
     overall = all(results.get(name, False) for name in mandatory)
-    print(f"TEST_STATUS: {'PASS' if overall else 'FAIL'}")
+    print(f"AUTOMATED_STATUS: {'PASS' if overall else 'FAIL'}")
+    print("D21_ACCEPTANCE_STATUS: NOT_ASSESSED (requires LIVE and manual/UI evidence)")
     return 0 if overall else 1
 
 

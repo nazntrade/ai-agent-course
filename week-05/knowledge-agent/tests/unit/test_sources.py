@@ -199,3 +199,18 @@ def test_pdf_does_not_split_tracked_words(tmp_path):
     assert "Trac king" not in combined
     assert "T racking" not in combined
 
+
+
+def test_pdf_effective_extraction_version_changes_metadata_and_ids(tmp_path, monkeypatch):
+    path = write_mini_pdf(tmp_path / "versions.pdf")
+    reference = ref_for(path, "pdf")
+    adapter = PdfSourceAdapter()
+    first = adapter.extract(reference)
+    monkeypatch.setattr(adapter, "extraction_version", "pdf-next")
+    second = adapter.extract(reference)
+    assert second.extraction.extraction_version == "pdf-next"
+    assert second.document_id != first.document_id
+    assert {section.section_id for section in first.sections}.isdisjoint(
+        section.section_id for section in second.sections
+    )
+    assert [section.text for section in first.sections] == [section.text for section in second.sections]

@@ -132,7 +132,7 @@ exit /b 0
 
 :start_stub
 set "STUB_PID="
-for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList 'harness\embed_stub.py','--host','%EMBED_STUB_HOST%','--port','%EMBED_STUB_PORT%' -WorkingDirectory '%CD%' -PassThru -WindowStyle Minimized).Id"`) do set "STUB_PID=%%I"
+for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList 'harness\embed_stub.py','--host','%EMBED_STUB_HOST%','--port','%EMBED_STUB_PORT%' -WorkingDirectory '%CD%' -PassThru -WindowStyle Hidden).Id"`) do set "STUB_PID=%%I"
 if not defined STUB_PID exit /b 1
 echo Embedding stub process %STUB_PID%; waiting for readiness ...
 powershell -NoProfile -Command "$stubPid=[int]%STUB_PID%; $deadline=(Get-Date).AddSeconds(30); while((Get-Date) -lt $deadline){ if(-not (Get-Process -Id $stubPid -ErrorAction SilentlyContinue)){ exit 2 }; try { $c=New-Object System.Net.Sockets.TcpClient; $c.Connect('%EMBED_STUB_HOST%',%EMBED_STUB_PORT%); $c.Close(); exit 0 } catch { }; Start-Sleep -Milliseconds 400 }; exit 1"
@@ -141,7 +141,7 @@ exit /b 0
 
 :start_backend
 set "BACKEND_PID="
-for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList '-m','knowledge_agent' -WorkingDirectory '%CD%' -PassThru -WindowStyle Minimized).Id"`) do set "BACKEND_PID=%%I"
+for /f "usebackq" %%I in (`powershell -NoProfile -Command "(Start-Process -FilePath '%~dp0.venv\Scripts\python.exe' -ArgumentList '-m','knowledge_agent' -WorkingDirectory '%CD%' -PassThru -WindowStyle Hidden).Id"`) do set "BACKEND_PID=%%I"
 if not defined BACKEND_PID exit /b 2
 echo Backend process %BACKEND_PID%; waiting for %HEALTH_URL% ...
 powershell -NoProfile -Command "$backendPid=[int]%BACKEND_PID%; $deadline=(Get-Date).AddSeconds(60); while((Get-Date) -lt $deadline){ if(-not (Get-Process -Id $backendPid -ErrorAction SilentlyContinue)){ exit 2 }; try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri '%HEALTH_URL%'; if($r.StatusCode -eq 200){ exit 0 } } catch { }; Start-Sleep -Milliseconds 500 }; exit 1"
