@@ -156,11 +156,18 @@ class OpenAIChatModel(ChatModel):
         try:
             choice = data['choices'][0]
             text = choice['message']['content']
-            if not isinstance(text, str) or (not text and choice.get('finish_reason') != 'length'):
-                raise ValueError()
-            return self._result(text, choice.get('finish_reason'), data.get('usage'), data.get('model'), started, data.get('timings'))
-        except (KeyError, IndexError, TypeError, ValueError):
+            reason = choice.get('finish_reason')
+        except (KeyError, IndexError, TypeError, AttributeError):
             raise ChatInvalidResponse('The selected provider returned no answer.') from None
+        # An empty answer is never a success, even when the provider reports a
+        # length finish reason; details stay limited to safe provider metadata.
+        if not isinstance(text, str) or not text.strip():
+            usage = data.get('usage') if isinstance(data, dict) else None
+            output_tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
+            raise ChatInvalidResponse('The selected provider returned an empty answer.',
+                details={'finish_reason': reason if isinstance(reason, str) else None,
+                         'output_tokens': output_tokens if type(output_tokens) is int and output_tokens >= 0 else None})
+        return self._result(text, reason, data.get('usage'), data.get('model'), started, data.get('timings'))
 
     def stream_chat(self, messages, options=None):
         started = time.perf_counter()
@@ -197,7 +204,8 @@ class OpenAIChatModel(ChatModel):
                             reason = choice['finish_reason']
                 except (ValueError, TypeError, AttributeError):
                     raise ChatInvalidResponse('Malformed selected-provider stream.') from None
-        if not ended or (not pieces and reason != 'length'):
+        answer = ''.join(pieces)
+        if not ended or not answer.strip():
             raise ChatInvalidResponse('The selected-provider stream ended unexpectedly.')
-        yield {'type': 'done', 'result': self._result(''.join(pieces), reason, usage, model, started, timings)}
+        yield {'type': 'done', 'result': self._result(answer, reason, usage, model, started, timings)}
 

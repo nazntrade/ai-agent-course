@@ -77,6 +77,29 @@ def _answer_text(record: dict[str, Any]) -> str:
     return str((record.get("answer") or {}).get("text") or "")
 
 
+def _invalid_answer_reason(record: dict[str, Any]) -> str | None:
+    """Return why a run record is not a valid pair answer, or ``None``.
+
+    A non-empty ``errors`` list is a provider/persistence failure; a missing,
+    non-string or blank ``answer.text`` is an empty answer. Either way the pair
+    must never count toward PASS.
+    """
+    errors = record.get("errors")
+    if errors:
+        if isinstance(errors, list):
+            first = errors[0]
+            if isinstance(first, dict):
+                return str(first.get("code") or first.get("message") or "provider error")
+            return str(first)
+        return str(errors)
+    answer = record.get("answer")
+    text = answer.get("text") if isinstance(answer, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        finish_reason = answer.get("finish_reason") if isinstance(answer, dict) else None
+        return f"empty answer text (finish_reason={finish_reason})"
+    return None
+
+
 def _section_hit(record: dict[str, Any], expected: list[str]) -> bool:
     retrieval = record.get("retrieval") or {}
     passed = retrieval.get("passed") or []
@@ -133,6 +156,10 @@ def run(base: str, collection_id: str | None, live: bool) -> int:
             status, record = request("POST", "/api/chat", payload)
             if status != 200:
                 print(f"RAG_EVAL_PAIRS_STATUS: FAIL ({question_id} {mode}: {status} {record})")
+                return 1
+            reason = _invalid_answer_reason(record)
+            if reason is not None:
+                print(f"RAG_EVAL_PAIRS_STATUS: FAIL ({question_id} {mode}: {reason})")
                 return 1
             results[mode] = record
 

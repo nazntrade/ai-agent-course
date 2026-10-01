@@ -147,6 +147,14 @@ def test_malformed_or_empty_answer_is_invalid_response():
         model.chat(MESSAGES)
 
 
+def test_empty_answer_with_length_finish_reason_is_invalid():
+    # Regression: a content-empty ``length`` answer must not become a false PASS.
+    model, _ = _model(lambda method, url, payload: (200, _chat_body(
+        message={"role": "assistant", "content": ""}, done_reason="length")))
+    with pytest.raises(ChatInvalidResponse):
+        model.chat(MESSAGES)
+
+
 def _ndjson(*lines: dict) -> bytes:
     return ("\n".join(json.dumps(line) for line in lines) + "\n").encode("utf-8")
 
@@ -185,6 +193,27 @@ def test_streaming_malformed_line_is_invalid():
     model, _ = _model(lambda method, url, payload: (200, b"not-json\n"))
     with pytest.raises(ChatInvalidResponse):
         list(model.stream_chat(MESSAGES))
+
+
+def test_empty_stream_with_length_finish_reason_is_invalid():
+    body = _ndjson({"message": {"role": "assistant", "content": ""}, "done": True,
+                    "done_reason": "length", "eval_count": 3})
+    model, _ = _model(lambda method, url, payload: (200, body))
+    with pytest.raises(ChatInvalidResponse):
+        list(model.stream_chat(MESSAGES))
+
+
+def test_non_empty_stream_with_length_finish_reason_is_preserved():
+    body = _ndjson(
+        {"message": {"role": "assistant", "content": "partial"}, "done": False},
+        {"message": {"role": "assistant", "content": ""}, "done": True,
+         "done_reason": "length", "eval_count": 3, "eval_duration": 1_000_000_000},
+    )
+    model, _ = _model(lambda method, url, payload: (200, body))
+    events = list(model.stream_chat(MESSAGES))
+    done = events[-1]["result"]
+    assert done.text == "partial"
+    assert done.finish_reason == "length"
 
 
 def test_preflight_reads_version_tags_and_show_without_inference():

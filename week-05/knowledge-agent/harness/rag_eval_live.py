@@ -39,8 +39,21 @@ class CleanupFailed(RuntimeError):
     pass
 
 
+class EvaluationFailed(RuntimeError):
+    """The evaluation persisted empty or errored answers; it is not a success."""
+
+
+_STUB_MARKERS = ('stub', 'fake', 'mock')
+
+
 def is_stub(value):
-    return str(value or '').lower().startswith(('stub', 'fake', 'mock', 'test-stub'))
+    """Detect stub/fake/mock markers in any position, not only as a prefix.
+
+    A provider (or profile) whose identity merely embeds the marker, e.g.
+    ``0.0.0-stub`` or ``chat-stub``, is still a stub and must never be run as LIVE.
+    """
+    text = str(value or '').lower()
+    return any(marker in text for marker in _STUB_MARKERS)
 
 
 def selected_source(settings):
@@ -170,6 +183,13 @@ def completed_pairs(output):
     for run_id in run_ids:
         if not (output / (run_id + '.json')).is_file():
             raise RunnerBlocked('evaluation run record is missing')
+    # Structural completion is not enough: every persisted answer must be real.
+    for run_id in run_ids:
+        record = json.loads((output / (run_id + '.json')).read_text(encoding='utf-8'))
+        answer = record.get('answer') if isinstance(record, dict) else None
+        text = answer.get('text') if isinstance(answer, dict) else None
+        if not isinstance(record, dict) or record.get('errors') != [] or not isinstance(text, str) or not text.strip():
+            raise EvaluationFailed('persisted answers are empty or contain errors')
     return len(pairs)
 
 
@@ -199,6 +219,8 @@ def run_owned(settings, source, label):
         output.mkdir(parents=True, exist_ok=False)
         settings = dataclasses.replace(settings, db_path=str(root / 'index.db'), chat_runs_path=str(output),
                                        host='127.0.0.1', port=0)
+        if urlsplit(settings.embed_base_url).hostname not in {'127.0.0.1', 'localhost', '::1'}:
+            raise RunnerBlocked('LIVE embedding requires a loopback endpoint')
         service, store = build_service(settings)
         chat = build_chat_service(settings, service)
         receipt['chat'] = verify_chat_identity(chat.chat_model, settings.test_profile)
@@ -226,6 +248,10 @@ def run_owned(settings, source, label):
         print('RAG_EVAL_RUNNER_STATUS: BLOCKED (provider, corpus or index validation; no fallback)')
         result = 3
         receipt['runner_status'] = 'BLOCKED'
+    except EvaluationFailed:
+        print('RAG_EVAL_RUNNER_STATUS: FAIL (persisted answers are empty or contain errors)')
+        result = 1
+        receipt['runner_status'] = 'FAIL'
     except KeyboardInterrupt:
         receipt['runner_status'] = 'INTERRUPTED'
         result = 130

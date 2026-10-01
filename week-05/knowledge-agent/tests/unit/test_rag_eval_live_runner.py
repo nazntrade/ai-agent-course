@@ -79,7 +79,7 @@ def test_session_ready_environment_used_for_backend(monkeypatch,tmp_path):
     assert events==['enter','run','release']
 
 
-def owned_fixture(tmp_path,monkeypatch):
+def owned_fixture(tmp_path,monkeypatch,embed_preflight=None,chat_name='selected-model'):
     monkeypatch.setenv('AI_TEST_LIVE_POLICY','allowed')
     monkeypatch.setattr(runner,'MODULE_DIR',tmp_path)
     monkeypatch.setattr(runner.tempfile,'gettempdir',lambda:str(tmp_path))
@@ -88,8 +88,9 @@ def owned_fixture(tmp_path,monkeypatch):
     digest=hashlib.sha256(source.read_bytes()).hexdigest()
     events=[]
     store=SimpleNamespace(close=lambda:events.append('store-close'))
+    embedding_preflight=embed_preflight or {'reachable':True,'model_present':True,'version':'0.35.0'}
     class Service:
-        _embedder=SimpleNamespace(preflight=lambda:{'reachable':True,'model_present':True,'version':'0.35.0'})
+        _embedder=SimpleNamespace(preflight=lambda:embedding_preflight)
         def create_collection(self,name):return {'collection_id':'owned-collection'}
         def build(self,collection,sources,strategy,wait):
             assert sources==[{'path':str(source)}] and wait and strategy=='structure'
@@ -105,9 +106,10 @@ def owned_fixture(tmp_path,monkeypatch):
         assert Path(settings.db_path).parent!=tmp_path/'user-data'
         assert Path(settings.db_path).parent.name.startswith('knowledge-rag-eval-')
         assert Path(settings.chat_runs_path).parent==tmp_path/'local-data'/'chat-runs'
+        events.append('build-service')
         return service,store
     model=SimpleNamespace(preflight=lambda:{'reachable':True,'model_present':True},
-        identity=lambda:ChatModelIdentity('openai-compatible','', 'selected-model',
+        identity=lambda:ChatModelIdentity('openai-compatible','', chat_name,
             default_options={'model_check_kind':'remote'}))
     monkeypatch.setattr(runner,'build_service',build)
     monkeypatch.setattr(runner,'build_chat_service',lambda *a:SimpleNamespace(chat_model=model))
@@ -136,7 +138,7 @@ def test_eval_success_failure_interrupt_clean_only_owned_backend_and_temp(tmp_pa
                 branches={}
                 for mode in ('with_rag','without_rag'):
                     id=f'owned-{i}-{mode}'
-                    (output/(id+'.json')).write_text('{}')
+                    (output/(id+'.json')).write_text(json.dumps({'answer':{'text':'ok'},'errors':[]}))
                     branches[mode]={'run_id':id}
                 pairs.append(branches)
             (output/'eval-summary-fixture.json').write_text(json.dumps({'pairs':pairs}))
@@ -151,6 +153,35 @@ def test_eval_success_failure_interrupt_clean_only_owned_backend_and_temp(tmp_pa
     assert receipt['cleanup_status']=='PASS' and receipt['quality_status']=='NOT_ASSESSED'
     assert receipt['pairs_completed']==(10 if result==0 else 0)
     assert 'fixture-secret' not in report.read_text() and str(tmp_path) not in report.read_text()
+
+
+@pytest.mark.parametrize('bad_record',[
+    {'answer':{'text':''},'errors':[]},
+    {'answer':{'text':'ok'},'errors':[{'code':'chat_invalid_response','message':'empty'}]},
+])
+def test_persisted_empty_or_errored_answer_fails_the_runner(tmp_path,monkeypatch,bad_record):
+    # Regression: structural completion must not be reported as COMPLETED when
+    # any persisted answer is empty or carries provider errors.
+    source,events=owned_fixture(tmp_path,monkeypatch)
+    def evaluate(base,collection,output,model):
+        pairs=[]
+        for i in range(10):
+            branches={}
+            for mode in ('with_rag','without_rag'):
+                id=f'owned-{i}-{mode}'
+                record=bad_record if (i==0 and mode=='with_rag') else {'answer':{'text':'ok'},'errors':[]}
+                (output/(id+'.json')).write_text(json.dumps(record))
+                branches[mode]={'run_id':id}
+            pairs.append(branches)
+        (output/'eval-summary-fixture.json').write_text(json.dumps({'pairs':pairs}))
+        return 0
+    monkeypatch.setattr(runner,'evaluate',evaluate)
+    assert runner.run_owned(load_settings(ENV),source,source.name)==1
+    report=list((tmp_path/'local-data'/'chat-runs').glob('rag-eval-*/rag-eval-receipt.json'))[0]
+    receipt=json.loads(report.read_text())
+    assert receipt['runner_status']=='FAIL'
+    assert receipt['pairs_completed']==0
+    assert receipt['cleanup_status']=='PASS'
 
 
 def test_backend_drain_failure_keeps_store_and_temp_intact(tmp_path,monkeypatch):
@@ -174,6 +205,40 @@ def test_ready_index_rejects_other_source_and_not_ready_status():
         set_active_index=lambda *a:active.append(a))
     with pytest.raises(runner.RunnerBlocked):runner.ready_index(service,Path('registered.pdf'),'expected')
     assert active==[]
+
+
+@pytest.mark.parametrize('value,expected',[
+    ('0.0.0-stub',True),('embeddinggemma:300m-stub',True),('chat-fake',True),
+    ('local-mock-model',True),('MODEL-STUB',True),('0.35.0',False),
+    ('embeddinggemma:300m',False),('selected-model',False)])
+def test_is_stub_detects_marker_in_any_position(value,expected):
+    assert runner.is_stub(value) is expected
+
+
+def test_owned_runner_blocks_stub_embedding_provider_before_indexing(tmp_path,monkeypatch):
+    source,events=owned_fixture(tmp_path,monkeypatch,
+        embed_preflight={'reachable':True,'model_present':True,'version':'0.0.0-stub','model':'embeddinggemma:300m'})
+    assert runner.run_owned(load_settings(ENV),source,source.name)==3
+    assert 'build' not in events
+    report=next((tmp_path/'local-data'/'chat-runs').glob('rag-eval-*/rag-eval-receipt.json'))
+    receipt=json.loads(report.read_text())
+    assert receipt['runner_status']=='BLOCKED' and receipt['cleanup_status']=='PASS'
+
+
+def test_owned_runner_blocks_stub_chat_profile_before_indexing(tmp_path,monkeypatch):
+    source,events=owned_fixture(tmp_path,monkeypatch,chat_name='chat-stub')
+    assert runner.run_owned(load_settings({**ENV,'AI_TEST_MODEL_NAME':'chat-stub'}),source,source.name)==3
+    assert events==[]
+    assert not list((tmp_path/'local-data'/'chat-runs').glob('rag-eval-*/rag-eval-receipt.json'))
+
+
+def test_owned_runner_blocks_non_loopback_embedding_without_any_call(tmp_path,monkeypatch):
+    source,events=owned_fixture(tmp_path,monkeypatch)
+    env={**ENV,'EMBED_BASE_URL':'http://192.0.2.10:11434'}
+    assert runner.run_owned(load_settings(env),source,source.name)==3
+    assert 'build-service' not in events
+    report=next((tmp_path/'local-data'/'chat-runs').glob('rag-eval-*/rag-eval-receipt.json'))
+    assert json.loads(report.read_text())['runner_status']=='BLOCKED'
 
 
 def test_owned_backend_prebound_free_port_and_cleanup_without_external_process(monkeypatch):

@@ -32,3 +32,23 @@ def test_chat_stub_answers_without_a_pinned_model():
         assert server.server_address[1] > 0
     finally:
         server.server_close()
+
+
+def test_invalid_answer_reason_accepts_non_empty_answer():
+    assert rag_eval._invalid_answer_reason({"answer": {"text": "grounded"}, "errors": []}) is None
+
+
+def test_invalid_answer_reason_reports_empty_or_missing_text():
+    assert rag_eval._invalid_answer_reason({"answer": {"text": "   ", "finish_reason": "length"}, "errors": []}) == (
+        "empty answer text (finish_reason=length)"
+    )
+    assert rag_eval._invalid_answer_reason({"answer": None, "errors": []}) == (
+        "empty answer text (finish_reason=None)"
+    )
+
+
+def test_invalid_answer_reason_reports_provider_errors():
+    reason = rag_eval._invalid_answer_reason(
+        {"answer": {"text": "ok"}, "errors": [{"code": "chat_invalid_response", "message": "empty"}]}
+    )
+    assert reason == "chat_invalid_response"

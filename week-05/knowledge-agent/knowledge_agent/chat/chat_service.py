@@ -433,6 +433,10 @@ class ChatService:
         }
 
     def _assemble(self, plan: Mapping[str, Any], result: ChatResult | None) -> dict[str, Any]:
+        # A provider result is only persisted when it carries real answer text;
+        # this also covers stream ``done`` events before they reach the store.
+        if result is not None and not result.text.strip():
+            raise ChatInvalidResponse("The provider returned an empty answer.")
         if result is None:
             return {
                 "schema_version": "chat-run-v1",

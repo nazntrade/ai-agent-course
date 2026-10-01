@@ -11,6 +11,7 @@ from knowledge_agent.domain.errors import (
     ContextOverflow,
     IndexNotReady,
     InvalidRequest,
+    ChatInvalidResponse,
     ChatUnavailable,
 )
 from tests.helpers import FakeChatModel, FakeKnowledge, fragment
@@ -267,3 +268,19 @@ def test_empty_question_is_rejected(tmp_path):
     service, _ = _service(tmp_path, FakeKnowledge(), FakeChatModel())
     with pytest.raises(InvalidRequest):
         service.chat({"mode": "without_rag", "question": "   "})
+
+
+def test_empty_model_answer_raises_and_is_never_saved(tmp_path):
+    model = FakeChatModel(text="")
+    service, store = _service(tmp_path, FakeKnowledge(), model)
+    with pytest.raises(ChatInvalidResponse):
+        service.chat({"mode": "without_rag", "question": "q"})
+    assert store.list_runs(limit=10) == []
+
+
+def test_blank_model_answer_raises_and_is_never_saved(tmp_path):
+    model = FakeChatModel(text="  \n")
+    service, store = _service(tmp_path, FakeKnowledge(), model)
+    with pytest.raises(ChatInvalidResponse):
+        service.chat({"mode": "without_rag", "question": "q"})
+    assert store.list_runs(limit=10) == []

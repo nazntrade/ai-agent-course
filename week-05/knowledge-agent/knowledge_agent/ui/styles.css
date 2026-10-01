@@ -46,7 +46,7 @@ main {
 
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
-input, select, button {
+input, select, textarea, button {
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -57,6 +57,12 @@ input, select, button {
 
 input[type="text"] { flex: 1; min-width: 200px; }
 input[type="number"] { width: 80px; }
+
+textarea {
+  font-family: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
 
 button { cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #04202e; font-weight: 600; }
@@ -105,7 +111,8 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
 .chunk-row:hover { background: var(--panel-2); }
 
 /* Day 22 chat panel (Russian UI by explicit user request). */
-.chat-answer { margin-top: 10px; }
+#chat-question { flex: 1 1 100%; min-height: 96px; }
+.chat-answer { margin-top: 10px; min-height: 140px; }
 .chat-answer .text { white-space: pre-wrap; font-size: 14px; border-left: 2px solid var(--accent); padding-left: 10px; }
 .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
 .meta.warn { color: var(--danger); }

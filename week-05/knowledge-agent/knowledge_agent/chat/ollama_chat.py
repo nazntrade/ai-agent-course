@@ -300,8 +300,13 @@ class OllamaChatModel(ChatModel):
 
         if done_document is None:
             raise ChatInvalidResponse("The chat stream ended without a done chunk.")
+        # Symmetry with ``chat()``: an empty aggregate is never a success, while a
+        # non-empty ``length`` answer keeps its finish reason.
+        text = "".join(pieces)
+        if not text.strip():
+            raise ChatInvalidResponse("The chat provider returned an empty answer.")
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
-        result = self._result("".join(pieces), done_document, latency_ms)
+        result = self._result(text, done_document, latency_ms)
         yield {"type": "done", "result": result}
 
     def _result(self, text: str, document: Mapping[str, Any], latency_ms: float) -> ChatResult:

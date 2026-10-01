@@ -246,11 +246,71 @@ def test_bounded_reasoning_only_for_advertised_local_capabilities(kind,advertise
         assert 'chat_template_kwargs' not in calls[0]
 
 
-def test_reasoning_only_length_preserves_limit_and_usage_without_exposing_reasoning():
+def test_reasoning_only_empty_length_is_invalid_without_exposing_reasoning():
+    # Regression: a content-empty ``length`` answer used to be accepted, which
+    # turned provider-side reasoning-only outputs into false LIVE PASSes.
     def opener(req,timeout):
         return io.BytesIO(b'{"choices":[{"message":{"content":"","reasoning_content":"private thought"},"finish_reason":"length"}],"usage":{"completion_tokens":64}}')
     model=OpenAIChatModel(load_test_profile(ENV),opener=opener)
+    with pytest.raises(ChatInvalidResponse) as caught:
+        model.chat(MSG)
+    assert caught.value.code=='chat_invalid_response'
+    assert caught.value.details['finish_reason']=='length'
+    assert caught.value.details['output_tokens']==64
+    assert 'private thought' not in repr(caught.value)
+    assert 'private thought' not in repr(caught.value.details)
+
+
+def test_empty_answer_with_stop_is_invalid():
+    def opener(req,timeout):
+        return io.BytesIO(b'{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}')
+    model=OpenAIChatModel(load_test_profile(ENV),opener=opener)
+    with pytest.raises(ChatInvalidResponse) as caught:
+        model.chat(MSG)
+    assert caught.value.details['finish_reason']=='stop'
+    assert caught.value.details['output_tokens']==3
+
+
+@pytest.mark.parametrize('content', ['   ', '\n\t'])
+def test_blank_answer_with_length_is_invalid(content):
+    def opener(req,timeout):
+        return io.BytesIO(json.dumps({'choices':[{'message':{'content':content},'finish_reason':'length'}],
+            'usage':{'completion_tokens':7}}).encode())
+    model=OpenAIChatModel(load_test_profile(ENV),opener=opener)
+    with pytest.raises(ChatInvalidResponse) as caught:
+        model.chat(MSG)
+    assert caught.value.details['output_tokens']==7
+
+
+def test_non_empty_length_answer_preserves_limit_and_usage():
+    def opener(req,timeout):
+        return io.BytesIO(b'{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}],"usage":{"completion_tokens":64}}')
+    model=OpenAIChatModel(load_test_profile(ENV),opener=opener)
     result=model.chat(MSG)
-    assert result.text=='' and result.finish_reason=='length'
+    assert result.text=='partial' and result.finish_reason=='length'
     assert result.usage.output_tokens==64
-    assert 'private thought' not in repr(result)
+
+
+def test_empty_stream_with_length_finish_reason_is_invalid():
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":7}}\n'
+            yield b'data: [DONE]\n'
+    model=OpenAIChatModel(load_test_profile(ENV),opener=lambda *a,**k:Response())
+    with pytest.raises(ChatInvalidResponse):
+        list(model.stream_chat(MSG))
+
+
+def test_blank_stream_delta_is_invalid():
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"   "},"finish_reason":null}]}\n'
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n'
+            yield b'data: [DONE]\n'
+    model=OpenAIChatModel(load_test_profile(ENV),opener=lambda *a,**k:Response())
+    with pytest.raises(ChatInvalidResponse):
+        list(model.stream_chat(MSG))
