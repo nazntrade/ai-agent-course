@@ -1,7 +1,9 @@
 @echo off
 REM Trusted module entrypoint: starts the Knowledge Agent stack for normal use.
 REM Modes: all (default), api, ui, stub. Only own PIDs are stopped.
-REM Exit codes: 0 = stopped normally, 1 = failure, 2 = setup error or port in use.
+REM Repeated default launch opens the existing verified Knowledge Agent UI.
+REM Existing servers are never owned or stopped by this launcher.
+REM Exit codes: 0 = normal stop or existing UI opened, 1 = failure, 2 = setup error or foreign port in use.
 setlocal EnableExtensions
 cd /d "%~dp0"
 
@@ -62,9 +64,6 @@ set "USE_STUB=1"
 goto mode_stack
 
 :mode_stack
-call :ensure_venv
-if errorlevel 1 exit /b 2
-
 set "STUB_PID="
 set "BACKEND_PID="
 set "UI_URL=http://%KNOWLEDGE_HOST%:%KNOWLEDGE_PORT%/"
@@ -72,12 +71,26 @@ set "HEALTH_URL=http://%KNOWLEDGE_HOST%:%KNOWLEDGE_PORT%/api/health"
 
 echo Checking whether port %KNOWLEDGE_PORT% is free ...
 call :tcp_ready "%KNOWLEDGE_HOST%" "%KNOWLEDGE_PORT%"
-if not errorlevel 1 (
-    echo ERROR: port %KNOWLEDGE_PORT% is already in use.
-    echo Stop the process that owns it or change KNOWLEDGE_PORT in .env.
-    exit /b 2
-)
+if errorlevel 1 goto stack_free_port
+call :existing_agent
+if not errorlevel 1 goto existing_backend
+echo.
+echo ERROR: port %KNOWLEDGE_PORT% is occupied by a service that could not be verified as Knowledge Agent.
+echo No existing process was stopped or changed.
+echo Close that service yourself or set KNOWLEDGE_PORT to another port before launching.
+echo Press any key to close this window ...
+pause >nul
+exit /b 2
 
+:existing_backend
+echo Knowledge Agent is already running at %UI_URL%.
+echo Opening its UI. This launcher will leave the existing server running.
+start "" "%UI_URL%"
+exit /b 0
+
+:stack_free_port
+call :ensure_venv
+if errorlevel 1 exit /b 2
 if not defined USE_STUB goto stack_no_stub
 echo EMBED_BASE_URL=%EMBED_BASE_URL% points to the stub; starting harness\embed_stub.py ...
 call :start_stub
@@ -127,6 +140,14 @@ exit /b 0
 :tcp_ready
 REM Success (0) when %~1:%~2 accepts a TCP connection, failure (1) otherwise.
 powershell -NoProfile -Command "try { $c=New-Object System.Net.Sockets.TcpClient; $c.Connect('%~1',%~2); $c.Close(); exit 0 } catch { exit 1 }"
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:existing_agent
+REM Health alone does not identify the service. Verify the embedding health
+REM shape and characteristic API operations, allowing a customized UI title.
+REM Degraded embeddings still allow opening the existing application's UI.
+powershell -NoProfile -Command "try { $health=Invoke-RestMethod -TimeoutSec 5 -Uri ($env:HEALTH_URL); $schema=Invoke-RestMethod -TimeoutSec 5 -Uri ($env:UI_URL+'openapi.json'); if($health.status -notin @('ok','degraded') -or -not $health.embedding -or -not $health.embedding.PSObject.Properties['reachable'] -or -not $health.embedding.PSObject.Properties['model_present'] -or -not $health.embedding.PSObject.Properties['dimension'] -or -not $schema.info.title -or $schema.openapi -notlike '3.*'){ exit 1 }; foreach($operation in @(@('/api/collections','get'),@('/api/search','post'),@('/api/index/build','post'),@('/api/index-versions/{index_version_id}/chunks','get'))){ $path=$schema.paths.PSObject.Properties[$operation[0]]; if(-not $path -or -not $path.Value.PSObject.Properties[$operation[1]]){ exit 1 } }; exit 0 } catch { exit 1 }"
 if errorlevel 1 exit /b 1
 exit /b 0
 
