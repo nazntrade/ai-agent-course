@@ -484,6 +484,8 @@ def run(args: list[str]) -> int:
     print(f"$ {' '.join(args)}")
     env = dict(os.environ)
     env["KNOWLEDGE_SKIP_ENV_FILE"] = "1"
+    if "pytest" in args or any(name.endswith(("restart_check.py", "interrupt_check.py")) for name in args):
+        env = {key: value for key, value in env.items() if not key.startswith("AI_TEST_MODEL_")}
     completed = subprocess.run(args, cwd=str(MODULE_DIR), env=env)
     return completed.returncode
 
@@ -518,7 +520,16 @@ def main() -> int:
     else:
         print("EMBEDDING_LIVE_STATUS: not run (set RUN_EMBED_LIVE=1 to enable LIVE)")
 
+    if os.environ.get("RUN_CHAT_LIVE") == "1":
+        chat_live = run([PYTHON, "harness/live_chat.py"])
+        results["CHAT_LIVE"] = chat_live == 0
+        print(f"CHAT_LIVE_STATUS: {'PASS' if chat_live == 0 else 'FAIL'}")
+    else:
+        print("CHAT_LIVE_STATUS: not run (set RUN_CHAT_LIVE=1 to enable LIVE)")
+
     mandatory = ["UNIT", "INTEGRATION", "RESTART", "INTERRUPT"]
+    if "CHAT_LIVE" in results:
+        mandatory.append("CHAT_LIVE")
     if "LIVE" in results:
         mandatory.append("LIVE")
     overall = all(results.get(name, False) for name in mandatory)

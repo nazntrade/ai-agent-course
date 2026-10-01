@@ -48,6 +48,21 @@ def wait_ready(index_version_id: str, timeout: float = 180.0) -> dict:
     raise AssertionError(f"index {index_version_id} did not finish: {last}")
 
 
+def post_stream(path: str, payload: dict) -> list[dict]:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        BASE + path, data=data, method="POST", headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=60) as response:
+        body = response.read().decode("utf-8", "replace")
+    events: list[dict] = []
+    for frame in body.split("\n\n"):
+        line = next((item for item in frame.splitlines() if item.startswith("data:")), None)
+        if line:
+            events.append(json.loads(line[5:].strip()))
+    return events
+
+
 def request_text(path: str) -> tuple[int, str]:
     req = urllib.request.Request(BASE + path, method="GET")
     try:
@@ -173,6 +188,95 @@ def run_scenario(root: Path) -> int:
 
         status, compare = request("GET", f"/api/compare?collection_id={a}")
         must(status == 200 and len(compare["strategies"]) == 2, "compare failed")
+
+        # D22 chat (deterministic chat stub; not inference).
+        status, plain = request(
+            "POST",
+            "/api/chat",
+            {"mode": "without_rag", "question": "How does an agent use memory?", "top_k": 3},
+        )
+        must(status == 200, f"without_rag chat failed: {status} {plain}")
+        must(plain["answer"]["text"], "without_rag returned an empty answer")
+        must(
+            plain["index"] is None and plain["retrieval"] is None,
+            "without_rag must not use retrieval or embedding",
+        )
+
+        status, rag = request(
+            "POST",
+            "/api/chat",
+            {
+                "collection_id": a,
+                "strategy": "structure",
+                "mode": "with_rag",
+                "question": "How does an agent use memory and planning?",
+                "top_k": 3,
+            },
+        )
+        must(status == 200, f"with_rag chat failed: {status} {rag}")
+        must(rag["answer"]["text"], "with_rag returned an empty answer")
+        must(
+            rag["retrieval"]["passed_count"] <= rag["retrieval"]["found_count"],
+            "passed must be a subset of found",
+        )
+        must(
+            rag["index"]["index_version_id"] == structure_a["index_version_id"],
+            "with_rag did not pin the selected index",
+        )
+
+        events = post_stream(
+            "/api/chat/stream",
+            {
+                "collection_id": a,
+                "strategy": "structure",
+                "mode": "with_rag",
+                "question": "How does an agent use memory?",
+                "top_k": 3,
+            },
+        )
+        kinds = [event.get("type") for event in events]
+        must(kinds and kinds[0] == "start", f"chat stream did not start correctly: {kinds}")
+        must(any(kind == "done" for kind in kinds), "chat stream produced no done event")
+        start_event = events[0]
+        done_event = next(event for event in events if event.get("type") == "done")
+        must(
+            done_event["answer"]["run_id"] == start_event["run_id"],
+            "chat stream run_id mismatch",
+        )
+
+        status, compare_chat = request(
+            "POST",
+            "/api/chat/compare",
+            {"collection_id": a, "question": "How does an agent use memory?", "top_k": 3},
+        )
+        must(status == 200, f"chat compare failed: {status} {compare_chat}")
+        must(
+            set(compare_chat["branches"]) == {"with_rag", "without_rag"},
+            "chat compare branches are incomplete",
+        )
+        must(
+            compare_chat["comparison"]["prompt_templates"]["with_rag"] == "rag-v1",
+            "chat compare lost the RAG template version",
+        )
+        must(compare_chat["comparison"]["same_model"] is True, "chat compare did not use one model")
+
+        status, runs = request("GET", "/api/chat-runs?limit=10")
+        must(status == 200 and runs["runs"], "chat runs were not saved")
+        run_id = done_event["answer"]["run_id"]
+        status, saved = request("GET", f"/api/chat-runs/{run_id}")
+        must(status == 200 and saved["run_id"] == run_id, "saved chat run could not be read")
+        evaluation = {
+            "evaluator": "smoke",
+            "retrieval": {"expected_sections_hit": True, "expected_pages_hit": True, "passed_relevant": True, "score": 2, "notes": ""},
+            "content": {"expected_facts_present": 1, "expected_facts_total": 1, "grounded": True, "score": 2, "notes": ""},
+            "sources": {"citations_valid": True, "unsupported_citations": 0, "provenance_correct": True, "score": 2, "notes": ""},
+            "overall": "pass",
+            "notes": "stub smoke run",
+        }
+        status, _ = request("PUT", f"/api/chat-runs/{run_id}/evaluation", evaluation)
+        must(status == 200, "chat evaluation could not be saved")
+        status, loaded = request("GET", f"/api/chat-runs/{run_id}/evaluation")
+        must(status == 200 and loaded["schema_version"] == "chat-eval-v1", "chat evaluation could not be read")
 
         ui_status, ui_html = request_text("/")
         must(

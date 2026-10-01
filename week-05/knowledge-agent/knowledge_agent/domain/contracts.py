@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Iterable, Iterator, Literal, Mapping, Protocol, Sequence
 
 from .errors import IndexIncompatible
 from .models import Chunk, Document, Section, SourceRef
@@ -125,6 +125,142 @@ class Embedder(ABC):
     @abstractmethod
     def preflight(self, infer: bool = False) -> dict[str, Any]:
         """Probe provider availability/format without running inference."""
+
+
+@dataclass
+class ChatMessage:
+    """One provider message (``system``/``user``/``assistant``)."""
+
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"role": self.role, "content": self.content}
+
+
+@dataclass
+class ChatUsage:
+    """Provider-reported token usage; any field may be ``None`` (never invented)."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+@dataclass
+class ChatModelIdentity:
+    """Resolved chat-model identity snapshot (SPEC D22 6.1)."""
+
+    provider: str
+    base_url: str
+    model: str
+    digest: str | None = None
+    context_length: int | None = None
+    default_options: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "model": self.model,
+            "digest": self.digest,
+            "context_length": self.context_length,
+            "default_options": dict(self.default_options),
+        }
+
+
+@dataclass
+class ChatResult:
+    """One non-streamed provider response."""
+
+    text: str
+    finish_reason: str | None
+    usage: ChatUsage | None
+    model: str
+    created_at: str
+    latency_ms: float
+    output_tokens_per_second: float | None = None
+    raw: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "text": self.text,
+            "finish_reason": self.finish_reason,
+            "usage": self.usage.to_dict() if self.usage else None,
+            "model": self.model,
+            "created_at": self.created_at,
+            "latency_ms": self.latency_ms,
+            "output_tokens_per_second": self.output_tokens_per_second,
+        }
+        if self.raw is not None:
+            payload["raw"] = self.raw
+        return payload
+
+
+# Provider-level streaming events: a tagged union of ``token`` and ``done``
+# (errors are raised as typed exceptions, not encoded as events; SPEC D22 6.1).
+ChatModelEvent = dict[str, Any]
+# Service-level streaming events: ``start``/``sources``/``token``/``done``/``error``.
+ChatStreamEvent = dict[str, Any]
+
+
+class ChatModel(ABC):
+    """Core chat-generation contract; the core never sees Ollama details."""
+
+    @abstractmethod
+    def identity(self) -> ChatModelIdentity: ...
+
+    @abstractmethod
+    def chat(
+        self, messages: Sequence[ChatMessage], options: Mapping[str, Any] | None = None
+    ) -> ChatResult: ...
+
+    @abstractmethod
+    def stream_chat(
+        self, messages: Sequence[ChatMessage], options: Mapping[str, Any] | None = None
+    ) -> Iterator[ChatModelEvent]: ...
+
+    def is_available(self) -> bool:
+        """Whether the provider endpoint is reachable; adapters may override."""
+
+        return True
+
+    def preflight(self, infer: bool = False) -> dict[str, Any]:
+        """Probe provider availability/format without running inference."""
+
+        return {}
+
+
+class ChatRunStore(ABC):
+    """Immutable run records and mutable manual evaluations (SPEC D22 15)."""
+
+    @abstractmethod
+    def create_run(self, record: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_runs(
+        self,
+        *,
+        limit: int = 20,
+        kind: str | None = None,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def save_evaluation(self, evaluation: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_evaluation(self, run_id: str) -> dict[str, Any] | None: ...
 
 
 class IndexStore(ABC):

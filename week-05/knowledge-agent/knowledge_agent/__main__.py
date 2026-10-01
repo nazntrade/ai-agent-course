@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 from .api.app import create_app
+from .chat.chat_service import ChatService
+from .chat.ollama_chat import OllamaChatModel
+from .chat.openai_chat import OpenAIChatModel
+from .chat.run_store import FileChatRunStore
 from .chunking.fixed import FixedChunker
 from .chunking.structure import StructureChunker
 from .config import Settings, apply_env_file, load_settings
@@ -60,6 +64,39 @@ def build_service(settings: Settings) -> tuple[KnowledgeService, SqliteIndexStor
     return service, store
 
 
+def build_chat_service(settings: Settings, service: KnowledgeService) -> ChatService:
+    chat_model = OllamaChatModel(
+        settings.chat_base_url,
+        settings.chat_model,
+        timeout=settings.chat_timeout_seconds,
+        max_output_tokens=settings.chat_max_output_tokens,
+        context_tokens=settings.chat_context_tokens,
+        temperature=settings.chat_temperature,
+        seed=settings.chat_seed,
+    )
+    if settings.test_profile is not None:
+        chat_model = OpenAIChatModel(settings.test_profile,
+            timeout=settings.chat_timeout_seconds,
+            max_output_tokens=settings.chat_max_output_tokens,
+            context_tokens=settings.chat_context_tokens,
+            temperature=settings.chat_temperature, seed=settings.chat_seed)
+    runs_path = Path(settings.chat_runs_path)
+    if not runs_path.is_absolute():
+        runs_path = MODULE_DIR / runs_path
+    run_store = FileChatRunStore(runs_path)
+    return ChatService(
+        service,
+        chat_model,
+        run_store,
+        top_k=settings.chat_top_k,
+        max_context_tokens=settings.chat_context_tokens,
+        reserved_output_tokens=settings.chat_max_output_tokens,
+        chars_per_token=settings.chat_context_chars_per_token,
+        temperature=settings.chat_temperature,
+        seed=settings.chat_seed,
+    )
+
+
 def main() -> int:
     if os.environ.get("KNOWLEDGE_SKIP_ENV_FILE") != "1":
         apply_env_file(MODULE_DIR / ".env")
@@ -69,7 +106,8 @@ def main() -> int:
         settings = dataclasses.replace(settings, db_path=str(MODULE_DIR / db_path))
 
     service, store = build_service(settings)
-    app = create_app(service, title=settings.ui_title)
+    chat_service = build_chat_service(settings, service)
+    app = create_app(service, chat_service=chat_service, title=settings.ui_title)
     try:
         import uvicorn
 

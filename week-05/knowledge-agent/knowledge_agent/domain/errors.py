@@ -93,6 +93,47 @@ class EmbeddingUsageError(EmbeddingError):
     code = "embedding_usage_error"
 
 
+class InvalidRequest(KnowledgeError):
+    """Semantically invalid request that passed schema validation maps to 422."""
+
+    code = "invalid_request"
+    http_status = 422
+
+
+class ChatError(KnowledgeError):
+    """Chat provider and context errors (SPEC D22 7.2)."""
+
+    code = "chat_error"
+    http_status = 503
+
+
+class ChatUnavailable(ChatError):
+    code = "chat_unavailable"
+
+
+class ChatTimeout(ChatError):
+    code = "chat_timeout"
+
+
+class ChatModelMissing(ChatError):
+    code = "chat_model_missing"
+
+
+class ChatInvalidResponse(ChatError):
+    code = "chat_invalid_response"
+
+
+class ChatLengthError(ChatError):
+    code = "chat_length_error"
+
+
+class ContextOverflow(KnowledgeError):
+    """Instructions and question do not fit the prompt budget (D22-07)."""
+
+    code = "context_overflow"
+    http_status = 422
+
+
 class IndexConflict(KnowledgeError):
     """Index state conflicts map to HTTP 409."""
 

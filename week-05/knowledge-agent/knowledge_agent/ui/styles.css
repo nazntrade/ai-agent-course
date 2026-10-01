@@ -103,3 +103,13 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
 
 .chunk-row { cursor: pointer; }
 .chunk-row:hover { background: var(--panel-2); }
+
+/* Day 22 chat panel (Russian UI by explicit user request). */
+.chat-answer { margin-top: 10px; }
+.chat-answer .text { white-space: pre-wrap; font-size: 14px; border-left: 2px solid var(--accent); padding-left: 10px; }
+.meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.meta.warn { color: var(--danger); }
+.compare-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.compare-column { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); }
+.compare-column h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
+@media (max-width: 720px) { .compare-columns { grid-template-columns: 1fr; } }

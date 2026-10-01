@@ -467,6 +467,29 @@ class KnowledgeService:
             pass
 
     # -- search -----------------------------------------------------------
+    def resolve_ready_index(
+        self,
+        collection_id: str,
+        index_version_id: str | None = None,
+        strategy: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a ready, collection-scoped index version without embedding.
+
+        Reused by D22 ``compare`` to pin one ``index_version_id`` for both
+        branches before any retrieval runs. Compatibility is still enforced by
+        :meth:`search` before the query embedding.
+        """
+
+        if self._store.get_collection(collection_id) is None:
+            raise KeyError(collection_id)
+        version = self._resolve_search_version(collection_id, index_version_id, strategy)
+        if version is None or version.get("status") != "ready":
+            raise IndexNotReady(
+                "No ready index is available for this collection.",
+                details={"collection_id": collection_id, "strategy": strategy},
+            )
+        return version
+
     def search(
         self,
         collection_id: str,

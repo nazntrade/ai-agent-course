@@ -4,13 +4,15 @@
 
 ## 1. Цель модуля
 
-Модуль решает учебную задачу D21 (`day-21-document-indexing`): проиндексировать **явно указанный через конфиг** корпус документов (PDF с текстовым слоем и маленький TXT/MD как второй источник) и выполнять по нему локальный семантический поиск с просмотром найденных фрагментов и их происхождения.
+Реализованная часть — учебная задача D21 (`day-21-document-indexing`): проиндексировать **явно указанный через конфиг** корпус документов (PDF с текстовым слоем и маленький TXT/MD как второй источник) и выполнять по нему локальный семантический поиск с просмотром найденных фрагментов и их происхождения. D21 реализован и закоммичен; фактическое состояние — в `MODULE_STATE.md`.
 
-Наблюдаемый результат: пользователь задаёт путь к источнику через конфиг (приложение не сканирует диск и не угадывает путь); модуль извлекает текст, разбивает его на секции и чанки, считает локальные embeddings и сохраняет их в локальный SQLite-индекс; поиск возвращает **фрагменты** с metadata, а не сгенерированный ответ.
+Наблюдаемый результат D21: пользователь задаёт путь к источнику через конфиг (приложение не сканирует диск и не угадывает путь); модуль извлекает текст, разбивает его на секции и чанки, считает локальные embeddings и сохраняет их в локальный SQLite-индекс; поиск возвращает **фрагменты** с metadata, а не сгенерированный ответ.
+
+Ближайшая цель — задача D22 «Первый RAG запрос»: поверх существующего retrieval добавить генерацию ответа моделью, режимы с RAG и без RAG, сравнение ответов и набор из 10 контрольных вопросов. D21-инвариант I-RAG («D21 не уходит в автоматический RAG») ограничивал только D21 и на D22 в этом объёме не распространяется.
 
 ## 2. Границы и не-цели
 
-Входит в D21 (Must):
+### 2.1. D21 (Must, реализован)
 
 - два адаптера источников: текстовый PDF и маленький TXT/MD;
 - два chunker-а: `FixedChunker` и `StructureChunker`;
@@ -22,7 +24,18 @@
 - метрики и сравнение стратегий чанкинга;
 - реальный запуск и перезапуск приложения (Developer, затем независимо Tester).
 
-Осознанно не входит (Later): Wiki importer (формат ZIM/XML не установлен; XML BZ2 не предполагается), внешний клиент/MCP adapter, ANN backend, полный chat RAG, reranker, OCR, resume/инкрементальная переиндексация, удаление старых версий индекса, multi-process/Postgres/Docker. D21 не уходит в автоматический RAG и полный чат: генерация ответа моделью не обязательна.
+D21-инвариант I-RAG (SPEC §3, комментарий #4125) ограничивал D21: генерация ответа не обязательна, search возвращает фрагменты. Для D22 этот инвариант снят в объёме ниже.
+
+### 2.2. D22 «Первый RAG запрос» (реализован, реальная приёмка продолжается)
+
+Входит (Must, уточняется в SPEC D22):
+
+- генерация ответа моделью поверх уже существующего retrieval: найденные D21-фрагменты служат контекстом; retrieval D21 не переписывается и остаётся доступным;
+- режимы с RAG и без RAG (ответ с опорой на найденные фрагменты и ответ без контекста);
+- сравнение ответов (например, RAG и без RAG на одинаковых вопросах);
+- набор из 10 контрольных вопросов.
+
+Вне D22 (Later): MCP, Wiki importer (формат ZIM/XML не установлен; XML BZ2 не предполагается), ANN backend, reranker, OCR, сложная память, полный многошаговый чат, resume/инкрементальная переиндексация, удаление старых версий индекса, multi-process/Postgres/Docker.
 
 ## 3. Стек и версии
 
@@ -47,7 +60,8 @@ PLAN §1 (ответственности; имена модулей уточня
 - `knowledge_agent/api/`, `knowledge_agent/ui/` — FastAPI (SPEC §11) и статический UI (SPEC §12).
 - `harness/` — `embed_stub.py`, `smoke.py`, `live_embed.py`, `acceptance.py`, `restart_check.py`, `interrupt_check.py`.
 - `tests/` — `unit/`, `integration/`, `fixtures/`.
-- `docs/specs/day-21-document-indexing/` — `SPEC.md`, `PLAN.md`, `ACCEPTANCE.md`.
+- `docs/specs/day-21-document-indexing/` — утверждённая (frozen) спецификация `SPEC.md`, `PLAN.md`, `ACCEPTANCE.md`.
+- `docs/specs/day-22-first-rag-query/` — спецификация D22 и актуальные критерии приёмки.
 
 ## 5. Общие правила модуля
 
@@ -89,10 +103,11 @@ PLAN §1 (ответственности; имена модулей уточня
 | `smoke_test.bat` | — | `0` — пройдено; `1` — ошибка; `2` — ошибка окружения/занятый порт |
 | `run_app.bat` | `all` (по умолчанию), `api`, `ui`, `stub` | `0` — остановлено нормально; `1` — ошибка; `2` — ошибка окружения/занятый порт |
 
-- `test.bat unit` → `pytest tests\unit` (без сети и `.env`); `integration` → `pytest tests\integration` (stub, без сети и `.env`); `live` → `RUN_EMBED_LIVE=1` + `harness\live_embed.py` (opt-in, реальный Ollama); `acceptance` → `harness\acceptance.py`. Печатаются `UNIT_STATUS:`, `INTEGRATION_STATUS:`, `EMBEDDING_LIVE_STATUS:`, `TEST_STATUS:` где применимо.
-- `smoke_test.bat` поднимает `harness\embed_stub.py` и backend `python -m knowledge_agent` на `KNOWLEDGE_HOST:KNOWLEDGE_PORT`, дожидается `GET /api/health`, затем запускает `harness\smoke.py`; exit-код runner-а пробрасывается.
+- `test.bat unit` → `pytest tests\unit` (без сети и `.env`); `integration` → `pytest tests\integration` (stub, без сети и `.env`); `live` → `RUN_EMBED_LIVE=1` + `harness\live_embed.py`, затем `RUN_CHAT_LIVE=1` + `harness\live_chat.py` (opt-in, реальный Ollama: embedding + chat, `MODEL_CHECK_KIND: LOCAL`); `acceptance` → `harness\acceptance.py`. Печатаются `UNIT_STATUS:`, `INTEGRATION_STATUS:`, `EMBEDDING_LIVE_STATUS:`, `CHAT_LIVE_STATUS:`, `TEST_STATUS:` где применимо.
+- `smoke_test.bat` поднимает `harness\embed_stub.py` и `harness\chat_stub.py`, направляет backend `python -m knowledge_agent` на оба stub (`EMBED_BASE_URL`, `CHAT_BASE_URL`), держит БД и `CHAT_RUNS_PATH` в свежем TEMP-каталоге прогона, дожидается `GET /api/health`, затем запускает `harness\smoke.py` (чат в обоих режимах и сравнение); exit-код runner-а пробрасывается.
 - `run_app.bat all` — stub при `EMBED_BASE_URL` на stub, иначе реальный Ollama; backend, ожидание `/api/health`, открытие UI; `api` — backend в foreground; `ui` — только UI; `stub` — stub и backend.
-- Любая точка входа останавливает только собственные процессы и не завершает чужие.
+- Ни один `.bat` не задаёт `CHAT_MODEL` (default пуст) и не прописывает значения лимитов `CHAT_*`; модели не скачиваются (`ollama pull` не выполняется).
+- Любая точка входа останавливает только собственные процессы и не завершает чужие; `smoke_test.bat` использует только свежий TEMP-каталог прогона и не трогает пользовательскую БД/рабочий индекс.
 
 ## 9. Окружение и секреты
 
@@ -142,7 +157,7 @@ PLAN §1 (ответственности; имена модулей уточня
 - Критерии ACCEPTANCE D21-01…D21-12 зелёные на требуемых уровнях (UNIT/INT/LIVE/MANUAL/UI).
 - `TEST_STATUS` присваивает Tester; задача не принята при `FAIL`/`BLOCKED`.
 - Реальный запуск и UI проверяют Developer, затем независимо Tester (D21-11).
-- app-run и D21 не считаются готовыми до реализации продуктового кода и фактического прогона точек входа.
+- Продуктовый код D21 присутствует; D22 не считается готовым до утверждённой спецификации, реализации и фактического прогона точек входа.
 
 ## 15. Уровни тестирования
 
@@ -164,11 +179,34 @@ PLAN §1 (ответственности; имена модулей уточня
 - Governance-файлы курсового корня: `AGENTS.md`, `PROJECT_RULES.md`, `opencode.json`, `.opencode/**`.
 - `MODULE_RULES.md`, `MODULE_STATE.md` и `*.bat` модуля изменяет только Configurator через точечные разрешения; Developer их не редактирует.
 - Утверждённые после spec gate `docs/specs/day-21-document-indexing/{SPEC,PLAN,ACCEPTANCE}.md`.
+- Утверждённые после spec gate `docs/specs/day-22-first-rag-query/{SPEC,PLAN,ACCEPTANCE}.md` (после создания и review).
 - `.env` и секреты.
 
 ## 18. Известные ограничения
 
 - Точный cosine допустим только для маленького учебного корпуса и не выдаётся за масштабируемый поиск (ANN — Later; контракт `IndexStore` ANN-ready).
-- Wiki importer, внешний клиент/MCP, полный chat RAG, reranker, OCR, resume/инкрементальная переиндексация — вне D21.
+- Wiki importer, MCP, ANN, reranker, OCR, сложная память, полный многошаговый чат и resume/инкрементальная переиндексация — Later. D22 ограничен первым RAG-запросом поверх существующего retrieval.
 - Работа зависит от локального Ollama и наличия модели `embeddinggemma:300m`; доступность и версия не гарантируются.
-- Продуктовый код на момент конфигурации не реализован: точки входа ссылаются на будущие модули и фактически не запускались.
+- D21 реализован продуктовым кодом, но генерация ответа отсутствует: D22 не начат, спецификация `docs/specs/day-22-first-rag-query` ещё не создана.
+
+## Test runtime: выбранная модель приложения
+
+До Specification Configurator заполняет единственную декларацию `test-runtime-json` в PROJECT_RULES/MODULE_RULES: applicability `none` для проекта без AI либо `ai` для AI-проекта. `unresolved` запрещает Specification и Implementation. Для `ai` фиксируются поля по примеру из bootstrap-guide. Модели ролей агента, генерации ответов приложения и embeddings — разные контракты; выбранный chat-профиль не заменяет embedding-модель.
+
+Присутствующий профиль `AI_TEST_MODEL_*` имеет приоритет для генерации ответов приложения в тестах: KIND (`local`/`remote`), BASE_URL, NAME; API_KEY обязателен для выбранного профиля (local и remote), секрет не выводить. Для live-прогона local требуется loopback LEASE_URL; приложение с внешним владельцем может использовать local без собственного lease. Частичный или неподдерживаемый профиль — явная ошибка до реализации/тестов, без молчаливой замены модели. Только полностью отсутствующий профиль допускает явный конфиг приложения. SPEC/PLAN/ACCEPTANCE должны описать адаптер, модель/провайдер, реальную проверку выбранной модели и требуемый UI-инструмент; preflight не доказывает доступность сервера, inference или UI.
+
+Локальный управляемый runtime: внешний test-harness приобретает lease через AI_TEST_MODEL_LEASE_URL, передаёт дочерним процессам готовый профиль (AI_TEST_MODEL_PARENT_READY=1), освобождает свой lease в finally при успехе, ошибке и штатном прерывании. Дочерний процесс не освобождает lease родителя. Lifecycle — acquire/use/release, а не безусловная остановка: borrowed/уже работающая или используемая другим потребителем модель не выгружается; при отсутствии доказуемого владения выгрузка запрещена. Remote-профиль не запускают и не останавливают локально. Ключи и приватные endpoint не сохраняются в публичных правилах, примерах и отчётах.
+
+```test-runtime-json
+{
+  "schemaVersion": 1,
+  "applicability": "ai",
+  "profileEnvironment": "AI_TEST_MODEL_",
+  "profileRole": "chat",
+  "provider": "openai-compatible",
+  "absentProfile": "explicit-config",
+  "partialProfile": "reject",
+  "embeddings": "independent",
+  "lifecycle": "lease-finally"
+}
+```

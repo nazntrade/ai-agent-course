@@ -1,0 +1,218 @@
+{
+  "schema_version": "rag-eval-questions-v1",
+  "corpus": {
+    "label": "agents-survey.pdf",
+    "title": "A Survey on Large Language Model based Autonomous Agents",
+    "public_ref": "arXiv:2308.11432",
+    "page_numbering": "Physical PDF pages, one-based; section/page expectations verified against the extracted source, not generated answers."
+  },
+  "questions": [
+    {
+      "question_id": "D22-Q01",
+      "question": "What is the overall architecture of an LLM-based autonomous agent according to the survey?",
+      "answerable": true,
+      "expected_facts": [
+        "agent architecture",
+        "profiling module",
+        "memory module",
+        "planning module",
+        "action module"
+      ],
+      "expected_sections": [
+        "2.1 Agent Architecture Design"
+      ],
+      "expected_pages": [
+        3,
+        4
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q02",
+      "question": "What role does the profiling module play in an autonomous agent?",
+      "answerable": true,
+      "expected_facts": [
+        "profile",
+        "role",
+        "goal",
+        "agent identity"
+      ],
+      "expected_sections": [
+        "2.1.1 Profiling Module"
+      ],
+      "expected_pages": [
+        4,
+        5
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q03",
+      "question": "How is memory organized in LLM-based agents?",
+      "answerable": true,
+      "expected_facts": [
+        "short-term memory",
+        "long-term memory",
+        "memory",
+        "retrieval"
+      ],
+      "expected_sections": [
+        "2.1.2 Memory Module"
+      ],
+      "expected_pages": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q04",
+      "question": "What planning strategies are used by autonomous agents?",
+      "answerable": true,
+      "expected_facts": [
+        "planning",
+        "feedback",
+        "task decomposition",
+        "reflection"
+      ],
+      "expected_sections": [
+        "2.1.3 Planning Module"
+      ],
+      "expected_pages": [
+        10,
+        11,
+        12,
+        13
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q05",
+      "question": "How do agents execute actions and what action representations exist?",
+      "answerable": true,
+      "expected_facts": [
+        "action",
+        "tool use",
+        "memory",
+        "external environment"
+      ],
+      "expected_sections": [
+        "2.1.4 Action Module"
+      ],
+      "expected_pages": [
+        13,
+        14,
+        15,
+        16
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q06",
+      "question": "What learning approaches are discussed for autonomous agents?",
+      "answerable": true,
+      "expected_facts": [
+        "learning",
+        "reinforcement learning",
+        "demonstration",
+        "supervision"
+      ],
+      "expected_sections": [
+        "2.2 Agent Capability Acquisition"
+      ],
+      "expected_pages": [
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q07",
+      "question": "How does the survey describe tool use by LLM agents?",
+      "answerable": true,
+      "expected_facts": [
+        "tool",
+        "API",
+        "external tool",
+        "action"
+      ],
+      "expected_sections": [
+        "2.1.4 Action Module",
+        "3.3 Engineering"
+      ],
+      "expected_pages": [
+        13,
+        14,
+        15,
+        16,
+        24,
+        25,
+        26,
+        27
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q08",
+      "question": "What evaluation methods and benchmarks are mentioned for autonomous agents?",
+      "answerable": true,
+      "expected_facts": [
+        "evaluation",
+        "benchmark",
+        "interaction",
+        "human"
+      ],
+      "expected_sections": [
+        "4.1 Subjective Evaluation",
+        "4.2 Objective Evaluation"
+      ],
+      "expected_pages": [
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q09",
+      "question": "What open challenges for autonomous agents are listed in the conclusion?",
+      "answerable": true,
+      "expected_facts": [
+        "challenge",
+        "generalization",
+        "safety",
+        "efficiency"
+      ],
+      "expected_sections": [
+        "6 Challenges",
+        "7 Conclusion"
+      ],
+      "expected_pages": [
+        31,
+        32,
+        33,
+        34
+      ],
+      "top_k": 5
+    },
+    {
+      "question_id": "D22-Q10",
+      "question": "What is the exact GPU energy consumption in kilowatt-hours for training GPT-4 reported in this survey?",
+      "answerable": false,
+      "expected_facts": [],
+      "expected_behavior": "state_unknown_without_fabrication",
+      "notes": "The corpus does not report a GPT-4 training energy budget; the answer must not be invented.",
+      "top_k": 5
+    }
+  ]
+}

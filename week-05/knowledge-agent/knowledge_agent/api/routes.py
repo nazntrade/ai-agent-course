@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Iterator, Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service.knowledge_service import KnowledgeService
@@ -37,12 +39,48 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50)
 
 
-def create_router(service: KnowledgeService) -> APIRouter:
+class ChatRequest(BaseModel):
+    collection_id: str | None = None
+    index_version_id: str | None = None
+    strategy: str | None = None
+    mode: Literal["with_rag", "without_rag"]
+    question: str = Field(min_length=1, max_length=2000)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    max_context_tokens: int | None = Field(default=None, ge=1)
+    save_run: bool = True
+
+
+class CompareRequest(BaseModel):
+    collection_id: str
+    index_version_id: str | None = None
+    strategy: str | None = None
+    question: str = Field(min_length=1, max_length=2000)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    max_context_tokens: int | None = Field(default=None, ge=1)
+    save_run: bool = True
+
+
+def create_router(service: KnowledgeService, chat_service: Any | None = None) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/health")
     def health() -> dict[str, Any]:
-        return service.health()
+        payload = service.health()
+        if chat_service is not None:
+            payload = {**payload, "chat": chat_service.health()}
+        else:
+            payload = {
+                **payload,
+                "chat": {
+                    "reachable": False,
+                    "model_present": False,
+                    "model": None,
+                    "digest": None,
+                    "context_length": None,
+                    "hint": "chat is not configured",
+                },
+            }
+        return payload
 
     @router.get("/collections")
     def list_collections() -> dict[str, Any]:
@@ -111,7 +149,86 @@ def create_router(service: KnowledgeService) -> APIRouter:
         wanted = [item.strip() for item in strategies.split(",") if item.strip()]
         return service.compare(collection_id, wanted, index_version_id)
 
+    # -- D22 chat ---------------------------------------------------------
+    @router.post("/chat")
+    def chat(body: ChatRequest) -> dict[str, Any]:
+        return _require_chat(chat_service).chat(_chat_payload(body))
+
+    @router.post("/chat/stream")
+    def chat_stream(body: ChatRequest) -> StreamingResponse:
+        chat = _require_chat(chat_service)
+        # Resolve index/context before the response starts so typed errors keep
+        # their HTTP status instead of becoming a mid-stream 200.
+        plan = chat.prepare(_chat_payload(body))
+        events = chat.stream_events(plan, body.save_run)
+        return StreamingResponse(_sse(events), media_type="text/event-stream")
+
+    @router.post("/chat/compare")
+    def chat_compare(body: CompareRequest) -> dict[str, Any]:
+        return _require_chat(chat_service).compare(_compare_payload(body))
+
+    @router.get("/chat-runs")
+    def list_chat_runs(
+        limit: int = Query(default=20, ge=1, le=200),
+        kind: Literal["single", "compare"] | None = None,
+        mode: Literal["with_rag", "without_rag", "compare"] | None = None,
+    ) -> dict[str, Any]:
+        return _require_chat(chat_service).list_runs(limit=limit, kind=kind, mode=mode)
+
+    @router.get("/chat-runs/{run_id}")
+    def get_chat_run(run_id: str) -> dict[str, Any]:
+        return _require_chat(chat_service).get_run(run_id)
+
+    @router.get("/chat-runs/{run_id}/evaluation")
+    def get_chat_evaluation(run_id: str) -> dict[str, Any]:
+        return _require_chat(chat_service).get_evaluation(run_id)
+
+    @router.put("/chat-runs/{run_id}/evaluation")
+    def put_chat_evaluation(
+        run_id: str, body: dict[str, Any] = Body(default_factory=dict)
+    ) -> dict[str, Any]:
+        return _require_chat(chat_service).save_evaluation(run_id, body)
+
     return router
+
+
+def _require_chat(chat_service: Any | None) -> Any:
+    if chat_service is None:
+        from ..domain.errors import ChatUnavailable
+
+        raise ChatUnavailable("Chat generation is not configured.")
+    return chat_service
+
+
+def _chat_payload(body: ChatRequest) -> dict[str, Any]:
+    return {
+        "collection_id": body.collection_id,
+        "index_version_id": body.index_version_id,
+        "strategy": body.strategy,
+        "mode": body.mode,
+        "question": body.question,
+        "top_k": body.top_k,
+        "max_context_tokens": body.max_context_tokens,
+        "save_run": body.save_run,
+    }
+
+
+def _compare_payload(body: CompareRequest) -> dict[str, Any]:
+    return {
+        "collection_id": body.collection_id,
+        "index_version_id": body.index_version_id,
+        "strategy": body.strategy,
+        "question": body.question,
+        "top_k": body.top_k,
+        "max_context_tokens": body.max_context_tokens,
+        "save_run": body.save_run,
+    }
+
+
+def _sse(events: Iterator[dict[str, Any]]) -> Iterator[str]:
+    for event in events:
+        payload = json.dumps(event, ensure_ascii=False)
+        yield f"event: {event.get('type', 'message')}\ndata: {payload}\n\n"
 
 
 def _summary(version: dict[str, Any]) -> dict[str, Any]:

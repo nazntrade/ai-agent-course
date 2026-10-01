@@ -67,6 +67,52 @@ function Check-RoleAccess($Config,[string]$Base,[string]$Relative,[string]$Role,
     foreach($c in $candidates) { if ((Resolve-Access $Config.permission.$Action $rules $c) -eq $Expected) { $ok=$true } }
     if (-not $ok) { Add-Issue 'ROLE_PERMISSION' $rolePath ($Role+' needs '+$Expected+' '+$Action+' access to '+$Relative+'.') }
 }
+
+function Check-TestRuntime([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    $blocks=[regex]::Matches([IO.File]::ReadAllText($Path),'(?ms)^```test-runtime-json\s*\r?\n(.*?)^```\s*$')
+    if ($blocks.Count -ne 1) { Add-Issue 'TEST_RUNTIME_DECLARATION' $Path 'Exactly one test-runtime-json declaration is required.'; return }
+    try { $runtime=$blocks[0].Groups[1].Value | ConvertFrom-Json } catch { Add-Issue 'TEST_RUNTIME_DECLARATION' $Path 'Invalid test runtime JSON.'; return }
+    if ($runtime.schemaVersion -ne 1 -or $runtime.applicability -notin @('none','ai')) { Add-Issue 'TEST_RUNTIME_DECLARATION' $Path 'Resolve AI applicability before Specification.'; return }
+    if ($runtime.applicability -eq 'none') { return }
+    $required=@{profileEnvironment='AI_TEST_MODEL_'; profileRole='chat'; provider='openai-compatible'; absentProfile='explicit-config'; partialProfile='reject'; embeddings='independent'; lifecycle='lease-finally'}
+    foreach($field in $required.Keys) { if ($runtime.$field -ne $required[$field]) { Add-Issue 'TEST_RUNTIME_CONTRACT' $Path ('Unsupported or missing test runtime field: '+$field) } }
+    $profile=@([Environment]::GetEnvironmentVariables().Keys | Where-Object { $_ -like 'AI_TEST_MODEL_*' })
+    if ($profile.Count -eq 0) { return }
+    foreach($field in @('KIND','BASE_URL','NAME')) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('AI_TEST_MODEL_'+$field))) { Add-Issue 'TEST_RUNTIME_PROFILE' $Path ('Incomplete selected profile: '+$field) }
+    }
+    $kind=[Environment]::GetEnvironmentVariable('AI_TEST_MODEL_KIND')
+    if ($kind -notin @('local','remote')) { Add-Issue 'TEST_RUNTIME_PROFILE' $Path 'Unsupported selected model kind.' }
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('AI_TEST_MODEL_API_KEY'))) { Add-Issue 'TEST_RUNTIME_PROFILE' $Path 'Selected profile needs authentication presence.' }
+    $baseUri=$null
+    $baseValue=[Environment]::GetEnvironmentVariable('AI_TEST_MODEL_BASE_URL')
+    $baseValid=[Uri]::TryCreate($baseValue,[UriKind]::Absolute,[ref]$baseUri)
+    if (-not $baseValid -or $baseUri.Scheme -notin @('http','https') -or $baseUri.UserInfo -or $baseUri.Query -or $baseUri.Fragment) {
+        Add-Issue 'TEST_RUNTIME_PROFILE' $Path 'Invalid selected profile URL: BASE_URL'
+        return
+    }
+    $loopback=$baseUri.DnsSafeHost -in @('127.0.0.1','localhost','::1')
+    if (($kind -eq 'local' -and -not $loopback) -or ($kind -eq 'remote' -and $baseUri.Scheme -ne 'https' -and -not $loopback)) {
+        Add-Issue 'TEST_RUNTIME_PROFILE' $Path 'Selected profile origin does not match its kind.'
+    }
+    $leaseValue=[Environment]::GetEnvironmentVariable('AI_TEST_MODEL_LEASE_URL')
+    if (-not [string]::IsNullOrWhiteSpace($leaseValue)) {
+        $leaseUri=$null
+        $modelId=[Environment]::GetEnvironmentVariable('AI_TEST_MODEL_ID')
+        $expected='/api/local-models/'+[Uri]::EscapeDataString([string]$modelId)+'/test-leases'
+        if (-not [Uri]::TryCreate($leaseValue,[UriKind]::Absolute,[ref]$leaseUri) -or $kind -ne 'local' -or -not $modelId -or
+            $leaseUri.Scheme -ne $baseUri.Scheme -or $leaseUri.DnsSafeHost -ne $baseUri.DnsSafeHost -or $leaseUri.Port -ne $baseUri.Port -or
+            $leaseUri.AbsolutePath -ne $expected -or $leaseUri.UserInfo -or $leaseUri.Query -or $leaseUri.Fragment) {
+            Add-Issue 'TEST_RUNTIME_PROFILE' $Path 'Invalid selected profile lifecycle endpoint.'
+        }
+    }
+    $inherited=[Environment]::GetEnvironmentVariable('AI_TEST_MODEL_LEASE_ID')
+    if ($inherited -and ($kind -ne 'local' -or -not $leaseValue -or [Environment]::GetEnvironmentVariable('AI_TEST_MODEL_PARENT_READY') -ne '1')) {
+        Add-Issue 'TEST_RUNTIME_PROFILE' $Path 'Invalid inherited test runtime session.'
+    }
+}
+
 try {
     if (-not [IO.Path]::IsPathRooted($ProjectRoot)) { throw 'ProjectRoot must be absolute.' }
     $root=[IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\','/')
@@ -112,6 +158,9 @@ try {
         }
         if ($Stage -ne 'Scaffold') {
             foreach($rel in $definition.governanceFiles) { Check-Filled $root $rel }
+            $runtimeFile='PROJECT_RULES.md'
+            if ($kind -eq 'CourseModule') { $runtimeFile='MODULE_RULES.md' }
+            Check-TestRuntime (Join-Path $root $runtimeFile)
             $stackFile='STACK_PROFILE.md'; $heading='Selected profile'
             if ($kind -eq 'CourseModule') { $stackFile='MODULE_RULES.md'; $heading='Стек и версии' }
             $stackPath=Join-Path $root $stackFile

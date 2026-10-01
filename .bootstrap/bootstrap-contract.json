@@ -16,5 +16,11 @@
       "forbiddenPaths": ["AGENTS.md", "PROJECT_RULES.md", "opencode.json", "opencode.jsonc", ".opencode"],
       "inheritedFiles": ["AGENTS.md", "PROJECT_RULES.md", "opencode.json", ".opencode/agents/coordinator.md", ".opencode/agents/architect.md", ".opencode/agents/developer.md", ".opencode/agents/tester.md", ".opencode/agents/configurator.md"]
     }
+  },
+  "testRuntimeDeclaration": {
+    "schemaVersion": 1,
+    "format": "test-runtime-json",
+    "files": {"Standalone": "PROJECT_RULES.md", "CourseModule": "MODULE_RULES.md"},
+    "stages": ["Specification", "Implementation"]
   }
 }

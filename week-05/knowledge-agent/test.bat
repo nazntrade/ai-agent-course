@@ -29,6 +29,7 @@ echo Usage: test.bat [unit ^| integration ^| live ^| acceptance]
 exit /b 2
 
 :unit
+for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
 echo Running the unit suite (no network, no .env) ...
 "%VENV_PY%" -m pytest tests\unit
 if errorlevel 1 goto failed
@@ -38,6 +39,7 @@ echo TEST_STATUS: PASS
 exit /b 0
 
 :integration
+for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
 echo Running the integration suite against the local stub (loopback, no network, no .env) ...
 "%VENV_PY%" -m pytest tests\integration
 if errorlevel 1 goto failed
@@ -48,16 +50,27 @@ exit /b 0
 
 :live
 set "RUN_EMBED_LIVE=1"
-echo Running the opt-in live embedding check against local Ollama (MODEL_CHECK_KIND: LOCAL) ...
+set "RUN_CHAT_LIVE=1"
+echo Running opt-in live checks: embeddings independently, chat from selected test profile ...
 "%VENV_PY%" harness\live_embed.py
 if errorlevel 1 goto failed
 echo.
 echo EMBEDDING_LIVE_STATUS: PASS
+"%VENV_PY%" harness\test_profile.py -- "%VENV_PY%" harness\live_chat.py
+if errorlevel 1 goto failed
+echo.
+echo CHAT_LIVE_STATUS: PASS
 exit /b 0
 
 :acceptance
 echo Running the acceptance aggregator (LIVE only when explicitly opted in) ...
-"%VENV_PY%" harness\acceptance.py
+if "%RUN_CHAT_LIVE%"=="1" (
+    "%VENV_PY%" harness\test_profile.py -- "%VENV_PY%" harness\acceptance.py
+) else (
+    REM Offline acceptance must not acquire or start a selected real chat model.
+    for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
+    "%VENV_PY%" harness\acceptance.py
+)
 if errorlevel 1 goto failed
 exit /b 0
 

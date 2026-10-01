@@ -78,6 +78,31 @@
     </section>
 
     <section class="panel">
+      <h2>Чат (RAG)</h2>
+      <div class="row">
+        <select id="chat-strategy" title="Какой индекс использовать для режима «С RAG»">
+          <option value="active">Активный индекс</option>
+          <option value="fixed">Fixed</option>
+          <option value="structure">Structure</option>
+        </select>
+        <input id="chat-top-k" type="number" value="5" min="1" max="50" title="Сколько фрагментов запрашивать" />
+        <input id="chat-max-context" type="number" min="1" placeholder="Лимит контекста (необязательно)" />
+      </div>
+      <div class="row">
+        <input id="chat-question" type="text" placeholder="Введите вопрос" />
+      </div>
+      <div class="row">
+        <button id="chat-plain">Без RAG</button>
+        <button id="chat-rag" class="primary">С RAG</button>
+        <button id="chat-compare">Сравнить</button>
+      </div>
+      <div id="chat-status" class="meta"></div>
+      <div id="chat-sources"></div>
+      <div id="chat-answer" class="chat-answer"></div>
+      <div id="chat-compare-result"></div>
+    </section>
+
+    <section class="panel">
       <h2>Chunks</h2>
       <div class="row">
         <label><input id="chunks-active" type="checkbox" checked /> Active index only</label>

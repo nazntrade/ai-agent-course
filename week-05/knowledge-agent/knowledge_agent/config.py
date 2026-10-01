@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+from .chat.test_profile import TestProfile, load_test_profile
 
 DEFAULTS = {
     "KNOWLEDGE_HOST": "127.0.0.1",
@@ -25,6 +26,18 @@ DEFAULTS = {
     "CHUNK_STRUCTURE_MAX_CHARS": "3200",
     "PDF_USEFUL_PAGE_MIN_CHARS": "500",
     "KNOWLEDGE_UI_TITLE": "Knowledge Agent",
+    # D22 chat generation (SPEC D22 8). CHAT_MODEL is empty on purpose: the app
+    # never guesses a model and never downloads one.
+    "CHAT_BASE_URL": "http://127.0.0.1:11434",
+    "CHAT_MODEL": "",
+    "CHAT_TIMEOUT_SECONDS": "120",
+    "CHAT_MAX_OUTPUT_TOKENS": "1024",
+    "CHAT_CONTEXT_TOKENS": "8192",
+    "CHAT_TEMPERATURE": "0",
+    "CHAT_SEED": "0",
+    "CHAT_TOP_K": "5",
+    "CHAT_CONTEXT_CHARS_PER_TOKEN": "3",
+    "CHAT_RUNS_PATH": "local-data/chat-runs",
 }
 
 
@@ -47,6 +60,19 @@ class Settings:
     structure_max_chars: int
     pdf_useful_page_min_chars: int
     ui_title: str
+    # D22 chat generation. Defaults keep the existing explicit ``Settings(...)``
+    # constructions in harness checks working without changes.
+    test_profile: TestProfile | None = None
+    chat_base_url: str = "http://127.0.0.1:11434"
+    chat_model: str = ""
+    chat_timeout_seconds: float = 120.0
+    chat_max_output_tokens: int = 1024
+    chat_context_tokens: int = 8192
+    chat_temperature: float = 0.0
+    chat_seed: int = 0
+    chat_top_k: int = 5
+    chat_context_chars_per_token: int = 3
+    chat_runs_path: str = "local-data/chat-runs"
 
 
 def _value(env: Mapping[str, str], key: str) -> str:
@@ -78,6 +104,17 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         structure_max_chars=int(_value(source, "CHUNK_STRUCTURE_MAX_CHARS")),
         pdf_useful_page_min_chars=int(_value(source, "PDF_USEFUL_PAGE_MIN_CHARS")),
         ui_title=_value(source, "KNOWLEDGE_UI_TITLE"),
+        test_profile=load_test_profile(source),
+        chat_base_url=_value(source, "CHAT_BASE_URL"),
+        chat_model=_value(source, "CHAT_MODEL"),
+        chat_timeout_seconds=float(_value(source, "CHAT_TIMEOUT_SECONDS")),
+        chat_max_output_tokens=int(_value(source, "CHAT_MAX_OUTPUT_TOKENS")),
+        chat_context_tokens=int(_value(source, "CHAT_CONTEXT_TOKENS")),
+        chat_temperature=float(_value(source, "CHAT_TEMPERATURE")),
+        chat_seed=int(_value(source, "CHAT_SEED")),
+        chat_top_k=int(_value(source, "CHAT_TOP_K")),
+        chat_context_chars_per_token=int(_value(source, "CHAT_CONTEXT_CHARS_PER_TOKEN")),
+        chat_runs_path=_value(source, "CHAT_RUNS_PATH"),
     )
 
 

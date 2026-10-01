@@ -13,6 +13,8 @@ const state = {
   collectionsRequestId: 0,
   searchRequestId: 0,
   compareRequestId: 0,
+  chatRequestId: 0,
+  chatBusy: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -73,10 +75,14 @@ function selectCollection(collectionId) {
   state.chunkLoadId += 1;
   state.searchRequestId += 1;
   state.compareRequestId += 1;
+  state.chatRequestId += 1;
   state.searching = false;
   $("versions").querySelector("tbody").innerHTML = "";
   $("fragments").textContent = "";
   $("compare-result").textContent = "";
+  clearChatOutput();
+  $("chat-status").textContent = "";
+  setChatBusy(false);
   $("chunks").textContent = "Load chunks for the selected collection.";
   $("chunk-detail").classList.add("hidden");
   $("chunk-detail-body").textContent = "";
@@ -477,6 +483,257 @@ async function loadChunks() {
   }
 }
 
+function setChatBusy(busy) {
+  state.chatBusy = busy;
+  for (const id of ["chat-plain", "chat-rag", "chat-compare"]) $(id).disabled = busy;
+}
+
+function clearChatOutput() {
+  $("chat-answer").textContent = "";
+  $("chat-sources").textContent = "";
+  $("chat-compare-result").textContent = "";
+}
+
+function chatPayload(mode) {
+  const payload = {
+    question: $("chat-question").value.trim(),
+    top_k: Number($("chat-top-k").value) || 5,
+  };
+  if (mode) payload.mode = mode;
+  const maxContext = Number($("chat-max-context").value);
+  if (maxContext > 0) payload.max_context_tokens = maxContext;
+  if (state.collectionId) payload.collection_id = state.collectionId;
+  const strategy = $("chat-strategy").value;
+  if (strategy !== "active") payload.strategy = strategy;
+  return payload;
+}
+
+function metadataLine(metadata) {
+  const meta = metadata || {};
+  const pages = meta.page_start ? `стр. ${meta.page_start}–${meta.page_end}` : "стр. н/д";
+  return `${meta.section_path || "раздел н/д"} · ${pages} · ${meta.source_label || ""}`;
+}
+
+function renderChatSources(retrieval) {
+  const container = $("chat-sources");
+  container.textContent = "";
+  if (!retrieval) return;
+  const header = document.createElement("div");
+  header.className = "meta";
+  header.textContent = `Найдено: ${retrieval.found_count}, передано в контекст: ${retrieval.passed_count}`;
+  container.appendChild(header);
+  for (const item of retrieval.passed || []) {
+    const card = document.createElement("div");
+    card.className = "fragment";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const id = (item.chunk_id || "").slice(0, 8);
+    meta.textContent = `#${item.rank} · ${id}… · ${metadataLine(item.metadata)} · ~${item.estimated_tokens} токенов`;
+    card.appendChild(meta);
+    container.appendChild(card);
+  }
+}
+
+function renderChatAnswer(answer) {
+  const container = $("chat-answer");
+  container.textContent = "";
+  const text = document.createElement("div");
+  text.className = "text";
+  text.textContent = answer.text || "";
+  container.appendChild(text);
+  const citations = answer.citations || {};
+  const meta = document.createElement("div");
+  meta.className = answer.truncated ? "meta warn" : "meta";
+  const parts = [];
+  parts.push(`finish_reason: ${answer.finish_reason || "н/д"}`);
+  if (answer.truncated) parts.push("ответ обрезан по лимиту длины");
+  parts.push(`цитаты: корректные ${(citations.valid || []).length}, непереданные ${(citations.unsupported || []).length}`);
+  meta.textContent = parts.join(" · ");
+  container.appendChild(meta);
+}
+
+function chatUsageLine(record) {
+  const parts = [];
+  if (record.usage) {
+    parts.push(`tokens in/out: ${record.usage.input_tokens ?? "н/д"}/${record.usage.output_tokens ?? "н/д"}`);
+  } else {
+    parts.push("usage: н/д");
+  }
+  if (record.output_tokens_per_second != null) parts.push(`${record.output_tokens_per_second} tok/s`);
+  if (record.latency_ms && record.latency_ms.total != null) parts.push(`задержка ${record.latency_ms.total} мс`);
+  return parts.join(" · ");
+}
+
+function handleChatEvent(event) {
+  if (event.type === "start") {
+    clearChatOutput();
+    const model = event.model && event.model.model ? event.model.model : "н/д";
+    $("chat-status").textContent = `Прогон ${String(event.run_id).slice(0, 16)}… · режим ${event.mode} · модель ${model}`;
+  } else if (event.type === "sources") {
+    renderChatSources({
+      found_count: event.found_count,
+      passed_count: event.passed_count,
+      passed: event.passed,
+    });
+  } else if (event.type === "token") {
+    const container = $("chat-answer");
+    container.textContent = container.textContent + event.text;
+  } else if (event.type === "done") {
+    const record = event.answer || {};
+    renderChatAnswer(record.answer || {});
+    renderChatSources(record.retrieval);
+    $("chat-status").textContent = `Готово · ${chatUsageLine(record)}`;
+  } else if (event.type === "error") {
+    const error = event.error || {};
+    const hint = error.details && error.details.hint ? ` (${error.details.hint})` : "";
+    showError(`${error.code || "chat_error"}: ${error.message || "ошибка"}${hint}`);
+    $("chat-status").textContent = "Ошибка";
+  }
+}
+
+async function streamChatRequest(payload, requestId) {
+  const response = await fetch("/api/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const error = data.error || {};
+    const hint = error.details && error.details.hint ? ` (${error.details.hint})` : "";
+    throw new Error(`${error.code || response.status}: ${error.message || "request failed"}${hint}`);
+  }
+  if (!response.body || typeof response.body.getReader !== "function") return false;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    if (requestId !== state.chatRequestId) return true;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop();
+    for (const frame of frames) {
+      const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+      if (!dataLine) continue;
+      handleChatEvent(JSON.parse(dataLine.slice(5).trim()));
+    }
+  }
+  return true;
+}
+
+async function runChat(mode) {
+  if (state.chatBusy) return;
+  const question = $("chat-question").value.trim();
+  if (!question) {
+    showError("Введите вопрос.");
+    return;
+  }
+  if (mode === "with_rag" && !state.collectionId) {
+    showError("Выберите коллекцию для режима «С RAG».");
+    return;
+  }
+  showError("");
+  const requestId = ++state.chatRequestId;
+  setChatBusy(true);
+  clearChatOutput();
+  $("chat-status").textContent = "Ожидание ответа модели…";
+  try {
+    const streamed = await streamChatRequest(chatPayload(mode), requestId);
+    if (requestId !== state.chatRequestId) return;
+    if (!streamed) {
+      const record = await api("/api/chat", { method: "POST", body: JSON.stringify(chatPayload(mode)) });
+      if (requestId !== state.chatRequestId) return;
+      renderChatAnswer(record.answer || {});
+      renderChatSources(record.retrieval);
+      $("chat-status").textContent = `Готово · ${chatUsageLine(record)}`;
+    }
+  } catch (error) {
+    if (requestId === state.chatRequestId) {
+      showError(error.message);
+      $("chat-status").textContent = "Ошибка";
+    }
+  } finally {
+    if (requestId === state.chatRequestId) setChatBusy(false);
+  }
+}
+
+function renderChatCompare(record) {
+  const container = $("chat-compare-result");
+  container.textContent = "";
+  const branches = record.branches || {};
+  const row = document.createElement("div");
+  row.className = "compare-columns";
+  for (const [mode, title] of [["with_rag", "С RAG"], ["without_rag", "Без RAG"]]) {
+    const column = document.createElement("div");
+    column.className = "compare-column";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    column.appendChild(heading);
+    const branch = branches[mode] || {};
+    const answer = document.createElement("div");
+    answer.className = "text";
+    answer.textContent = (branch.answer && branch.answer.text) || "";
+    column.appendChild(answer);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const truncated = branch.answer && branch.answer.truncated ? " · обрезано" : "";
+    const template = branch.prompt ? branch.prompt.template_id : "н/д";
+    meta.textContent = `${template} · ${chatUsageLine(branch)}${truncated}`;
+    column.appendChild(meta);
+    if (branch.retrieval) {
+      const sources = document.createElement("div");
+      sources.className = "meta";
+      sources.textContent = `Найдено ${branch.retrieval.found_count}, передано ${branch.retrieval.passed_count}`;
+      column.appendChild(sources);
+    }
+    row.appendChild(column);
+  }
+  container.appendChild(row);
+  const policy = document.createElement("div");
+  policy.className = "meta";
+  const comparison = record.comparison || {};
+  const templates = comparison.prompt_templates || {};
+  policy.textContent =
+    `Одна модель: ${comparison.same_model ? "да" : "нет"} · одинаковые настройки: ` +
+    `${comparison.same_settings ? "да" : "нет"} · шаблоны: С RAG ${templates.with_rag || "н/д"}, ` +
+    `Без RAG ${templates.without_rag || "н/д"}`;
+  container.appendChild(policy);
+}
+
+async function runChatCompare() {
+  if (state.chatBusy) return;
+  if (!state.collectionId) {
+    showError("Выберите коллекцию для сравнения.");
+    return;
+  }
+  if (!$("chat-question").value.trim()) {
+    showError("Введите вопрос.");
+    return;
+  }
+  showError("");
+  const requestId = ++state.chatRequestId;
+  setChatBusy(true);
+  clearChatOutput();
+  $("chat-status").textContent = "Сравнение режимов…";
+  try {
+    const payload = chatPayload(null);
+    const record = await api("/api/chat/compare", { method: "POST", body: JSON.stringify(payload) });
+    if (requestId !== state.chatRequestId) return;
+    renderChatCompare(record);
+    const index = record.comparison && record.comparison.index_version_id;
+    $("chat-status").textContent = `Сравнение готово · индекс ${index ? String(index).slice(0, 8) + "…" : "н/д"}`;
+  } catch (error) {
+    if (requestId === state.chatRequestId) {
+      showError(error.message);
+      $("chat-status").textContent = "Ошибка";
+    }
+  } finally {
+    if (requestId === state.chatRequestId) setChatBusy(false);
+  }
+}
+
 function wire() {
   $("refresh").onclick = () => Promise.all([refreshCollections(), refreshHealth()]).catch((e) => showError(e.message));
   $("collection-select").onchange = (event) => {
@@ -509,6 +766,9 @@ function wire() {
   $("build").onclick = () => buildIndex();
   $("search").onclick = () => search();
   $("compare").onclick = () => loadCompare();
+  $("chat-plain").onclick = () => runChat("without_rag");
+  $("chat-rag").onclick = () => runChat("with_rag");
+  $("chat-compare").onclick = () => runChatCompare();
   $("load-chunks").onclick = () => loadChunks();
   $("chunks-active").onchange = () => loadChunks();
 }
