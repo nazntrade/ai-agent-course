@@ -1,6 +1,6 @@
 @echo off
 REM Trusted module entrypoint: automated checks for the Knowledge Agent module.
-REM Modes: unit (default), integration, live, acceptance.
+REM Modes: unit (default), integration, live, acceptance, rag-eval, scenario <slug>.
 REM unit/integration run without network and without .env; live/acceptance are opt-in.
 REM Exit codes: 0 = passed, 1 = test failure, 2 = setup error or unknown mode, 3 = required LIVE blocked by policy.
 setlocal EnableExtensions
@@ -13,6 +13,8 @@ set "KNOWLEDGE_SKIP_ENV_FILE=1"
 set "VENV_DIR=.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
+if /i "%~1"=="scenario" goto scenario
+
 call :ensure_venv
 if errorlevel 1 exit /b 2
 
@@ -23,9 +25,10 @@ if /i "%MODE%"=="unit" goto unit
 if /i "%MODE%"=="integration" goto integration
 if /i "%MODE%"=="live" goto live
 if /i "%MODE%"=="acceptance" goto acceptance
+if /i "%MODE%"=="rag-eval" goto rag_eval
 
 echo ERROR: unknown test mode "%MODE%".
-echo Usage: test.bat [unit ^| integration ^| live ^| acceptance]
+echo Usage: test.bat [unit ^| integration ^| live ^| acceptance ^| rag-eval ^| scenario ^<slug^>]
 exit /b 2
 
 :unit
@@ -67,6 +70,19 @@ if errorlevel 1 goto failed
 echo.
 echo CHAT_LIVE_STATUS: PASS
 exit /b 0
+
+:rag_eval
+REM Full D22 evaluation uses only an owned backend/index and internal TestSession.
+REM Block before any model/profile/corpus/backend action when policy denies LIVE.
+"%VENV_PY%" harness\live_policy.py
+if errorlevel 3 exit /b 3
+if errorlevel 1 goto failed
+if not exist "harness\rag_eval_live.py" (
+    echo RAG_EVAL_PAIRS_STATUS: BLOCKED - isolated evaluation runner is missing
+    exit /b 2
+)
+"%VENV_PY%" harness\rag_eval_live.py
+exit /b %ERRORLEVEL%
 
 :acceptance
 echo Running the acceptance aggregator (LIVE only when explicitly opted in) ...
@@ -114,3 +130,23 @@ if errorlevel 1 (
     exit /b 1
 )
 exit /b 0
+
+:scenario
+REM Fixed dispatcher only; no install, arbitrary paths, shell strings or extra args.
+if "%~2"=="" goto scenario_usage
+if not "%3"=="" goto scenario_usage
+if not defined TEST_SCENARIO_PYTHON set "TEST_SCENARIO_PYTHON=.venv\Scripts\python.exe"
+if not exist "%TEST_SCENARIO_PYTHON%" (
+    echo SCENARIO_STATUS: SETUP_ERROR - configure TEST_SCENARIO_PYTHON or the existing .venv interpreter.
+    exit /b 2
+)
+if not exist "harness\scenario_runner.py" (
+    echo SCENARIO_STATUS: SETUP_ERROR - fixed scenario dispatcher is missing.
+    exit /b 2
+)
+"%TEST_SCENARIO_PYTHON%" "harness\scenario_runner.py" "%~2"
+exit /b %ERRORLEVEL%
+
+:scenario_usage
+echo Usage: test.bat scenario ^<slug^> - exactly one ASCII slug, no extra arguments.
+exit /b 2

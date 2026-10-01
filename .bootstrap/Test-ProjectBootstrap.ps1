@@ -136,6 +136,25 @@ try {
         $definition=$contract.templates.$kind
         foreach($rel in $definition.requiredFiles) { $null=Check-File $root $rel }
         if (-not $AuditExisting) { foreach($rel in $contract.commonFiles) { $null=Check-File $root $rel } }
+
+        # Opt-in for new scaffolds only; legacy contracts retain their requirements.
+        if ($contract.PSObject.Properties.Name -contains 'scenarioEntrypoint') {
+            $scenario=$contract.scenarioEntrypoint
+            $testPath=Join-Path $root 'test.bat'
+            $supported=$scenario.mode -ceq 'scenario' -and $scenario.script -ceq 'harness/scenario_runner.py'
+            $dispatch=$false
+            if ($supported -and (Test-Path -LiteralPath $testPath -PathType Leaf)) {
+                $batText=[IO.File]::ReadAllText($testPath)
+                $dispatch=$batText -match '(?im)^if /i "%~1"=="scenario" goto scenario\s*$' -and
+                    $batText -match '(?im)^:scenario\s*$' -and
+                    $batText -match '(?im)^"%TEST_SCENARIO_PYTHON%" "harness\\scenario_runner\.py" "%~2"\s*$' -and
+                    $batText -match '(?im)^if not "%3"=="" goto scenario_usage\s*$'
+            }
+            if (-not $supported -or -not $dispatch) {
+                Add-Issue 'SCENARIO_ENTRYPOINT' $testPath 'Preserve the fixed scenario branch, quoted dispatcher and extra-argument rejection when configuring ordinary tests.'
+            }
+        }
+
         $base=$root; $prefix=''
         if ($kind -eq 'CourseModule') {
             foreach($rel in $definition.forbiddenPaths) {
