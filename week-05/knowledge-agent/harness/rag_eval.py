@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 MODULE_DIR = Path(__file__).resolve().parent.parent
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
+from harness.live_policy import report_live_blocked
 QUESTIONS_PATH = MODULE_DIR / "eval" / "d22" / "questions.json"
 
 HOST = os.environ.get("KNOWLEDGE_HOST", "127.0.0.1")
@@ -97,6 +100,9 @@ def _page_hit(record: dict[str, Any], expected: list[int]) -> bool:
 
 
 def run(base: str, collection_id: str | None, live: bool) -> int:
+    # A non-LIVE label does not prevent these requests from invoking a real backend.
+    if report_live_blocked('RAG_EVAL_PAIRS_STATUS'):
+        return 3
     data = load_questions(QUESTIONS_PATH)
     questions = data.get("questions", [])
     if len(questions) != 10:
@@ -198,6 +204,8 @@ def run(base: str, collection_id: str | None, live: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     global BASE
+    if report_live_blocked('RAG_EVAL_PAIRS_STATUS'):
+        return 3
     parser = argparse.ArgumentParser(description="Run the D22 eval question set in both modes.")
     parser.add_argument("--base-url", default=BASE)
     parser.add_argument("--collection", default=None)
@@ -217,4 +225,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

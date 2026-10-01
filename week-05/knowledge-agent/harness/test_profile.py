@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from knowledge_agent.chat.test_profile import load_test_profile
+from harness.live_policy import require_live, report_live_blocked, LivePolicyBlocked
 
 class SessionError(RuntimeError):
     pass
@@ -19,6 +20,7 @@ class TestSession:
     __test__ = False
     def __init__(self, env=None, opener=None):
         self.env = dict(os.environ if env is None else env)
+        require_live(self.env)
         self.profile = load_test_profile(self.env)
         self.opener = opener or urllib.request.urlopen
         self.owned_id = None
@@ -46,6 +48,7 @@ class TestSession:
                 return
 
     def __enter__(self):
+        require_live(self.env)
         profile = self.profile
         if profile is None or profile.kind == 'remote' or profile.lease_id:
             return self.env
@@ -85,6 +88,8 @@ class TestSession:
 
 
 def main(argv=None):
+    if report_live_blocked('TEST_MODEL_SESSION'):
+        return 3
     command = list(sys.argv[1:] if argv is None else argv)
     if command and command[0] == '--':
         command.pop(0)
@@ -115,4 +120,3 @@ def main(argv=None):
 
 if __name__ == '__main__':
     sys.exit(main())
-

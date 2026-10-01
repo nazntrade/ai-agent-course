@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 MODULE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(MODULE_DIR))
+from harness.live_policy import report_live_blocked
 
 from knowledge_agent.__main__ import build_service  # noqa: E402
 from knowledge_agent.config import Settings, load_settings  # noqa: E402
@@ -81,6 +82,8 @@ def row_counts(store) -> dict:
 
 
 def run_scenario(settings: Settings, root: Path, source: Path) -> int:
+    if report_live_blocked('EMBEDDING_LIVE_STATUS'):
+        return 3
     service = store = None
     inference_observed = False
     print("MODEL_CHECK_KIND: LOCAL")
@@ -160,6 +163,8 @@ def run_scenario(settings: Settings, root: Path, source: Path) -> int:
 
 
 def main() -> int:
+    if report_live_blocked('EMBEDDING_LIVE_STATUS'):
+        return 3
     if os.environ.get("RUN_EMBED_LIVE") != "1":
         emit("EMBEDDING_LIVE_STATUS", "BLOCKED (explicit RUN_EMBED_LIVE=1 opt-in required)")
         return 3

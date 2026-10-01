@@ -16,6 +16,7 @@ from pathlib import Path
 MODULE_DIR = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
 sys.path.insert(0, str(MODULE_DIR))
+from harness.live_policy import live_policy
 
 PDF_PATH = MODULE_DIR / "local-data" / "input" / "agents-survey.pdf"
 
@@ -485,13 +486,17 @@ def run(args: list[str]) -> int:
     env = dict(os.environ)
     env["KNOWLEDGE_SKIP_ENV_FILE"] = "1"
     if "pytest" in args or any(name.endswith(("restart_check.py", "interrupt_check.py")) for name in args):
-        env = {key: value for key, value in env.items() if not key.startswith("AI_TEST_MODEL_")}
+        env = {key: value for key, value in env.items() if not key.startswith("AI_TEST_MODEL_") and key != "AI_TEST_LIVE_POLICY"}
     completed = subprocess.run(args, cwd=str(MODULE_DIR), env=env)
     return completed.returncode
 
 
 def main() -> int:
     results: dict[str, bool] = {}
+    denied = live_policy() in ('forbidden', 'invalid')
+    live_requested = any(os.environ.get(key) == '1' for key in ('RUN_EMBED_LIVE', 'RUN_CHAT_LIVE'))
+    if denied:
+        print(f'LIVE_POLICY_STATUS: BLOCKED ({live_policy()} policy; real calls NOT_RUN)')
 
     print("ACCEPTANCE_SCOPE: automated checks; manual/UI evidence is assessed separately")
     if os.environ.get("RUN_KNOWLEDGE_READONLY_AUDIT") == "1":
@@ -513,19 +518,19 @@ def main() -> int:
     interrupt = run([PYTHON, "harness/interrupt_check.py"])
     results["INTERRUPT"] = interrupt == 0
 
-    if os.environ.get("RUN_EMBED_LIVE") == "1":
+    if os.environ.get("RUN_EMBED_LIVE") == "1" and not denied:
         live = run([PYTHON, "harness/live_embed.py"])
         results["LIVE"] = live == 0
         print(f"EMBEDDING_LIVE_STATUS: {'PASS' if live == 0 else 'FAIL'}")
     else:
-        print("EMBEDDING_LIVE_STATUS: not run (set RUN_EMBED_LIVE=1 to enable LIVE)")
+        print("EMBEDDING_LIVE_STATUS: BLOCKED (policy; NOT_RUN)" if denied else "EMBEDDING_LIVE_STATUS: not run (set RUN_EMBED_LIVE=1 to select LIVE)")
 
-    if os.environ.get("RUN_CHAT_LIVE") == "1":
+    if os.environ.get("RUN_CHAT_LIVE") == "1" and not denied:
         chat_live = run([PYTHON, "harness/live_chat.py"])
         results["CHAT_LIVE"] = chat_live == 0
         print(f"CHAT_LIVE_STATUS: {'PASS' if chat_live == 0 else 'FAIL'}")
     else:
-        print("CHAT_LIVE_STATUS: not run (set RUN_CHAT_LIVE=1 to enable LIVE)")
+        print("CHAT_LIVE_STATUS: BLOCKED (policy; NOT_RUN)" if denied else "CHAT_LIVE_STATUS: not run (set RUN_CHAT_LIVE=1 to select LIVE)")
 
     mandatory = ["UNIT", "INTEGRATION", "RESTART", "INTERRUPT"]
     if "CHAT_LIVE" in results:
@@ -535,6 +540,9 @@ def main() -> int:
     overall = all(results.get(name, False) for name in mandatory)
     print(f"AUTOMATED_STATUS: {'PASS' if overall else 'FAIL'}")
     print("D21_ACCEPTANCE_STATUS: NOT_ASSESSED (requires LIVE and manual/UI evidence)")
+    if denied and live_requested:
+        print('TEST_STATUS: BLOCKED (mandatory LIVE forbidden; offline results shown separately)')
+        return 3
     return 0 if overall else 1
 
 

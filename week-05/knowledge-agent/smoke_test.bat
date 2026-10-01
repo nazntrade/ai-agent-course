@@ -11,6 +11,7 @@ cd /d "%~dp0"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 set "KNOWLEDGE_SKIP_ENV_FILE=1"
+set "AI_TEST_LIVE_POLICY="
 REM Deterministic smoke cannot inherit a real test model profile.
 for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
 

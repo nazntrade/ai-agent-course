@@ -2,7 +2,7 @@
 REM Trusted module entrypoint: automated checks for the Knowledge Agent module.
 REM Modes: unit (default), integration, live, acceptance.
 REM unit/integration run without network and without .env; live/acceptance are opt-in.
-REM Exit codes: 0 = passed, 1 = test failure, 2 = setup error or unknown mode.
+REM Exit codes: 0 = passed, 1 = test failure, 2 = setup error or unknown mode, 3 = required LIVE blocked by policy.
 setlocal EnableExtensions
 cd /d "%~dp0"
 
@@ -29,6 +29,7 @@ echo Usage: test.bat [unit ^| integration ^| live ^| acceptance]
 exit /b 2
 
 :unit
+set "AI_TEST_LIVE_POLICY="
 for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
 echo Running the unit suite (no network, no .env) ...
 "%VENV_PY%" -m pytest tests\unit
@@ -39,6 +40,7 @@ echo TEST_STATUS: PASS
 exit /b 0
 
 :integration
+set "AI_TEST_LIVE_POLICY="
 for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
 echo Running the integration suite against the local stub (loopback, no network, no .env) ...
 "%VENV_PY%" -m pytest tests\integration
@@ -49,6 +51,10 @@ echo TEST_STATUS: PASS
 exit /b 0
 
 :live
+REM Reject forbidden/invalid policy before embedding or chat/model setup.
+"%VENV_PY%" harness\live_policy.py
+if errorlevel 3 exit /b 3
+if errorlevel 1 goto failed
 set "RUN_EMBED_LIVE=1"
 set "RUN_CHAT_LIVE=1"
 echo Running opt-in live checks: embeddings independently, chat from selected test profile ...
@@ -64,13 +70,21 @@ exit /b 0
 
 :acceptance
 echo Running the acceptance aggregator (LIVE only when explicitly opted in) ...
-if "%RUN_CHAT_LIVE%"=="1" (
-    "%VENV_PY%" harness\test_profile.py -- "%VENV_PY%" harness\acceptance.py
-) else (
-    REM Offline acceptance must not acquire or start a selected real chat model.
-    for /f "tokens=1 delims==" %%V in ('set AI_TEST_MODEL_ 2^>nul') do set "%%V="
-    "%VENV_PY%" harness\acceptance.py
-)
+REM Forbidden/invalid policy must still permit the offline acceptance checks.
+"%VENV_PY%" harness\live_policy.py
+if errorlevel 3 goto acceptance_offline
+if errorlevel 1 goto failed
+if not "%RUN_CHAT_LIVE%"=="1" goto acceptance_offline
+"%VENV_PY%" harness\test_profile.py -- "%VENV_PY%" harness\acceptance.py
+if errorlevel 3 exit /b 3
+if errorlevel 1 goto failed
+exit /b 0
+
+:acceptance_offline
+REM The aggregator isolates its offline children and reports blocked LIVE.
+REM Preserve policy here so a forbidden request cannot silently become legacy.
+"%VENV_PY%" harness\acceptance.py
+if errorlevel 3 exit /b 3
 if errorlevel 1 goto failed
 exit /b 0
 

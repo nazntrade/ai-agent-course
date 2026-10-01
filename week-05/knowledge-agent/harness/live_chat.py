@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 MODULE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(MODULE_DIR))
+from harness.live_policy import report_live_blocked
 
 from knowledge_agent.__main__ import build_chat_service, build_service  # noqa: E402
 from knowledge_agent.config import Settings, load_settings  # noqa: E402
@@ -71,6 +72,8 @@ def _chat(chat_service, collection_id: str, mode: str) -> dict:
 
 
 def run_scenario(settings: Settings, root: Path) -> int:
+    if report_live_blocked('CHAT_LIVE_STATUS'):
+        return 3
     store = None
     check_kind = "NETWORK" if settings.test_profile and settings.test_profile.kind == "remote" else "LOCAL"
     prefix = "NETWORK_MODEL" if check_kind == "NETWORK" else "LOCAL_MODEL"
@@ -136,6 +139,8 @@ def run_scenario(settings: Settings, root: Path) -> int:
 
 
 def main() -> int:
+    if report_live_blocked('CHAT_LIVE_STATUS'):
+        return 3
     if os.environ.get("RUN_CHAT_LIVE") != "1":
         emit("CHAT_LIVE_STATUS", "BLOCKED (explicit RUN_CHAT_LIVE=1 opt-in required)")
         return 3
