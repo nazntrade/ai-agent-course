@@ -11,6 +11,7 @@ from .api.app import create_app
 from .chat.chat_service import ChatService
 from .chat.ollama_chat import OllamaChatModel
 from .chat.openai_chat import OpenAIChatModel
+from .chat.rewrite import ChatQueryRewriter
 from .chat.run_store import FileChatRunStore
 from .chunking.fixed import FixedChunker
 from .chunking.structure import StructureChunker
@@ -64,22 +65,52 @@ def build_service(settings: Settings) -> tuple[KnowledgeService, SqliteIndexStor
     return service, store
 
 
-def build_chat_service(settings: Settings, service: KnowledgeService) -> ChatService:
-    chat_model = OllamaChatModel(
+def _build_chat_model(
+    settings: Settings,
+    *,
+    timeout: float,
+    max_output_tokens: int,
+    temperature: float,
+    seed: int,
+):
+    if settings.test_profile is not None:
+        return OpenAIChatModel(
+            settings.test_profile,
+            timeout=timeout,
+            max_output_tokens=max_output_tokens,
+            context_tokens=settings.chat_context_tokens,
+            temperature=temperature,
+            seed=seed,
+        )
+    return OllamaChatModel(
         settings.chat_base_url,
         settings.chat_model,
+        timeout=timeout,
+        max_output_tokens=max_output_tokens,
+        context_tokens=settings.chat_context_tokens,
+        temperature=temperature,
+        seed=seed,
+    )
+
+
+def build_chat_service(settings: Settings, service: KnowledgeService) -> ChatService:
+    chat_model = _build_chat_model(
+        settings,
         timeout=settings.chat_timeout_seconds,
         max_output_tokens=settings.chat_max_output_tokens,
-        context_tokens=settings.chat_context_tokens,
         temperature=settings.chat_temperature,
         seed=settings.chat_seed,
     )
-    if settings.test_profile is not None:
-        chat_model = OpenAIChatModel(settings.test_profile,
-            timeout=settings.chat_timeout_seconds,
-            max_output_tokens=settings.chat_max_output_tokens,
-            context_tokens=settings.chat_context_tokens,
-            temperature=settings.chat_temperature, seed=settings.chat_seed)
+    # Day 23: a dedicated rewrite model bounds the rewrite call by
+    # RAG_REWRITE_TIMEOUT_SECONDS without changing the D22 ChatModel contract.
+    rewrite_model = _build_chat_model(
+        settings,
+        timeout=settings.rag_rewrite_timeout_seconds,
+        max_output_tokens=settings.rag_rewrite_max_output_tokens,
+        temperature=settings.rag_rewrite_temperature,
+        seed=settings.chat_seed,
+    )
+    query_rewriter = ChatQueryRewriter(rewrite_model)
     runs_path = Path(settings.chat_runs_path)
     if not runs_path.is_absolute():
         runs_path = MODULE_DIR / runs_path
@@ -94,6 +125,12 @@ def build_chat_service(settings: Settings, service: KnowledgeService) -> ChatSer
         chars_per_token=settings.chat_context_chars_per_token,
         temperature=settings.chat_temperature,
         seed=settings.chat_seed,
+        query_rewriter=query_rewriter,
+        rag_filter_enabled=settings.rag_filter_enabled,
+        rag_rewrite_enabled=settings.rag_rewrite_enabled,
+        rag_min_score=settings.rag_min_score,
+        rag_prefilter_top_k=settings.rag_prefilter_top_k,
+        rag_filter_top_k=settings.rag_filter_top_k,
     )
 
 

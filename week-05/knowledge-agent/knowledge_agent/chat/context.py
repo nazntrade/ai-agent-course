@@ -26,6 +26,7 @@ class ContextPlan:
     reserved_output_tokens: int
     budget_method: str = BUDGET_METHOD
     overflow: bool = False
+    dropped_ids: list[str] = field(default_factory=list)
 
 
 class ContextBudget:
@@ -97,11 +98,15 @@ class ContextBudget:
         passed: list[dict[str, Any]] = []
         used = mandatory_tokens
         dropped = 0
+        dropped_ids: list[str] = []
         for candidate in candidates:
             estimated = self.estimate(str(candidate.get("text") or ""))
             if used + estimated > prompt_budget:
                 # Keep the whole chunk out and still try smaller later chunks.
                 dropped += 1
+                chunk_id = candidate.get("chunk_id")
+                if chunk_id is not None:
+                    dropped_ids.append(str(chunk_id))
                 continue
             used += estimated
             passed.append(
@@ -122,4 +127,5 @@ class ContextBudget:
             prompt_tokens_estimated=used,
             max_context_tokens=effective,
             reserved_output_tokens=self.reserved_output_tokens,
+            dropped_ids=dropped_ids,
         )

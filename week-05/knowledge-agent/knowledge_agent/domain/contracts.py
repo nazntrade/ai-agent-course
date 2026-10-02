@@ -204,6 +204,45 @@ class ChatResult:
         return payload
 
 
+@dataclass
+class RewriteResult:
+    """Query-rewrite outcome (SPEC D23 6.2). Never an HTTP error by itself."""
+
+    original_query: str
+    search_query: str
+    attempted: bool
+    used: bool
+    fallback: bool
+    reason: str | None = None
+    template_id: str = ""
+    template_hash: str = ""
+    finish_reason: str | None = None
+    usage: ChatUsage | None = None
+    latency_ms: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempted": self.attempted,
+            "used": self.used,
+            "fallback": self.fallback,
+            "reason": self.reason,
+            "original_query": self.original_query,
+            "search_query": self.search_query,
+            "template_id": self.template_id,
+            "template_hash": self.template_hash,
+            "finish_reason": self.finish_reason,
+            "usage": self.usage.to_dict() if self.usage else None,
+            "latency_ms": self.latency_ms,
+        }
+
+
+class QueryRewriter(ABC):
+    """Core contract: reformulates only the retrieval query (SPEC D23 7.2)."""
+
+    @abstractmethod
+    def rewrite(self, question: str) -> RewriteResult: ...
+
+
 # Provider-level streaming events: a tagged union of ``token`` and ``done``
 # (errors are raised as typed exceptions, not encoded as events; SPEC D22 6.1).
 ChatModelEvent = dict[str, Any]

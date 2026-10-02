@@ -100,6 +100,12 @@ class InvalidRequest(KnowledgeError):
     http_status = 422
 
 
+class InvalidThreshold(InvalidRequest):
+    """A relevance threshold outside [0, 1] (SPEC D23 8)."""
+
+    code = "invalid_threshold"
+
+
 class ChatError(KnowledgeError):
     """Chat provider and context errors (SPEC D22 7.2)."""
 

@@ -281,6 +281,100 @@ Ready-версии с legacy manifest без достоверного digest о�
   многосессионная память, полный многошаговый чат, resume/инкрементальная переиндексация,
   удаление старых версий, multi-process/Postgres/Docker, автоматическое скачивание моделей.
 
+## Day 23 — реранкинг и фильтрация
+
+Задача D23 (`docs/specs/day-23-rag-filtering/SPEC.md`) добавляет к RAG второй этап после
+поиска: **фильтр релевантности** с настраиваемым порогом cosine similarity и раздельными
+`prefilter_top_k` / `postfilter_top_k`, а также **отключаемый query rewrite**. Сравниваются
+четыре режима:
+
+- **A** — обычный RAG без фильтра и rewrite (**baseline**, это `with_rag`, а не «Без RAG»);
+- **B** — RAG + фильтр;
+- **C** — RAG + rewrite;
+- **D** — RAG + rewrite + фильтр.
+
+Поток: `вопрос → [QueryRewriter] → KnowledgeService.search (D21, без изменений) →
+[RelevanceFilter] → ContextBudget → PromptTemplate → ChatModel → citations`.
+Retrieval D21, индексы, метаданные, происхождение, «Без RAG», «С RAG» и сравнение D22
+сохранены; все D23-поля опциональны, дефолты выключены (`RAG_FILTER_ENABLED=0`,
+`RAG_REWRITE_ENABLED=0`), поэтому D22-совместимый запрос не меняет `retrieval.found`.
+
+Новые компоненты:
+
+- `knowledge_agent/chat/filtering.py` — `RelevanceFilter`: порог + postfilter top-K,
+  причины исключения разделены на `threshold` / `top_k` / `context_budget`;
+- `knowledge_agent/chat/rewrite.py` — `ChatQueryRewriter`: переформулирует только поисковый
+  запрос, генерация отвечает на исходный вопрос; промпт `rewrite-v1` без эталонов, готовых
+  ответов и истории; при ошибке/таймауте/пустом ответе — fallback на исходный запрос
+  с сохранённой причиной;
+- `knowledge_agent/chat/chat_service.py` — режимы A–D, `compare_modes`, трасса
+  (`original_query`, `search_query`, `candidates`+scores, `selected`, `passed`,
+  `exclusion_reasons`), раздельные метрики `rewrite` и генерации;
+- отдельный экземпляр `ChatModel` для rewrite с коротким timeout
+  (`RAG_REWRITE_TIMEOUT_SECONDS`), создаётся в `build_chat_service`;
+- API: D23-поля `ChatRequest` и `POST /api/chat/compare-modes`;
+- UI: большой чат сверху, панель `Retrieval settings`, показ `Search query`, трасса и
+  `Compare four modes`; новые элементы D23 — на английском, существующие русские панели D22
+  не переведены.
+
+Если фильтр отсекает все чанки, возвращается понятное «No relevant sources found» без вызова
+модели и без подмены режима обычным RAG. Отмена (разрыв клиента) закрывает провайдерский
+поток и не создаёт фиктивной успешной записи.
+
+### Команды D23
+
+| Команда | Назначение |
+| --- | --- |
+| `test.bat unit` | unit-тесты D21 + D22 + D23 (без сети и `.env`) |
+| `test.bat integration` | INT через `embed_stub` + `chat_stub` (loopback, TEMP) |
+| `test.bat scenario d23-rag-filtering` | полный D23 LIVE: калибровка порога + 10 вопросов × 4 режима |
+| `run_app.bat` | запуск приложения и панелей D22/D23 |
+
+Артефакты прогона сохраняются в `local-data/d23/` (в Git не попадают):
+`calibration.json` (`d23-calibration-v1`), `comparison.json` (`d23-comparison-v1`),
+`trace-sample.json` (`d23-trace-v1`) и `quality-assessment.md`.
+Калибровочный набор — `eval/d23/calibration-questions.json`; порог фиксируется до итогового
+сравнения и совпадает в `calibration.json` и `comparison.json`.
+
+### D23: итог реализации
+
+- UNIT: **389 passed** (`test.bat unit`); INT: **21 passed** (`test.bat integration`);
+  `smoke_test.bat` — PASS; фактический запуск `run_app.bat` — backend ready, UI на
+  `http://127.0.0.1:8770/`.
+- LIVE (`MODEL_CHECK_KIND: NETWORK`, `deepseek/deepseek-flash`, reasoning low; embeddings —
+  прежний `embeddinggemma:300m`): 10 вопросов D22 × 4 режима = **40 ответов** на одном
+  закреплённом индексе `structure`, пустая история, одинаковые настройки ответа.
+  `retrieval_passed_rate=0.95`, `unsupported_citation_rate=0.0`, `truncated_answers=0`,
+  `insufficient_sources_answers=2` (в т. ч. вопрос вне корпуса D22-Q10).
+- Пример раздельных метрик (Q01, режим C): rewrite usage `81/61/142`, rewrite latency
+  `1009 ms`; generation usage `1823/349/2172`, `latency_ms.chat=2054 ms`,
+  `latency_ms.total=3101 ms` (включает rewrite). `output_tokens_per_second` — **н/д**
+  (remote-провайдер не отдаёт timings).
+- Выбранный порог после калибровки — **0.45**. Порог `0.30` делал фильтр инертным; правило
+  калибровки изменено на «наибольший порог, сохраняющий ≥1 релевантный чанк на каждый
+  калибровочный вопрос». Лимит output rewrite поднят `64 → 1024` (при 64 reasoning-профиль
+  всегда отдавал пустой ответ); после исправления rewrite успешен 20/20.
+- Раздельная оценка (retrieval / полнота фактов / подтверждение источников) с вниманием к
+  Q06/Q07/Q08 и вопросу вне корпуса — в `quality-assessment.md`.
+
+### D23: границы и ограничения
+
+- **D21–D22 не изменены по контракту**: `/api/search`, `/api/index/*`, `/api/compare`,
+  `/api/chat`, `/api/chat/compare`, `usage` и `latency_ms.chat` генерации прежние.
+- Независимое ревью D23 выполнено в реальном браузере с выбранной моделью: проверены
+  четыре режима, порог, оба top-K, rewrite, источники, трасса и пустой фильтр без генерации.
+  Исправлено переполнение карточек сравнения; проверены ширины 720/1024/1280/1920 px.
+- Сохранённый LIVE-набор содержит 40 непустых результатов, без обрезанных генераций;
+  rewrite использован 20/20 раз. `retrieval_passed_rate=0.95` означает долю непустых
+  контекстов, а не точность ответов. Валидный citation ID не доказывает смысловую поддержку.
+- Общего прироста полноты фактов относительно baseline на этом наборе не выявлено:
+  фильтр отклоняет вопрос вне корпуса, но иногда теряет полезные сведения (например Q07).
+  Проверка смысловой поддержки источниками выборочная, не полный аудит всех утверждений.
+- `comparison.json` не хранит `section_path` в проекции; оценка разделов основана на
+  содержании и счётчиках, что зафиксировано в `quality-assessment.md`.
+- Гибридный/семантический reranker и ANN — по-прежнему Later; D23 ограничен cosine-порогом и
+  запросным rewrite.
+
 ## Поведение внешнего провайдера
 
 В исходном прогоне Ollama 0.34.4 `POST /api/show` не содержит поля `digest`; digest модели

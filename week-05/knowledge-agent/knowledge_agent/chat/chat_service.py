@@ -1,8 +1,12 @@
-"""ChatService: modes, comparison and streaming over D21 retrieval (SPEC D22).
+"""ChatService: modes, comparison and streaming over D21 retrieval.
 
-The service depends on the abstract ``KnowledgeService`` and ``ChatModel``; it
-never imports HTTP, SQLite or Ollama. Retrieval errors are propagated unchanged
-and are never masked by a non-RAG answer.
+D22 keeps its contracts: ``mode=with_rag``/``without_rag``, ``compare`` and the
+flat ``usage``/``latency_ms.chat`` generation metrics. Day 23 adds an optional
+relevance filter and query rewrite between ``search`` and the context budget,
+four comparison modes (A-D), a full selection trace and separately recorded
+rewrite metrics (SPEC D23). The service depends on the abstract
+``KnowledgeService``, ``ChatModel``, ``QueryRewriter`` and ``ChatRunStore``; it
+never imports HTTP, SQLite or Ollama.
 """
 
 from __future__ import annotations
@@ -12,15 +16,47 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Iterator, Mapping
 
-from ..domain.contracts import ChatModel, ChatResult, ChatRunStore
-from ..domain.errors import ChatInvalidResponse, InvalidRequest, KnowledgeError
+from ..domain.contracts import (
+    ChatModel,
+    ChatResult,
+    ChatRunStore,
+    QueryRewriter,
+    RewriteResult,
+)
+from ..domain.errors import (
+    ChatInvalidResponse,
+    InvalidRequest,
+    InvalidThreshold,
+    KnowledgeError,
+)
 from .citations import extract_citations
 from .context import BUDGET_METHOD, ContextBudget, ContextPlan
-from .prompts import PLAIN, RAG, PromptTemplate
+from .filtering import RelevanceFilter
+from .prompts import PLAIN, RAG, REWRITE, PromptTemplate
 
 _VALID_MODES = ("with_rag", "without_rag")
 _VALID_FILTER_MODES = ("with_rag", "without_rag", "compare")
 _VALID_KINDS = ("single", "compare")
+
+# ``rag_mode`` -> (use_filter, use_rewrite). A is the plain-RAG baseline.
+_RAG_MODES: dict[str, tuple[bool, bool]] = {
+    "A": (False, False),
+    "B": (True, False),
+    "C": (False, True),
+    "D": (True, True),
+}
+_D23_FIELDS = (
+    "use_filter",
+    "use_rewrite",
+    "prefilter_top_k",
+    "postfilter_top_k",
+    "min_score",
+    "rag_mode",
+)
+INSUFFICIENT_SOURCES_MESSAGE = (
+    "No relevant sources found in the selected index. "
+    "Lower the relevance threshold or ask another question."
+)
 
 
 def _utcnow() -> str:
@@ -45,6 +81,12 @@ class ChatService:
         temperature: float = 0.0,
         seed: int = 0,
         safety_margin: int = 64,
+        query_rewriter: QueryRewriter | None = None,
+        rag_filter_enabled: bool = False,
+        rag_rewrite_enabled: bool = False,
+        rag_min_score: float = 0.0,
+        rag_prefilter_top_k: int = 20,
+        rag_filter_top_k: int = 5,
     ) -> None:
         self.knowledge = knowledge_service
         self.chat_model = chat_model
@@ -54,6 +96,13 @@ class ChatService:
         self.reserved_output_tokens = int(reserved_output_tokens)
         self.temperature = temperature
         self.seed = seed
+        self.query_rewriter = query_rewriter
+        self.rag_filter_enabled = bool(rag_filter_enabled)
+        self.rag_rewrite_enabled = bool(rag_rewrite_enabled)
+        self.rag_min_score = float(rag_min_score)
+        self.rag_prefilter_top_k = int(rag_prefilter_top_k)
+        self.rag_filter_top_k = int(rag_filter_top_k)
+        self.filter = RelevanceFilter()
         self.budget = ContextBudget(
             max_context_tokens=max_context_tokens,
             reserved_output_tokens=reserved_output_tokens,
@@ -65,7 +114,7 @@ class ChatService:
     def chat(self, request: Mapping[str, Any]) -> dict[str, Any]:
         request = dict(request)
         plan = self._plan(request)
-        result = self.chat_model.chat(plan["messages"])
+        result = None if plan.get("deterministic") else self.chat_model.chat(plan["messages"])
         record = self._assemble(plan, result)
         if request.get("save_run", True):
             self.run_store.create_run(record)
@@ -110,7 +159,7 @@ class ChatService:
                 "created_at": created_at,
             }
         )
-        rag_result = self.chat_model.chat(rag_plan["messages"])
+        rag_result = None if rag_plan.get("deterministic") else self.chat_model.chat(rag_plan["messages"])
         plain_result = self.chat_model.chat(plain_plan["messages"])
         rag_record = self._assemble(rag_plan, rag_result)
         plain_record = self._assemble(plain_plan, plain_result)
@@ -152,9 +201,7 @@ class ChatService:
                 "context": round(
                     rag_record["latency_ms"]["context"] + plain_record["latency_ms"]["context"], 3
                 ),
-                "chat": round(
-                    rag_record["latency_ms"]["chat"] + plain_record["latency_ms"]["chat"], 3
-                ),
+                "chat": _sum_latency(rag_record, plain_record),
                 "total": round(
                     rag_record["latency_ms"]["total"] + plain_record["latency_ms"]["total"], 3
                 ),
@@ -164,6 +211,111 @@ class ChatService:
             "retrieval": rag_record["retrieval"],
             "branches": {"with_rag": rag_record, "without_rag": plain_record},
             "comparison": comparison,
+            "errors": [],
+            "manual_evaluation": None,
+        }
+        if request.get("save_run", True):
+            self.run_store.create_run(record)
+        return record
+
+    def compare_modes(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Run the four D23 modes (A-D) on one pinned index and settings."""
+
+        request = dict(request)
+        collection_id = request.get("collection_id")
+        if not collection_id:
+            raise InvalidRequest("collection_id is required for a mode comparison.")
+        question = _validated_question(request)
+        threshold = _validated_threshold(request, self.rag_min_score)
+        prefilter = _int_field(
+            request.get("prefilter_top_k"), self.rag_prefilter_top_k, "prefilter_top_k"
+        )
+        postfilter = _int_field(
+            request.get("postfilter_top_k"), self.rag_filter_top_k, "postfilter_top_k"
+        )
+        _validate_top_k(prefilter, postfilter)
+
+        run_id = self._new_run_id("d23")
+        created_at = _utcnow()
+        version = self.knowledge.resolve_ready_index(
+            collection_id, request.get("index_version_id"), request.get("strategy")
+        )
+        pinned = version["index_version_id"]
+
+        modes: list[dict[str, Any]] = []
+        for mode_id, (use_filter, use_rewrite) in _RAG_MODES.items():
+            plan = self._plan(
+                {
+                    "mode": "with_rag",
+                    "question": question,
+                    "collection_id": collection_id,
+                    "index_version_id": pinned,
+                    "strategy": request.get("strategy"),
+                    "use_filter": use_filter,
+                    "use_rewrite": use_rewrite,
+                    "prefilter_top_k": prefilter,
+                    "postfilter_top_k": postfilter,
+                    "min_score": threshold,
+                    "max_context_tokens": request.get("max_context_tokens"),
+                    "run_id": run_id,
+                    "created_at": created_at,
+                }
+            )
+            result = None if plan.get("deterministic") else self.chat_model.chat(plan["messages"])
+            record = self._assemble(plan, result)
+            modes.append(
+                {
+                    "id": mode_id,
+                    "use_filter": use_filter,
+                    "use_rewrite": use_rewrite,
+                    "branch": record,
+                }
+            )
+
+        model_snapshot = modes[0]["branch"]["model"]
+        same_model = all(
+            item["branch"]["model"].get("provider") == model_snapshot.get("provider")
+            and item["branch"]["model"].get("model") == model_snapshot.get("model")
+            for item in modes
+        )
+        same_settings = all(
+            item["branch"]["model"].get("settings") == model_snapshot.get("settings")
+            for item in modes
+        )
+        comparison = {
+            "same_model": same_model,
+            "same_settings": same_settings,
+            "index_version_id": pinned,
+            "threshold": threshold,
+            "prefilter_top_k": prefilter,
+            "postfilter_top_k": postfilter,
+            "prompt_templates": {
+                "rewrite": REWRITE.template_id,
+                "generation": RAG.template_id,
+            },
+            "policy_differences": [
+                "B and D apply the relevance threshold",
+                "C and D replace the retrieval query with a rewritten one",
+                "A is plain RAG (no filter, no rewrite)",
+            ],
+        }
+        record = {
+            "schema_version": "chat-run-v1",
+            "run_id": run_id,
+            "created_at": created_at,
+            "kind": "compare",
+            "result_kind": "compare",
+            "mode": "compare",
+            "comparison_kind": "four_modes",
+            "question": question,
+            "model": model_snapshot,
+            "index": modes[0]["branch"]["index"],
+            "comparison": comparison,
+            "modes": modes,
+            "usage": None,
+            "latency_ms": _aggregate_latency([item["branch"] for item in modes]),
+            "answer": None,
+            "retrieval": None,
             "errors": [],
             "manual_evaluation": None,
         }
@@ -189,17 +341,29 @@ class ChatService:
             "mode": plan["mode"],
             "model": plan["model"],
             "index": plan["index"],
+            "rag_mode": plan.get("rag_mode"),
         }
         if plan["mode"] == "with_rag" and plan["retrieval"] is not None:
             retrieval = plan["retrieval"]
             yield {
                 "type": "sources",
                 "found_count": retrieval["found_count"],
+                "selected_count": retrieval["selected_count"],
                 "passed_count": retrieval["passed_count"],
+                "search_query": plan["search_query"],
                 "passed": retrieval["passed"],
             }
+        if plan.get("deterministic"):
+            record = self._assemble(plan, None)
+            if save_run:
+                self.run_store.create_run(record)
+            yield {"type": "done", "answer": record}
+            return
+
+        stream = None
         try:
-            for event in self.chat_model.stream_chat(plan["messages"]):
+            stream = self.chat_model.stream_chat(plan["messages"])
+            for event in stream:
                 if event.get("type") == "token":
                     yield {"type": "token", "text": event.get("text", "")}
                 elif event.get("type") == "done":
@@ -224,6 +388,11 @@ class ChatService:
                     "message": f"Unexpected chat error ({type(exc).__name__}).",
                 },
             }
+        finally:
+            # A client disconnect delivers GeneratorExit (a BaseException), which
+            # is never caught above; closing the provider iterator releases its
+            # HTTP response/socket. A pure cancellation saves no fake record.
+            _close_stream(stream)
 
     def _save_partial(
         self, plan: Mapping[str, Any], exc: Exception, save_run: bool
@@ -307,13 +476,13 @@ class ChatService:
         if mode not in _VALID_MODES:
             raise InvalidRequest("mode must be 'with_rag' or 'without_rag'.")
         question = _validated_question(request)
-        top_k = _validated_top_k(request, self.top_k)
         run_id = str(request.get("run_id") or self._new_run_id())
         created_at = str(request.get("created_at") or _utcnow())
         model_snapshot = self._identity_snapshot()
         model_context_length = model_snapshot.get("context_length")
 
         if mode == "without_rag":
+            # Day 23 fields are ignored here: exactly one plain call (D22 shape).
             started = perf_counter()
             template = PLAIN
             messages = template.build(question)
@@ -339,6 +508,18 @@ class ChatService:
                 "created_at": created_at,
                 "mode": mode,
                 "question": question,
+                "original_query": question,
+                "search_query": question,
+                "rewrite": _no_rewrite(question).to_dict(),
+                "rewrite_latency": 0.0,
+                "rag_mode": None,
+                "use_filter": False,
+                "use_rewrite": False,
+                "min_score": None,
+                "prefilter_top_k": None,
+                "postfilter_top_k": None,
+                "deterministic": False,
+                "insufficient_message": None,
                 "model": model_snapshot,
                 "template": template,
                 "messages": messages,
@@ -352,11 +533,18 @@ class ChatService:
         collection_id = request.get("collection_id")
         if not collection_id:
             raise InvalidRequest("collection_id is required for mode=with_rag.")
+        use_filter, use_rewrite, rag_mode = self._resolve_rag_mode(request)
+        threshold = _validated_threshold(request, self.rag_min_score)
+        prefilter, postfilter = self._resolve_top_k(request)
+
+        rewrite_dict, rewrite_ms = self._rewrite(question, use_rewrite)
+        search_query = str(rewrite_dict.get("search_query") or question)
+
         started = perf_counter()
         search = self.knowledge.search(
             collection_id,
-            question,
-            top_k=top_k,
+            search_query,
+            top_k=prefilter,
             index_version_id=request.get("index_version_id"),
             strategy=request.get("strategy"),
         )
@@ -365,20 +553,28 @@ class ChatService:
         candidates = [
             {
                 "rank": fragment.get("rank"),
+                "score": fragment.get("score"),
                 "chunk_id": fragment.get("chunk_id"),
                 "text": fragment.get("text"),
                 "metadata": fragment.get("metadata") or {},
             }
             for fragment in found
         ]
+        focus = self.filter.apply(
+            candidates,
+            threshold=threshold if use_filter else 0.0,
+            postfilter_top_k=postfilter,
+        )
+        selected = focus.selected
         plan: ContextPlan = self.budget.plan(
             mandatory_texts=[RAG.system, question],
-            candidates=candidates,
+            candidates=selected,
             request_max_context_tokens=request.get("max_context_tokens"),
             model_context_length=model_context_length,
         )
         context_ms = round((perf_counter() - started) * 1000 - retrieval_ms, 3)
-        messages = RAG.build(question, plan.passed)
+        deterministic = bool(use_filter and not selected)
+        messages = None if deterministic else RAG.build(question, plan.passed)
         version = self.knowledge.get_index_version(search["index_version_id"])
         index = {
             "collection_id": collection_id,
@@ -387,15 +583,9 @@ class ChatService:
             "fingerprint": (version or {}).get("fingerprint"),
         }
         retrieval = {
-            "found": [
-                {
-                    "rank": fragment.get("rank"),
-                    "score": fragment.get("score"),
-                    "chunk_id": fragment.get("chunk_id"),
-                    "metadata": fragment.get("metadata") or {},
-                }
-                for fragment in found
-            ],
+            "found": [self._candidate_projection(item) for item in candidates],
+            "candidates": [self._candidate_projection(item) for item in candidates],
+            "selected": [self._candidate_projection(item) for item in selected],
             "passed": [
                 {
                     "rank": item.get("rank"),
@@ -405,8 +595,14 @@ class ChatService:
                 }
                 for item in plan.passed
             ],
-            "found_count": len(found),
+            "found_count": len(candidates),
+            "selected_count": len(selected),
             "passed_count": len(plan.passed),
+            "exclusion_reasons": {
+                "threshold": focus.threshold_excluded,
+                "top_k": focus.top_k_excluded,
+                "context_budget": list(plan.dropped_ids),
+            },
         }
         context = {
             "budget_method": plan.budget_method,
@@ -422,6 +618,18 @@ class ChatService:
             "created_at": created_at,
             "mode": mode,
             "question": question,
+            "original_query": question,
+            "search_query": search_query,
+            "rewrite": rewrite_dict,
+            "rewrite_latency": rewrite_ms,
+            "rag_mode": rag_mode,
+            "use_filter": use_filter,
+            "use_rewrite": use_rewrite,
+            "min_score": threshold,
+            "prefilter_top_k": prefilter,
+            "postfilter_top_k": postfilter,
+            "deterministic": deterministic,
+            "insufficient_message": INSUFFICIENT_SOURCES_MESSAGE,
             "model": model_snapshot,
             "template": RAG,
             "messages": messages,
@@ -432,67 +640,87 @@ class ChatService:
             "latency_ms": {"retrieval": retrieval_ms, "context": context_ms},
         }
 
+    def _resolve_rag_mode(self, request: Mapping[str, Any]) -> tuple[bool, bool, str]:
+        """Resolve A-D from ``rag_mode``/booleans, with config defaults as fallback.
+
+        When the request omits ``use_filter``/``use_rewrite``, the configured
+        D23 defaults apply (both ``0`` keep the D22 behaviour, K2).
+        """
+
+        raw_mode = request.get("rag_mode")
+        use_filter = request.get("use_filter")
+        use_rewrite = request.get("use_rewrite")
+        if raw_mode is not None:
+            if raw_mode not in _RAG_MODES:
+                raise InvalidRequest("rag_mode must be one of A, B, C, D.")
+            expected_filter, expected_rewrite = _RAG_MODES[raw_mode]
+            if use_filter is not None and bool(use_filter) != expected_filter:
+                raise InvalidRequest("rag_mode conflicts with use_filter.")
+            if use_rewrite is not None and bool(use_rewrite) != expected_rewrite:
+                raise InvalidRequest("rag_mode conflicts with use_rewrite.")
+            return expected_filter, expected_rewrite, str(raw_mode)
+        resolved_filter = self.rag_filter_enabled if use_filter is None else bool(use_filter)
+        resolved_rewrite = self.rag_rewrite_enabled if use_rewrite is None else bool(use_rewrite)
+        for mode_id, pair in _RAG_MODES.items():
+            if pair == (resolved_filter, resolved_rewrite):
+                return resolved_filter, resolved_rewrite, mode_id
+        raise InvalidRequest("Invalid filter/rewrite combination.")
+
+    def _resolve_top_k(self, request: Mapping[str, Any]) -> tuple[int, int]:
+        legacy = _validated_top_k(request, self.top_k)
+        d23_requested = (
+            self.rag_filter_enabled
+            or self.rag_rewrite_enabled
+            or any(request.get(field) is not None for field in _D23_FIELDS)
+        )
+        raw_prefilter = request.get("prefilter_top_k")
+        if raw_prefilter is not None:
+            prefilter = _int_field(raw_prefilter, self.rag_prefilter_top_k, "prefilter_top_k")
+        elif d23_requested:
+            prefilter = int(self.rag_prefilter_top_k)
+        else:
+            prefilter = legacy
+        raw_postfilter = request.get("postfilter_top_k")
+        postfilter = (
+            _int_field(raw_postfilter, self.rag_filter_top_k, "postfilter_top_k")
+            if raw_postfilter is not None
+            else prefilter
+        )
+        _validate_top_k(prefilter, postfilter)
+        return prefilter, postfilter
+
+    def _rewrite(self, question: str, use_rewrite: bool) -> tuple[dict[str, Any], float]:
+        if not use_rewrite or self.query_rewriter is None:
+            return _no_rewrite(question).to_dict(), 0.0
+        result = self.query_rewriter.rewrite(question)
+        latency = float(result.latency_ms or 0.0)
+        return result.to_dict(), latency
+
     def _assemble(self, plan: Mapping[str, Any], result: ChatResult | None) -> dict[str, Any]:
         # A provider result is only persisted when it carries real answer text;
         # this also covers stream ``done`` events before they reach the store.
         if result is not None and not result.text.strip():
             raise ChatInvalidResponse("The provider returned an empty answer.")
-        if result is None:
-            return {
-                "schema_version": "chat-run-v1",
-                "run_id": plan["run_id"],
-                "created_at": plan["created_at"],
-                "result_kind": "single",
-                "mode": plan["mode"],
-                "question": plan["question"],
-                "model": plan["model"],
-                "index": plan["index"],
-                "prompt": {
-                    "template_id": plan["template"].template_id,
-                    "hash": plan["template"].content_hash(),
-                },
-                "retrieval": plan["retrieval"],
-                "context": self._context_with_actual(plan, None),
-                "usage": None,
-                "latency_ms": {
-                    "retrieval": plan["latency_ms"]["retrieval"],
-                    "context": plan["latency_ms"]["context"],
-                    "chat": None,
-                    "total": round(
-                        plan["latency_ms"]["retrieval"] + plan["latency_ms"]["context"], 3
-                    ),
-                },
-                "output_tokens_per_second": None,
-                "answer": None,
-                "errors": [],
-                "manual_evaluation": None,
-            }
-        chat_ms = result.latency_ms
-        latency = {
-            "retrieval": plan["latency_ms"]["retrieval"],
-            "context": plan["latency_ms"]["context"],
-            "chat": chat_ms,
-            "total": round(
-                plan["latency_ms"]["retrieval"] + plan["latency_ms"]["context"] + chat_ms, 3
-            ),
-        }
-        if plan["mode"] == "without_rag":
-            citations = {"valid": [], "unsupported": []}
-        else:
-            citations = extract_citations(result.text, plan["passed_ids"])
-        answer = {
-            "text": result.text,
-            "finish_reason": result.finish_reason,
-            "truncated": result.finish_reason == "length",
-            "citations": citations,
-        }
-        return {
+
+        retrieval_ms = plan["latency_ms"]["retrieval"]
+        context_ms = plan["latency_ms"]["context"]
+        rewrite_ms = float(plan.get("rewrite_latency") or 0.0)
+        base = {
             "schema_version": "chat-run-v1",
             "run_id": plan["run_id"],
             "created_at": plan["created_at"],
             "result_kind": "single",
             "mode": plan["mode"],
             "question": plan["question"],
+            "original_query": plan.get("original_query", plan["question"]),
+            "search_query": plan.get("search_query", plan["question"]),
+            "rewrite": plan.get("rewrite"),
+            "rag_mode": plan.get("rag_mode"),
+            "use_filter": plan.get("use_filter"),
+            "use_rewrite": plan.get("use_rewrite"),
+            "min_score": plan.get("min_score"),
+            "prefilter_top_k": plan.get("prefilter_top_k"),
+            "postfilter_top_k": plan.get("postfilter_top_k"),
             "model": plan["model"],
             "index": plan["index"],
             "prompt": {
@@ -501,12 +729,69 @@ class ChatService:
             },
             "retrieval": plan["retrieval"],
             "context": self._context_with_actual(plan, result),
-            "usage": result.usage.to_dict() if result.usage else None,
-            "latency_ms": latency,
-            "output_tokens_per_second": result.output_tokens_per_second,
-            "answer": answer,
             "errors": [],
             "manual_evaluation": None,
+        }
+
+        if plan.get("deterministic"):
+            base["usage"] = None
+            base["latency_ms"] = {
+                "retrieval": retrieval_ms,
+                "context": context_ms,
+                "chat": None,
+                "total": round(retrieval_ms + context_ms + rewrite_ms, 3),
+            }
+            base["output_tokens_per_second"] = None
+            base["answer"] = {
+                "text": plan.get("insufficient_message") or INSUFFICIENT_SOURCES_MESSAGE,
+                "finish_reason": None,
+                "truncated": False,
+                "citations": {"valid": [], "unsupported": []},
+                "insufficient_sources": True,
+            }
+            return base
+
+        if result is None:
+            base["usage"] = None
+            base["latency_ms"] = {
+                "retrieval": retrieval_ms,
+                "context": context_ms,
+                "chat": None,
+                "total": round(retrieval_ms + context_ms + rewrite_ms, 3),
+            }
+            base["output_tokens_per_second"] = None
+            base["answer"] = None
+            return base
+
+        chat_ms = result.latency_ms
+        if plan["mode"] == "without_rag":
+            citations = {"valid": [], "unsupported": []}
+        else:
+            citations = extract_citations(result.text, plan["passed_ids"])
+        base["usage"] = result.usage.to_dict() if result.usage else None
+        base["latency_ms"] = {
+            "retrieval": retrieval_ms,
+            "context": context_ms,
+            "chat": chat_ms,
+            "total": round(retrieval_ms + context_ms + chat_ms + rewrite_ms, 3),
+        }
+        base["output_tokens_per_second"] = result.output_tokens_per_second
+        base["answer"] = {
+            "text": result.text,
+            "finish_reason": result.finish_reason,
+            "truncated": result.finish_reason == "length",
+            "citations": citations,
+            "insufficient_sources": False,
+        }
+        return base
+
+    @staticmethod
+    def _candidate_projection(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "rank": item.get("rank"),
+            "score": item.get("score"),
+            "chunk_id": item.get("chunk_id"),
+            "metadata": item.get("metadata") or {},
         }
 
     def _context_with_actual(
@@ -536,8 +821,55 @@ class ChatService:
         }
 
     @staticmethod
-    def _new_run_id() -> str:
-        return f"d22-{_run_stamp()}-{secrets.token_hex(4)}"
+    def _new_run_id(prefix: str = "d22") -> str:
+        return f"{prefix}-{_run_stamp()}-{secrets.token_hex(4)}"
+
+
+def _no_rewrite(question: str) -> RewriteResult:
+    return RewriteResult(
+        original_query=question,
+        search_query=question,
+        attempted=False,
+        used=False,
+        fallback=False,
+        reason=None,
+        template_id="",
+        template_hash="",
+        finish_reason=None,
+        usage=None,
+        latency_ms=0.0,
+    )
+
+
+def _close_stream(stream: Any) -> None:
+    if stream is None:
+        return
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - closing must never mask the outcome
+            pass
+
+
+def _sum_latency(*records: Mapping[str, Any]) -> float:
+    total = 0.0
+    for record in records:
+        value = (record.get("latency_ms") or {}).get("chat")
+        total += float(value or 0.0)
+    return round(total, 3)
+
+
+def _aggregate_latency(branches: list[Mapping[str, Any]]) -> dict[str, Any]:
+    def total(key: str) -> float:
+        return round(sum(float((branch.get("latency_ms") or {}).get(key) or 0.0) for branch in branches), 3)
+
+    return {
+        "retrieval": total("retrieval"),
+        "context": total("context"),
+        "chat": total("chat"),
+        "total": total("total"),
+    }
 
 
 def _validated_question(request: Mapping[str, Any]) -> str:
@@ -558,3 +890,32 @@ def _validated_top_k(request: Mapping[str, Any], default: int) -> int:
     if top_k < 1 or top_k > 50:
         raise InvalidRequest("top_k must be between 1 and 50.")
     return top_k
+
+
+def _int_field(raw: Any, default: int, name: str) -> int:
+    if raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequest(f"{name} must be an integer.") from exc
+
+
+def _validated_threshold(request: Mapping[str, Any], default: float) -> float:
+    raw = request.get("min_score")
+    try:
+        value = float(default if raw is None else raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidThreshold("min_score must be a number between 0 and 1.") from exc
+    if not 0.0 <= value <= 1.0:
+        raise InvalidThreshold("min_score must be between 0 and 1.")
+    return value
+
+
+def _validate_top_k(prefilter: int, postfilter: int) -> None:
+    if prefilter < 1 or prefilter > 50:
+        raise InvalidRequest("prefilter_top_k must be between 1 and 50.")
+    if postfilter < 1 or postfilter > 50:
+        raise InvalidRequest("postfilter_top_k must be between 1 and 50.")
+    if postfilter > prefilter:
+        raise InvalidRequest("postfilter_top_k must not exceed prefilter_top_k.")

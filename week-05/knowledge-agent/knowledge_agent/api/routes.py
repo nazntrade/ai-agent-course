@@ -48,6 +48,26 @@ class ChatRequest(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=50)
     max_context_tokens: int | None = Field(default=None, ge=1)
     save_run: bool = True
+    # Day 23 optional retrieval controls (SPEC D23 11.1). ``min_score`` is
+    # unbounded here so the service can return the dedicated invalid_threshold.
+    use_filter: bool | None = None
+    use_rewrite: bool | None = None
+    prefilter_top_k: int | None = Field(default=None, ge=1, le=50)
+    postfilter_top_k: int | None = Field(default=None, ge=1, le=50)
+    min_score: float | None = None
+    rag_mode: Literal["A", "B", "C", "D"] | None = None
+
+
+class CompareModesRequest(BaseModel):
+    collection_id: str
+    index_version_id: str | None = None
+    strategy: str | None = None
+    question: str = Field(min_length=1, max_length=2000)
+    prefilter_top_k: int | None = Field(default=None, ge=1, le=50)
+    postfilter_top_k: int | None = Field(default=None, ge=1, le=50)
+    max_context_tokens: int | None = Field(default=None, ge=1)
+    min_score: float | None = None
+    save_run: bool = True
 
 
 class CompareRequest(BaseModel):
@@ -167,6 +187,10 @@ def create_router(service: KnowledgeService, chat_service: Any | None = None) ->
     def chat_compare(body: CompareRequest) -> dict[str, Any]:
         return _require_chat(chat_service).compare(_compare_payload(body))
 
+    @router.post("/chat/compare-modes")
+    def chat_compare_modes(body: CompareModesRequest) -> dict[str, Any]:
+        return _require_chat(chat_service).compare_modes(_compare_modes_payload(body))
+
     @router.get("/chat-runs")
     def list_chat_runs(
         limit: int = Query(default=20, ge=1, le=200),
@@ -209,6 +233,26 @@ def _chat_payload(body: ChatRequest) -> dict[str, Any]:
         "question": body.question,
         "top_k": body.top_k,
         "max_context_tokens": body.max_context_tokens,
+        "save_run": body.save_run,
+        "use_filter": body.use_filter,
+        "use_rewrite": body.use_rewrite,
+        "prefilter_top_k": body.prefilter_top_k,
+        "postfilter_top_k": body.postfilter_top_k,
+        "min_score": body.min_score,
+        "rag_mode": body.rag_mode,
+    }
+
+
+def _compare_modes_payload(body: CompareModesRequest) -> dict[str, Any]:
+    return {
+        "collection_id": body.collection_id,
+        "index_version_id": body.index_version_id,
+        "strategy": body.strategy,
+        "question": body.question,
+        "prefilter_top_k": body.prefilter_top_k,
+        "postfilter_top_k": body.postfilter_top_k,
+        "max_context_tokens": body.max_context_tokens,
+        "min_score": body.min_score,
         "save_run": body.save_run,
     }
 

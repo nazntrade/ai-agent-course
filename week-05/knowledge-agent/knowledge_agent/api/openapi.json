@@ -76,6 +76,17 @@
             ],
             "title": "Max Context Tokens"
           },
+          "min_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Score"
+          },
           "mode": {
             "enum": [
               "with_rag",
@@ -84,11 +95,54 @@
             "title": "Mode",
             "type": "string"
           },
+          "postfilter_top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postfilter Top K"
+          },
+          "prefilter_top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefilter Top K"
+          },
           "question": {
             "maxLength": 2000,
             "minLength": 1,
             "title": "Question",
             "type": "string"
+          },
+          "rag_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "A",
+                  "B",
+                  "C",
+                  "D"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rag Mode"
           },
           "save_run": {
             "default": true,
@@ -118,6 +172,28 @@
               }
             ],
             "title": "Top K"
+          },
+          "use_filter": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Filter"
+          },
+          "use_rewrite": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Rewrite"
           }
         },
         "required": [
@@ -140,6 +216,102 @@
           "name"
         ],
         "title": "CollectionCreate",
+        "type": "object"
+      },
+      "CompareModesRequest": {
+        "properties": {
+          "collection_id": {
+            "title": "Collection Id",
+            "type": "string"
+          },
+          "index_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Index Version Id"
+          },
+          "max_context_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Context Tokens"
+          },
+          "min_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Score"
+          },
+          "postfilter_top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postfilter Top K"
+          },
+          "prefilter_top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefilter Top K"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "save_run": {
+            "default": true,
+            "title": "Save Run",
+            "type": "boolean"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          }
+        },
+        "required": [
+          "collection_id",
+          "question"
+        ],
+        "title": "CompareModesRequest",
         "type": "object"
       },
       "CompareRequest": {
@@ -628,6 +800,45 @@
           }
         },
         "summary": "Chat Compare"
+      }
+    },
+    "/api/chat/compare-modes": {
+      "post": {
+        "operationId": "chat_compare_modes_api_chat_compare_modes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompareModesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Chat Compare Modes Api Chat Compare Modes Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Chat Compare Modes"
       }
     },
     "/api/chat/stream": {

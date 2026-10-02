@@ -27,14 +27,21 @@ def count_input_tokens(text: str) -> int:
 def _response_text(messages: list[dict[str, Any]]) -> str:
     question = ""
     chunk_id = None
+    rewrite = False
     for message in messages:
         content = str(message.get("content") or "")
+        if message.get("role") == "system" and "rewrite" in content.lower():
+            rewrite = True
         if message.get("role") == "user":
             match = _CHUNK_RE.search(content)
             if match and chunk_id is None:
                 chunk_id = match.group(1)
             if "<context>" not in content and content.strip() and not question:
                 question = content.strip()
+    if rewrite:
+        # Deterministic, single-line rewrite that differs from the question so
+        # the D23 trace can show original_query != search_query (not inference).
+        return "retrieval query: " + (question[:100] or "query")
     answer = f"[stub] Answer for: {question[:160]}"
     if chunk_id:
         answer += f" Source [{chunk_id}]."

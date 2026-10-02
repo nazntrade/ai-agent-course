@@ -485,13 +485,18 @@ async function loadChunks() {
 
 function setChatBusy(busy) {
   state.chatBusy = busy;
-  for (const id of ["chat-plain", "chat-rag", "chat-compare"]) $(id).disabled = busy;
+  for (const id of ["chat-plain", "chat-rag", "chat-compare", "d23-ask", "d23-compare"]) {
+    $(id).disabled = busy;
+  }
 }
 
 function clearChatOutput() {
   $("chat-answer").textContent = "";
   $("chat-sources").textContent = "";
   $("chat-compare-result").textContent = "";
+  $("chat-search-query").textContent = "";
+  $("d23-trace").textContent = "";
+  $("d23-compare-result").textContent = "";
 }
 
 function chatPayload(mode) {
@@ -734,6 +739,202 @@ async function runChatCompare() {
   }
 }
 
+function d23Payload() {
+  const payload = {
+    mode: "with_rag",
+    question: $("chat-question").value.trim(),
+    top_k: Number($("chat-top-k").value) || 5,
+    rag_mode: $("d23-mode").value,
+    min_score: Number($("d23-min-score").value),
+    prefilter_top_k: Number($("d23-prefilter").value) || 20,
+    postfilter_top_k: Number($("d23-postfilter").value) || 5,
+  };
+  const maxContext = Number($("chat-max-context").value);
+  if (maxContext > 0) payload.max_context_tokens = maxContext;
+  if (state.collectionId) payload.collection_id = state.collectionId;
+  const strategy = $("chat-strategy").value;
+  if (strategy !== "active") payload.strategy = strategy;
+  return payload;
+}
+
+function renderD23Trace(record) {
+  const searchQuery = $("chat-search-query");
+  searchQuery.textContent = "";
+  if (record.original_query && record.search_query && record.original_query !== record.search_query) {
+    let text = `Search query: ${record.search_query}`;
+    if (record.rewrite && record.rewrite.fallback) {
+      text += ` (rewrite fallback: ${record.rewrite.reason || "unknown"})`;
+    }
+    searchQuery.textContent = text;
+  } else if (record.use_rewrite) {
+    searchQuery.textContent = `Search query: ${record.search_query || record.original_query || ""}`;
+  }
+  const container = $("d23-trace");
+  container.textContent = "";
+  const retrieval = record.retrieval;
+  if (!retrieval) return;
+  const reasons = retrieval.exclusion_reasons || {};
+  const parts = [
+    `Mode ${record.rag_mode || "-"}`,
+    `candidates ${retrieval.found_count}`,
+    `selected ${retrieval.selected_count}`,
+    `passed ${retrieval.passed_count}`,
+    `excluded threshold ${(reasons.threshold || []).length} / top_k ${(reasons.top_k || []).length} / budget ${(reasons.context_budget || []).length}`,
+  ];
+  const rewrite = record.rewrite || {};
+  if (rewrite.attempted) {
+    parts.push(`rewrite ${rewrite.used ? "used" : "fallback"} ${rewrite.latency_ms ?? "n/a"} ms`);
+  }
+  container.textContent = parts.join(" · ");
+}
+
+async function runD23Ask() {
+  if (state.chatBusy) return;
+  const question = $("chat-question").value.trim();
+  if (!question) {
+    showError("Enter a question.");
+    return;
+  }
+  if (!state.collectionId) {
+    showError("Select a collection first.");
+    return;
+  }
+  showError("");
+  const requestId = ++state.chatRequestId;
+  setChatBusy(true);
+  clearChatOutput();
+  $("chat-status").textContent = "Waiting for the model…";
+  try {
+    const record = await api("/api/chat", { method: "POST", body: JSON.stringify(d23Payload()) });
+    if (requestId !== state.chatRequestId) return;
+    renderChatAnswer(record.answer || {});
+    renderChatSources(record.retrieval);
+    renderD23Trace(record);
+    $("chat-status").textContent = `Done · ${chatUsageLine(record)}`;
+  } catch (error) {
+    if (requestId === state.chatRequestId) {
+      showError(error.message);
+      $("chat-status").textContent = "Error";
+    }
+  } finally {
+    if (requestId === state.chatRequestId) setChatBusy(false);
+  }
+}
+
+function renderD23Compare(record) {
+  const container = $("d23-compare-result");
+  container.textContent = "";
+  const comparison = record.comparison || {};
+  const policy = document.createElement("div");
+  policy.className = "meta";
+  policy.textContent =
+    `Threshold ${comparison.threshold} · prefilter ${comparison.prefilter_top_k} / postfilter ` +
+    `${comparison.postfilter_top_k} · same model ${comparison.same_model ? "yes" : "no"} · ` +
+    `same settings ${comparison.same_settings ? "yes" : "no"}`;
+  container.appendChild(policy);
+  const row = document.createElement("div");
+  row.className = "compare-columns four";
+  for (const mode of record.modes || []) {
+    const branch = mode.branch || {};
+    const column = document.createElement("div");
+    column.className = "compare-column";
+    const heading = document.createElement("h3");
+    heading.textContent =
+      `${mode.id} · filter ${mode.use_filter ? "on" : "off"} · rewrite ${mode.use_rewrite ? "on" : "off"}`;
+    column.appendChild(heading);
+    const answer = document.createElement("div");
+    answer.className = "text";
+    answer.textContent = (branch.answer && branch.answer.text) || "";
+    column.appendChild(answer);
+    const rewrite = branch.rewrite || {};
+    const latency = branch.latency_ms || {};
+    const generation = document.createElement("div");
+    generation.className = "meta";
+    const finishReason = branch.answer ? (branch.answer.finish_reason ?? "n/a") : "n/a";
+    const truncated = branch.answer && branch.answer.truncated ? "yes" : "no";
+    generation.textContent =
+      `${branch.rag_mode || mode.id} · finish_reason ${finishReason} · truncated ${truncated} · ` +
+      `gen ${chatUsageLine(branch)} · gen latency ${latency.chat ?? "n/a"} ms (total ${latency.total ?? "n/a"} ms)`;
+    column.appendChild(generation);
+    const rewriteLine = document.createElement("div");
+    rewriteLine.className = "meta";
+    if (rewrite.attempted) {
+      const usage = rewrite.usage
+        ? `in ${rewrite.usage.input_tokens}/out ${rewrite.usage.output_tokens}`
+        : "usage n/a";
+      rewriteLine.textContent =
+        `rewrite ${rewrite.used ? "used" : "fallback"} · ${rewrite.latency_ms ?? "n/a"} ms · ${usage}` +
+        (rewrite.fallback ? ` (${rewrite.reason || "unknown"})` : "");
+    } else {
+      rewriteLine.textContent = "rewrite off";
+    }
+    column.appendChild(rewriteLine);
+    if (branch.retrieval) {
+      const sources = document.createElement("div");
+      sources.className = "meta";
+      sources.textContent =
+        `found ${branch.retrieval.found_count}, selected ${branch.retrieval.selected_count}, ` +
+        `passed ${branch.retrieval.passed_count}`;
+      column.appendChild(sources);
+      const list = document.createElement("ul");
+      list.className = "compare-sources";
+      for (const item of branch.retrieval.passed || []) {
+        const entry = document.createElement("li");
+        const metadata = item.metadata || {};
+        const origin = metadata.source_path || metadata.section_path || "";
+        entry.textContent = `[${item.rank}] ${item.chunk_id}${origin ? " · " + origin : ""}`;
+        list.appendChild(entry);
+      }
+      if (list.childNodes.length) column.appendChild(list);
+    }
+    row.appendChild(column);
+  }
+  container.appendChild(row);
+}
+
+async function runD23Compare() {
+  if (state.chatBusy) return;
+  const question = $("chat-question").value.trim();
+  if (!question) {
+    showError("Enter a question.");
+    return;
+  }
+  if (!state.collectionId) {
+    showError("Select a collection first.");
+    return;
+  }
+  showError("");
+  const requestId = ++state.chatRequestId;
+  setChatBusy(true);
+  clearChatOutput();
+  $("chat-status").textContent = "Comparing four modes…";
+  try {
+    const payload = {
+      collection_id: state.collectionId,
+      question,
+      min_score: Number($("d23-min-score").value),
+      prefilter_top_k: Number($("d23-prefilter").value) || 20,
+      postfilter_top_k: Number($("d23-postfilter").value) || 5,
+    };
+    const strategy = $("chat-strategy").value;
+    if (strategy !== "active") payload.strategy = strategy;
+    const record = await api("/api/chat/compare-modes", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (requestId !== state.chatRequestId) return;
+    renderD23Compare(record);
+    $("chat-status").textContent = "Four-mode comparison ready";
+  } catch (error) {
+    if (requestId === state.chatRequestId) {
+      showError(error.message);
+      $("chat-status").textContent = "Error";
+    }
+  } finally {
+    if (requestId === state.chatRequestId) setChatBusy(false);
+  }
+}
+
 function wire() {
   $("refresh").onclick = () => Promise.all([refreshCollections(), refreshHealth()]).catch((e) => showError(e.message));
   $("collection-select").onchange = (event) => {
@@ -769,6 +970,8 @@ function wire() {
   $("chat-plain").onclick = () => runChat("without_rag");
   $("chat-rag").onclick = () => runChat("with_rag");
   $("chat-compare").onclick = () => runChatCompare();
+  $("d23-ask").onclick = () => runD23Ask();
+  $("d23-compare").onclick = () => runD23Compare();
   $("load-chunks").onclick = () => loadChunks();
   $("chunks-active").onchange = () => loadChunks();
 }

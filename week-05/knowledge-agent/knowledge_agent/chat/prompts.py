@@ -16,6 +16,7 @@ from ..domain.contracts import ChatMessage
 
 PLAIN_TEMPLATE_ID = "plain-v1"
 RAG_TEMPLATE_ID = "rag-v1"
+REWRITE_TEMPLATE_ID = "rewrite-v1"
 
 CONTEXT_OPEN = "<context>"
 CONTEXT_CLOSE = "</context>"
@@ -88,5 +89,14 @@ class PromptTemplate:
 
 PLAIN = PromptTemplate(PLAIN_TEMPLATE_ID, PLAIN_SYSTEM)
 RAG = PromptTemplate(RAG_TEMPLATE_ID, RAG_SYSTEM, uses_context=True)
+
+# Query rewrite (SPEC D23 7.2): system instruction + original question only.
+# Reference facts, answers and neighbouring-mode history never enter this prompt.
+REWRITE_SYSTEM = (
+    "Rewrite the user's question into one short search query for semantic "
+    "retrieval. Return only the rewritten query on a single line: no "
+    "explanation, no quotes, no reference answer."
+)
+REWRITE = PromptTemplate(REWRITE_TEMPLATE_ID, REWRITE_SYSTEM)
 
 TEMPLATES = {PLAIN_TEMPLATE_ID: PLAIN, RAG_TEMPLATE_ID: RAG}

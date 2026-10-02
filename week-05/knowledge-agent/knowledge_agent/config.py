@@ -38,6 +38,18 @@ DEFAULTS = {
     "CHAT_TOP_K": "5",
     "CHAT_CONTEXT_CHARS_PER_TOKEN": "3",
     "CHAT_RUNS_PATH": "local-data/chat-runs",
+    # Day 23 retrieval filter and query rewrite (SPEC D23 10). Defaults keep the
+    # D22 behaviour: filtering and rewrite stay off unless explicitly requested.
+    "RAG_FILTER_ENABLED": "0",
+    "RAG_MIN_SCORE": "0.0",
+    "RAG_PREFILTER_TOP_K": "20",
+    "RAG_FILTER_TOP_K": "5",
+    "RAG_REWRITE_ENABLED": "0",
+    "RAG_REWRITE_MAX_OUTPUT_TOKENS": "1024",
+    "RAG_REWRITE_TIMEOUT_SECONDS": "30",
+    "RAG_REWRITE_TEMPERATURE": "0",
+    "D23_DATA_PATH": "local-data/d23",
+    "D23_CALIBRATION_QUESTIONS_PATH": "eval/d23/calibration-questions.json",
 }
 
 
@@ -73,6 +85,18 @@ class Settings:
     chat_top_k: int = 5
     chat_context_chars_per_token: int = 3
     chat_runs_path: str = "local-data/chat-runs"
+    # Day 23 (SPEC D23 10). Defaults are appended so existing explicit
+    # ``Settings(...)`` constructions keep working without changes.
+    rag_filter_enabled: bool = False
+    rag_min_score: float = 0.0
+    rag_prefilter_top_k: int = 20
+    rag_filter_top_k: int = 5
+    rag_rewrite_enabled: bool = False
+    rag_rewrite_max_output_tokens: int = 1024
+    rag_rewrite_timeout_seconds: float = 30.0
+    rag_rewrite_temperature: float = 0.0
+    d23_data_path: str = "local-data/d23"
+    d23_calibration_questions_path: str = "eval/d23/calibration-questions.json"
 
 
 def _value(env: Mapping[str, str], key: str) -> str:
@@ -115,7 +139,21 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         chat_top_k=int(_value(source, "CHAT_TOP_K")),
         chat_context_chars_per_token=int(_value(source, "CHAT_CONTEXT_CHARS_PER_TOKEN")),
         chat_runs_path=_value(source, "CHAT_RUNS_PATH"),
+        rag_filter_enabled=_flag(_value(source, "RAG_FILTER_ENABLED")),
+        rag_min_score=float(_value(source, "RAG_MIN_SCORE")),
+        rag_prefilter_top_k=int(_value(source, "RAG_PREFILTER_TOP_K")),
+        rag_filter_top_k=int(_value(source, "RAG_FILTER_TOP_K")),
+        rag_rewrite_enabled=_flag(_value(source, "RAG_REWRITE_ENABLED")),
+        rag_rewrite_max_output_tokens=int(_value(source, "RAG_REWRITE_MAX_OUTPUT_TOKENS")),
+        rag_rewrite_timeout_seconds=float(_value(source, "RAG_REWRITE_TIMEOUT_SECONDS")),
+        rag_rewrite_temperature=float(_value(source, "RAG_REWRITE_TEMPERATURE")),
+        d23_data_path=_value(source, "D23_DATA_PATH"),
+        d23_calibration_questions_path=_value(source, "D23_CALIBRATION_QUESTIONS_PATH"),
     )
+
+
+def _flag(raw: str) -> bool:
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def load_env_file(path: str | Path) -> dict[str, str]:

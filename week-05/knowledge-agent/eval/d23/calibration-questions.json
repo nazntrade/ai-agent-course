@@ -1,0 +1,30 @@
+{
+  "schema_version": "d23-calibration-questions-v1",
+  "corpus": {
+    "label": "agents-survey.pdf",
+    "title": "A Survey on Large Language Model based Autonomous Agents",
+    "notes": "Separate small calibration set (not the ten D22 evaluation questions). Section expectations are verified against the extracted source, not generated answers."
+  },
+  "questions": [
+    {
+      "question_id": "D23-CAL-01",
+      "question": "What is the profiling module responsible for in an autonomous agent?",
+      "expected_sections": ["2.1.1 Profiling Module"]
+    },
+    {
+      "question_id": "D23-CAL-02",
+      "question": "How does the memory module store and retrieve information?",
+      "expected_sections": ["2.1.2 Memory Module"]
+    },
+    {
+      "question_id": "D23-CAL-03",
+      "question": "What planning capabilities does the planning module provide?",
+      "expected_sections": ["2.1.3 Planning Module"]
+    },
+    {
+      "question_id": "D23-CAL-04",
+      "question": "How does the action module let an agent act on its environment?",
+      "expected_sections": ["2.1.4 Action Module"]
+    }
+  ]
+}
