@@ -131,6 +131,7 @@ def build_chat_service(settings: Settings, service: KnowledgeService) -> ChatSer
         rag_min_score=settings.rag_min_score,
         rag_prefilter_top_k=settings.rag_prefilter_top_k,
         rag_filter_top_k=settings.rag_filter_top_k,
+        grounding_enabled=settings.rag_grounding_enabled,
     )
 
 

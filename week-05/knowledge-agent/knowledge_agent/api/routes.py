@@ -56,6 +56,8 @@ class ChatRequest(BaseModel):
     postfilter_top_k: int | None = Field(default=None, ge=1, le=50)
     min_score: float | None = None
     rag_mode: Literal["A", "B", "C", "D"] | None = None
+    # Day 24: only ChatRequest carries ``grounding``; compare/compare-modes do not.
+    grounding: bool | None = None
 
 
 class CompareModesRequest(BaseModel):
@@ -141,9 +143,10 @@ def create_router(service: KnowledgeService, chat_service: Any | None = None) ->
         limit: int = Query(default=50, ge=1, le=200),
         document_id: str | None = None,
         section_path: str | None = None,
+        chunk_id: str | None = None,
     ) -> dict[str, Any]:
         result = service.list_chunks(
-            index_version_id, offset, limit, document_id, section_path
+            index_version_id, offset, limit, document_id, section_path, chunk_id
         )
         result["items"] = [
             {**item, "index_version_id": index_version_id} for item in result["items"]
@@ -240,6 +243,7 @@ def _chat_payload(body: ChatRequest) -> dict[str, Any]:
         "postfilter_top_k": body.postfilter_top_k,
         "min_score": body.min_score,
         "rag_mode": body.rag_mode,
+        "grounding": body.grounding,
     }
 
 

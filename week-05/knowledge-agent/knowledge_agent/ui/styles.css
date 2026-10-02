@@ -119,6 +119,17 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
 .compare-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 10px; }
 .compare-column { min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); }
 .compare-column h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
+/* Day 24: sources and verified citations (English UI). */
+.chat-grounding { margin-top: 10px; }
+.chat-grounding h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
+.grounding-source { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; word-break: break-word; }
+.fragment.citation { overflow-wrap: anywhere; word-break: break-word; }
+.fragment.citation.bad { border-color: var(--danger); }
+.citation-quote { margin: 6px 0 0; padding-left: 10px; border-left: 2px solid var(--accent); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-size: 13px; }
+.fragment.citation.bad .citation-quote { border-left-color: var(--danger); }
+.citation-mini { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; word-break: break-word; }
+.fragment-text { margin-top: 6px; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
+
 /* Day 23: four-mode comparison (English UI). */
 .compare-columns.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .d23-settings { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; }

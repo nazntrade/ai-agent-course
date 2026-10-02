@@ -35,7 +35,8 @@ def _fixture_server(tmp_path, *, chat_delay_ms=0.0, extra_env=None):
         + "\n\n## 1.1 Memory\n\n" + "Memory stores observations. " * 30,
         encoding="utf-8",
     )
-    env = {"CHAT_RUNS_PATH": str(tmp_path / "chat-runs")}
+    # D24 pins the D23 regression to the flat rag-v1 path (SPEC D24 2.3).
+    env = {"CHAT_RUNS_PATH": str(tmp_path / "chat-runs"), "RAG_GROUNDING_ENABLED": "0"}
     if extra_env:
         env.update(extra_env)
     backend = Backend(

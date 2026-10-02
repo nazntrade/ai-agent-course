@@ -20,6 +20,7 @@ from ..domain.contracts import (
     ChatModel,
     ChatResult,
     ChatRunStore,
+    GroundingResult,
     QueryRewriter,
     RewriteResult,
 )
@@ -29,10 +30,10 @@ from ..domain.errors import (
     InvalidThreshold,
     KnowledgeError,
 )
-from .citations import extract_citations
+from .citations import GroundingVerifier, extract_citations, parse_grounded_response
 from .context import BUDGET_METHOD, ContextBudget, ContextPlan
 from .filtering import RelevanceFilter
-from .prompts import PLAIN, RAG, REWRITE, PromptTemplate
+from .prompts import GROUNDED_RAG, PLAIN, RAG, REWRITE, PromptTemplate
 
 _VALID_MODES = ("with_rag", "without_rag")
 _VALID_FILTER_MODES = ("with_rag", "without_rag", "compare")
@@ -87,10 +88,14 @@ class ChatService:
         rag_min_score: float = 0.0,
         rag_prefilter_top_k: int = 20,
         rag_filter_top_k: int = 5,
+        grounding_enabled: bool = False,
     ) -> None:
         self.knowledge = knowledge_service
         self.chat_model = chat_model
         self.run_store = run_store
+        # D24: a direct ChatService construction keeps the D22 ``rag-v1`` path
+        # (default False); the application enables grounding via ``build_chat_service``.
+        self.grounding_enabled = bool(grounding_enabled)
         self.top_k = max(1, int(top_k))
         self.max_context_tokens = int(max_context_tokens)
         self.reserved_output_tokens = int(reserved_output_tokens)
@@ -147,6 +152,8 @@ class ChatService:
                 "max_context_tokens": request.get("max_context_tokens"),
                 "run_id": run_id,
                 "created_at": created_at,
+                # SPEC D24 11.5: POST /api/chat/compare is never grounded.
+                "grounding": False,
             }
         )
         plain_plan = self._plan(
@@ -291,7 +298,10 @@ class ChatService:
             "postfilter_top_k": postfilter,
             "prompt_templates": {
                 "rewrite": REWRITE.template_id,
-                "generation": RAG.template_id,
+                # SPEC D24 11.2: the reported generation template is the actual one.
+                "generation": (
+                    GROUNDED_RAG.template_id if self.grounding_enabled else RAG.template_id
+                ),
             },
             "policy_differences": [
                 "B and D apply the relevance threshold",
@@ -520,12 +530,14 @@ class ChatService:
                 "postfilter_top_k": None,
                 "deterministic": False,
                 "insufficient_message": None,
+                "grounding": False,
                 "model": model_snapshot,
                 "template": template,
                 "messages": messages,
                 "index": None,
                 "retrieval": None,
                 "passed_ids": set(),
+                "passed_chunks": [],
                 "context": context,
                 "latency_ms": {"retrieval": 0.0, "context": context_ms},
             }
@@ -566,15 +578,20 @@ class ChatService:
             postfilter_top_k=postfilter,
         )
         selected = focus.selected
+        grounding = self._resolve_grounding(request)
+        template = GROUNDED_RAG if grounding else RAG
+        # D24 defect fix: the budget must count the system prompt actually sent.
+        # Grounding swaps RAG.system for the longer GROUNDED_RAG.system, so the
+        # template is resolved before planning; without grounding this is RAG.system.
         plan: ContextPlan = self.budget.plan(
-            mandatory_texts=[RAG.system, question],
+            mandatory_texts=[template.system, question],
             candidates=selected,
             request_max_context_tokens=request.get("max_context_tokens"),
             model_context_length=model_context_length,
         )
         context_ms = round((perf_counter() - started) * 1000 - retrieval_ms, 3)
         deterministic = bool(use_filter and not selected)
-        messages = None if deterministic else RAG.build(question, plan.passed)
+        messages = None if deterministic else template.build(question, plan.passed)
         version = self.knowledge.get_index_version(search["index_version_id"])
         index = {
             "collection_id": collection_id,
@@ -630,15 +647,25 @@ class ChatService:
             "postfilter_top_k": postfilter,
             "deterministic": deterministic,
             "insufficient_message": INSUFFICIENT_SOURCES_MESSAGE,
+            "grounding": grounding,
             "model": model_snapshot,
-            "template": RAG,
+            "template": template,
             "messages": messages,
             "index": index,
             "retrieval": retrieval,
             "passed_ids": {item["chunk_id"] for item in plan.passed},
+            "passed_chunks": plan.passed,
             "context": context,
             "latency_ms": {"retrieval": retrieval_ms, "context": context_ms},
         }
+
+    def _resolve_grounding(self, request: Mapping[str, Any]) -> bool:
+        """Explicit ``grounding`` wins; otherwise the service setting applies."""
+
+        raw = request.get("grounding")
+        if raw is None:
+            return self.grounding_enabled
+        return bool(raw)
 
     def _resolve_rag_mode(self, request: Mapping[str, Any]) -> tuple[bool, bool, str]:
         """Resolve A-D from ``rag_mode``/booleans, with config defaults as fallback.
@@ -742,13 +769,27 @@ class ChatService:
                 "total": round(retrieval_ms + context_ms + rewrite_ms, 3),
             }
             base["output_tokens_per_second"] = None
-            base["answer"] = {
-                "text": plan.get("insufficient_message") or INSUFFICIENT_SOURCES_MESSAGE,
+            message = plan.get("insufficient_message") or INSUFFICIENT_SOURCES_MESSAGE
+            answer = {
+                "text": message,
                 "finish_reason": None,
                 "truncated": False,
                 "citations": {"valid": [], "unsupported": []},
                 "insufficient_sources": True,
             }
+            if plan.get("grounding"):
+                threshold = plan.get("min_score")
+                answer["grounding"] = GroundingResult(
+                    status="refused",
+                    reason="below_threshold",
+                    threshold=threshold,
+                    refusal={
+                        "reason": "below_threshold",
+                        "message": message,
+                        "threshold": threshold,
+                    },
+                ).to_dict()
+            base["answer"] = answer
             return base
 
         if result is None:
@@ -764,10 +805,6 @@ class ChatService:
             return base
 
         chat_ms = result.latency_ms
-        if plan["mode"] == "without_rag":
-            citations = {"valid": [], "unsupported": []}
-        else:
-            citations = extract_citations(result.text, plan["passed_ids"])
         base["usage"] = result.usage.to_dict() if result.usage else None
         base["latency_ms"] = {
             "retrieval": retrieval_ms,
@@ -776,14 +813,59 @@ class ChatService:
             "total": round(retrieval_ms + context_ms + chat_ms + rewrite_ms, 3),
         }
         base["output_tokens_per_second"] = result.output_tokens_per_second
-        base["answer"] = {
-            "text": result.text,
-            "finish_reason": result.finish_reason,
-            "truncated": result.finish_reason == "length",
-            "citations": citations,
-            "insufficient_sources": False,
-        }
+        if plan["mode"] == "with_rag" and plan.get("grounding"):
+            base["answer"] = self._grounded_answer(plan, result)
+        else:
+            citations = (
+                {"valid": [], "unsupported": []}
+                if plan["mode"] == "without_rag"
+                else extract_citations(result.text, plan["passed_ids"])
+            )
+            base["answer"] = {
+                "text": result.text,
+                "finish_reason": result.finish_reason,
+                "truncated": result.finish_reason == "length",
+                "citations": citations,
+                "insufficient_sources": False,
+            }
         return base
+
+    def _grounded_answer(
+        self, plan: Mapping[str, Any], result: ChatResult
+    ) -> dict[str, Any]:
+        """Build the grounded ``answer`` block with the D24 processing order.
+
+        Order is format first, then ``finish_reason``: a malformed answer raises a
+        typed format error regardless of ``length``; only a successfully parsed
+        object can enter the truncated branch and it never becomes ``verified``.
+        """
+
+        # Raises ChatInvalidResponse(details.format="grounded_json") on any
+        # deviation from the grounded-JSON contract; the text is never repaired.
+        try:
+            parsed = parse_grounded_response(result.text)
+        except ChatInvalidResponse as exc:
+            # Safe provider metadata only: never the answer text itself.
+            exc.details.setdefault("finish_reason", result.finish_reason)
+            exc.details.setdefault("answer_chars", len(result.text))
+            raise
+        verifier = GroundingVerifier(plan.get("passed_chunks") or [])
+        threshold = plan.get("min_score")
+        grounding = verifier.verify(parsed, threshold=threshold)
+        truncated = result.finish_reason == "length"
+        if truncated:
+            grounding.status = "failed"
+            grounding.reason = "truncated_generation"
+            grounding.refusal = None
+        citations = extract_citations(parsed.answer, plan["passed_ids"])
+        return {
+            "text": parsed.answer,
+            "finish_reason": result.finish_reason,
+            "truncated": truncated,
+            "citations": citations,
+            "insufficient_sources": grounding.status == "refused",
+            "grounding": grounding.to_dict(),
+        }
 
     @staticmethod
     def _candidate_projection(item: Mapping[str, Any]) -> dict[str, Any]:

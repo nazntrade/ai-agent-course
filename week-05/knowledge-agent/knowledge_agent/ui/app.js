@@ -493,10 +493,143 @@ function setChatBusy(busy) {
 function clearChatOutput() {
   $("chat-answer").textContent = "";
   $("chat-sources").textContent = "";
+  $("chat-grounding").textContent = "";
   $("chat-compare-result").textContent = "";
   $("chat-search-query").textContent = "";
   $("d23-trace").textContent = "";
   $("d23-compare-result").textContent = "";
+}
+
+async function showFragment(indexVersionId, chunkId, target) {
+  target.textContent = "Loading fragment…";
+  try {
+    const page = await api(
+      "/api/index-versions/" + encodeURIComponent(indexVersionId) +
+        "/chunks?chunk_id=" + encodeURIComponent(chunkId)
+    );
+    if (!page.items || !page.items.length) {
+      target.textContent = "Fragment is not available in this index.";
+      return;
+    }
+    target.textContent = page.items[0].text || "";
+  } catch (error) {
+    target.textContent = "Fragment could not be loaded.";
+    showError(error.message);
+  }
+}
+
+function groundingStateText(answer, grounding) {
+  if (answer.insufficient_sources) {
+    const reason = grounding && grounding.refusal ? grounding.refusal.reason : "insufficient";
+    return {
+      warn: true,
+      text: `No relevant sources found: not available in the provided documents (${reason}).`,
+    };
+  }
+  if (grounding && grounding.status === "failed") {
+    return {
+      warn: true,
+      text: `Verification failed${grounding.reason ? ": " + grounding.reason : ""}.`,
+    };
+  }
+  if (grounding) {
+    return {
+      warn: false,
+      text: `Verification status: ${grounding.status}${grounding.reason ? " (" + grounding.reason + ")" : ""}.`,
+    };
+  }
+  return { warn: false, text: "Grounding is disabled for this answer." };
+}
+
+function renderGrounding(record) {
+  const container = $("chat-grounding");
+  if (!container) return;
+  container.textContent = "";
+  const answer = record.answer || {};
+  const grounding = answer.grounding || null;
+  const retrieval = record.retrieval || {};
+  const indexVersionId = (record.index || {}).index_version_id;
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Sources & citations";
+  container.appendChild(heading);
+
+  const state = groundingStateText(answer, grounding);
+  const stateLine = document.createElement("div");
+  stateLine.className = state.warn ? "meta warn" : "meta";
+  stateLine.textContent = state.text;
+  container.appendChild(stateLine);
+
+  const meaningLine = document.createElement("div");
+  meaningLine.className = "meta";
+  meaningLine.textContent = `Meaning support: ${
+    grounding && grounding.meaning_check && grounding.meaning_check !== "not_performed"
+      ? grounding.meaning_check
+      : "not checked"
+  }`;
+  container.appendChild(meaningLine);
+
+  const passed = retrieval.passed || [];
+  for (const item of passed) {
+    const metadata = item.metadata || {};
+    const source = document.createElement("div");
+    source.className = "grounding-source";
+    const pages = metadata.page_start ? `pages ${metadata.page_start}-${metadata.page_end}` : "pages n/a";
+    source.textContent =
+      `source: ${metadata.source_label || "n/a"} · section: ${metadata.section_path || "n/a"} · ` +
+      `chunk_id: ${item.chunk_id} · ${pages}`;
+    container.appendChild(source);
+  }
+
+  const citations = grounding ? grounding.citations || [] : [];
+  for (const citation of citations) {
+    const card = document.createElement("div");
+    card.className = citation.status === "verified" ? "fragment citation" : "fragment citation bad";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const pages = citation.page_start ? ` · pages ${citation.page_start}-${citation.page_end}` : "";
+    meta.textContent =
+      `${citation.source || "n/a"} · ${citation.section || "n/a"} · chunk_id: ${citation.chunk_id}` +
+      `${pages} · ${citation.status}`;
+    card.appendChild(meta);
+    const quote = document.createElement("blockquote");
+    quote.className = "citation-quote";
+    quote.textContent = citation.quote || "";
+    card.appendChild(quote);
+    if (citation.is_translation && citation.translation) {
+      const translation = document.createElement("div");
+      translation.className = "meta translation";
+      translation.textContent = `Translation: ${citation.translation}`;
+      card.appendChild(translation);
+    }
+    if (indexVersionId && citation.chunk_id) {
+      const button = document.createElement("button");
+      button.textContent = "Show fragment";
+      const target = document.createElement("pre");
+      target.className = "fragment-text";
+      button.onclick = () => showFragment(indexVersionId, citation.chunk_id, target);
+      card.appendChild(button);
+      card.appendChild(target);
+    }
+    container.appendChild(card);
+  }
+}
+
+function renderBranchGrounding(column, branch) {
+  const grounding = branch.answer && branch.answer.grounding;
+  if (!grounding) return;
+  const line = document.createElement("div");
+  line.className = "meta";
+  line.textContent =
+    `grounding ${grounding.status}${grounding.reason ? " (" + grounding.reason + ")" : ""} · ` +
+    `meaning ${grounding.meaning_check === "not_performed" ? "not checked" : grounding.meaning_check}`;
+  column.appendChild(line);
+  for (const citation of grounding.citations || []) {
+    const item = document.createElement("div");
+    item.className = "citation-mini";
+    item.textContent = `[${citation.status}] ${citation.chunk_id}: ${citation.quote}`;
+    column.appendChild(item);
+  }
 }
 
 function chatPayload(mode) {
@@ -587,6 +720,7 @@ function handleChatEvent(event) {
     const record = event.answer || {};
     renderChatAnswer(record.answer || {});
     renderChatSources(record.retrieval);
+    renderGrounding(record);
     $("chat-status").textContent = `Готово · ${chatUsageLine(record)}`;
   } else if (event.type === "error") {
     const error = event.error || {};
@@ -652,6 +786,7 @@ async function runChat(mode) {
       if (requestId !== state.chatRequestId) return;
       renderChatAnswer(record.answer || {});
       renderChatSources(record.retrieval);
+      renderGrounding(record);
       $("chat-status").textContent = `Готово · ${chatUsageLine(record)}`;
     }
   } catch (error) {
@@ -809,6 +944,7 @@ async function runD23Ask() {
     if (requestId !== state.chatRequestId) return;
     renderChatAnswer(record.answer || {});
     renderChatSources(record.retrieval);
+    renderGrounding(record);
     renderD23Trace(record);
     $("chat-status").textContent = `Done · ${chatUsageLine(record)}`;
   } catch (error) {
@@ -887,6 +1023,7 @@ function renderD23Compare(record) {
       }
       if (list.childNodes.length) column.appendChild(list);
     }
+    renderBranchGrounding(column, branch);
     row.appendChild(column);
   }
   container.appendChild(row);

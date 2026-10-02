@@ -53,6 +53,17 @@
             ],
             "title": "Collection Id"
           },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding"
+          },
           "index_version_id": {
             "anyOf": [
               {
@@ -1214,6 +1225,22 @@
                 }
               ],
               "title": "Section Path"
+            }
+          },
+          {
+            "in": "query",
+            "name": "chunk_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Chunk Id"
             }
           }
         ],

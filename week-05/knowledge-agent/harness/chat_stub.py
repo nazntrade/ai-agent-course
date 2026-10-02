@@ -14,7 +14,12 @@ import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+MODULE_DIR = Path(__file__).resolve().parent.parent
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _CHUNK_RE = re.compile(r"\[chunk_id:\s*([0-9a-fA-F]{16,64})\]")
@@ -24,7 +29,134 @@ def count_input_tokens(text: str) -> int:
     return len(_TOKEN_RE.findall(text or ""))
 
 
-def _response_text(messages: list[dict[str, Any]]) -> str:
+def _is_grounded(messages: list[dict[str, Any]]) -> bool:
+    """Grounded-rag-v1 is selected by the JSON-answer marker in the system text."""
+
+    for message in messages:
+        if message.get("role") == "system":
+            if "return exactly one json object" in str(message.get("content") or "").lower():
+                return True
+    return False
+
+
+def _context_chunks(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Extract ``chunk_id`` and body text from every ``<context>`` block.
+
+    The body is the chunk text after the three metadata lines rendered by
+    ``chat/prompts.build_context_block`` (section_path/pages/source_label). A
+    quote taken from this body is a deterministic substring of the chunk text,
+    so ``quote_verbatim``/``source_exists`` are provably true for the happy path.
+    """
+
+    chunks: list[dict[str, str]] = []
+    for message in messages:
+        content = str(message.get("content") or "")
+        if "<context>" not in content:
+            continue
+        current: dict[str, str] | None = None
+        body: list[str] = []
+        metadata_remaining = 0
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[chunk_id:"):
+                if current is not None:
+                    current["text"] = "\n".join(body).strip()
+                    chunks.append(current)
+                match = _CHUNK_RE.search(stripped)
+                current = {"chunk_id": match.group(1) if match else ""}
+                body = []
+                metadata_remaining = 3
+                continue
+            if current is None:
+                continue
+            if stripped == "</context>":
+                break
+            if metadata_remaining > 0:
+                metadata_remaining -= 1
+                continue
+            body.append(line)
+        if current is not None:
+            current["text"] = "\n".join(body).strip()
+            chunks.append(current)
+    return chunks
+
+
+def _grounded_response(messages: list[dict[str, Any]], fail: str | None) -> str:
+    """Deterministic grounded-JSON answer (not inference)."""
+
+    from knowledge_agent.chat.citations import normalize_whitespace
+
+    question = ""
+    for message in messages:
+        content = str(message.get("content") or "")
+        if message.get("role") == "user" and "<context>" not in content and content.strip():
+            question = content.strip()
+            break
+    chunks = _context_chunks(messages)
+    first = chunks[0] if chunks else {"chunk_id": "", "text": ""}
+    chunk_id = first["chunk_id"]
+    normalized = normalize_whitespace(first["text"])
+    quote = normalized[:160].strip() if normalized else ""
+    answer = f"[stub] Grounded answer for: {question[:120]}"
+    if chunk_id:
+        answer += f" [{chunk_id}]"
+
+    if fail == "grounded_bad_json":
+        return '{"answer": "unterminated", "citations": ['
+    if fail == "grounded_insufficient":
+        return json.dumps(
+            {
+                "answer": "The information is not available in the provided context.",
+                "citations": [],
+                "insufficient": True,
+                "limitation": None,
+            }
+        )
+    if fail == "grounded_empty_citations":
+        return json.dumps(
+            {"answer": answer, "citations": [], "insufficient": False, "limitation": None}
+        )
+    if fail == "grounded_unknown_id":
+        unknown = "f" * 64 if chunk_id != "f" * 64 else "0" * 64
+        citations = [{"chunk_id": unknown, "quote": quote or "fabricated"}]
+    elif fail == "grounded_fabricated_quote":
+        citations = (
+            [{"chunk_id": chunk_id, "quote": "This exact sentence is absent from the fragment."}]
+            if chunk_id
+            else []
+        )
+    elif fail == "grounded_translation":
+        citations = (
+            [{"chunk_id": chunk_id, "quote": quote, "translation": "Translated citation."}]
+            if chunk_id and quote
+            else []
+        )
+    elif fail == "grounded_limitation":
+        citations = [{"chunk_id": chunk_id, "quote": quote}] if chunk_id and quote else []
+        return json.dumps(
+            {
+                "answer": answer,
+                "citations": citations,
+                "insufficient": False,
+                "limitation": "partial answer: the documents do not state everything asked.",
+            }
+        )
+    else:
+        citations = [{"chunk_id": chunk_id, "quote": quote}] if chunk_id and quote else []
+    return json.dumps(
+        {
+            "answer": answer,
+            "citations": citations,
+            "insufficient": False,
+            "limitation": None,
+        }
+    )
+
+
+def _response_text(messages: list[dict[str, Any]], fail: str | None = None) -> str:
+    if _is_grounded(messages):
+        return _grounded_response(messages, fail)
+
     question = ""
     chunk_id = None
     rewrite = False
@@ -141,7 +273,7 @@ class ChatStubHandler(BaseHTTPRequestHandler):
         if fail == "timeout":
             time.sleep(3.0)
 
-        text = "" if fail == "empty" else _response_text(messages)
+        text = "" if fail == "empty" else _response_text(messages, fail)
         if fail == "length_done":
             done_reason = "length"
         else:

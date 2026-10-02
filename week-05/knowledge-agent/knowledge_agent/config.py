@@ -50,6 +50,12 @@ DEFAULTS = {
     "RAG_REWRITE_TEMPERATURE": "0",
     "D23_DATA_PATH": "local-data/d23",
     "D23_CALIBRATION_QUESTIONS_PATH": "eval/d23/calibration-questions.json",
+    # Day 24 grounded-RAG: expose citations by default in RAG answers; ``0``
+    # restores the D22 ``rag-v1`` free-text path. ``/api/chat/compare`` is never
+    # grounded regardless of this flag (SPEC D24 10, 11.5).
+    "RAG_GROUNDING_ENABLED": "1",
+    "D24_DATA_PATH": "local-data/d24",
+    "D24_QUESTIONS_PATH": "eval/d22/questions.json",
 }
 
 
@@ -97,6 +103,11 @@ class Settings:
     rag_rewrite_temperature: float = 0.0
     d23_data_path: str = "local-data/d23"
     d23_calibration_questions_path: str = "eval/d23/calibration-questions.json"
+    # Day 24 (SPEC D24 10). The application enables grounded RAG by default;
+    # a direct ``ChatService`` construction stays D22-compatible unless asked.
+    rag_grounding_enabled: bool = True
+    d24_data_path: str = "local-data/d24"
+    d24_questions_path: str = "eval/d22/questions.json"
 
 
 def _value(env: Mapping[str, str], key: str) -> str:
@@ -149,6 +160,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         rag_rewrite_temperature=float(_value(source, "RAG_REWRITE_TEMPERATURE")),
         d23_data_path=_value(source, "D23_DATA_PATH"),
         d23_calibration_questions_path=_value(source, "D23_CALIBRATION_QUESTIONS_PATH"),
+        rag_grounding_enabled=_flag(_value(source, "RAG_GROUNDING_ENABLED")),
+        d24_data_path=_value(source, "D24_DATA_PATH"),
+        d24_questions_path=_value(source, "D24_QUESTIONS_PATH"),
     )
 
 

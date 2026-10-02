@@ -56,6 +56,8 @@ def test_selected_profile_lease_chat_two_modes_and_stream(tmp_path):
     env={'AI_TEST_MODEL_KIND':'local','AI_TEST_MODEL_NAME':'selected','AI_TEST_MODEL_BASE_URL':base+'/v1',
          'AI_TEST_MODEL_API_KEY':'fixture-key','AI_TEST_MODEL_ID':'fixture',
          'AI_TEST_MODEL_LEASE_URL':base+'/api/local-models/fixture/test-leases',
+         # D24 pins this D22 profile regression to the flat rag-v1 path.
+         'RAG_GROUNDING_ENABLED':'0',
          'CHAT_RUNS_PATH':str(tmp_path/'runs')}
     backend=None
     source=tmp_path/'source.md'

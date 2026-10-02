@@ -283,8 +283,16 @@ def run_scenario(root: Path) -> int:
             ui_status == 200 and "Knowledge Agent" in ui_html,
             "the static UI index page is not served",
         )
-        asset_status, _ = request_text("/assets/app.js")
+        must(
+            'id="chat-grounding"' in ui_html,
+            "the D24 grounding container is not served",
+        )
+        asset_status, ui_script = request_text("/assets/app.js")
         must(asset_status == 200, "the static UI asset is not served")
+        must(
+            "Sources & citations" in ui_script and "Show fragment" in ui_script,
+            "the D24 sources and citations UI is not served",
+        )
 
         print(
             "smoke ok: fixed_chunks=%s structure_chunks=%s reused=%s fragments=%s ui=ok"

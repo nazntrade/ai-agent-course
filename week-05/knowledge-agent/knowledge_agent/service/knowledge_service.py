@@ -581,16 +581,21 @@ class KnowledgeService:
         limit: int = 50,
         document_id: str | None = None,
         section_path: str | None = None,
+        chunk_id: str | None = None,
     ) -> dict[str, Any]:
         items, total = self._store.list_chunks(
-            index_version_id, offset, limit, document_id, section_path
+            index_version_id, offset, limit, document_id, section_path, chunk_id
         )
         return {
             "items": [{**item, "metadata": _public_metadata(item["metadata"])} for item in items],
             "total": total,
             "offset": offset,
             "limit": limit,
-            "filters": {"document_id": document_id, "section_path": section_path},
+            "filters": {
+                "document_id": document_id,
+                "section_path": section_path,
+                "chunk_id": chunk_id,
+            },
         }
 
     def compare(

@@ -138,7 +138,8 @@ def chat_server(tmp_path):
         db,
         f"http://127.0.0.1:{embed_port}",
         f"http://127.0.0.1:{chat_port}",
-        extra_env={"CHAT_RUNS_PATH": str(tmp_path / "chat-runs")},
+        # D24 pins this D22 regression to the flat rag-v1 path (SPEC D24 2.3).
+        extra_env={"CHAT_RUNS_PATH": str(tmp_path / "chat-runs"), "RAG_GROUNDING_ENABLED": "0"},
     )
     if not backend.wait():
         backend.stop()

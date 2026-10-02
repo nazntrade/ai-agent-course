@@ -243,6 +243,101 @@ class QueryRewriter(ABC):
     def rewrite(self, question: str) -> RewriteResult: ...
 
 
+# Grounded-RAG layer (SPEC D24 6). These structures are pure data: the verifier
+# fills them from ``passed`` chunks and the parsed provider answer. The model
+# text never supplies ``source``/``section``; those come from index metadata.
+
+MEANING_CHECK_NOT_PERFORMED = "not_performed"
+WHITESPACE_NORMALIZATION = "nfc-collapse-trim-v1"
+
+
+@dataclass
+class GroundedAnswer:
+    """A parsed grounded-JSON provider answer (SPEC D24 6.1)."""
+
+    answer: str
+    citations: list[dict[str, Any]] = field(default_factory=list)
+    insufficient: bool = False
+    limitation: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "answer": self.answer,
+            "citations": [dict(citation) for citation in self.citations],
+            "insufficient": self.insufficient,
+            "limitation": self.limitation,
+        }
+
+
+@dataclass
+class Citation:
+    """One verified/unsupported citation projection (SPEC D24 6.2)."""
+
+    chunk_id: str
+    source: str | None = None
+    section: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    quote: str = ""
+    translation: str | None = None
+    is_translation: bool = False
+    source_exists: bool = False
+    quote_verbatim: bool = False
+    meaning_supported: bool | None = None
+    status: str = "unknown_chunk_id"
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chunk_id": self.chunk_id,
+            "source": self.source,
+            "section": self.section,
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "quote": self.quote,
+            "translation": self.translation,
+            "is_translation": self.is_translation,
+            "source_exists": self.source_exists,
+            "quote_verbatim": self.quote_verbatim,
+            "meaning_supported": self.meaning_supported,
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class GroundingResult:
+    """The ``answer.grounding`` block (SPEC D24 6.3)."""
+
+    status: str
+    reason: str | None = None
+    threshold: float | None = None
+    meaning_check: str = MEANING_CHECK_NOT_PERFORMED
+    limitation: str | None = None
+    citations: list[Citation] = field(default_factory=list)
+    refusal: dict[str, Any] | None = None
+    # D24 defect fix: inline ``[chunk_id]`` references in the answer text that
+    # contradict the structured citations. ``inline_unsupported`` are ids not
+    # passed to the model; ``inline_missing_quote`` are passed ids without a
+    # verified structured citation. Both are empty when every inline reference
+    # is backed by a verified citation.
+    inline_unsupported: list[str] = field(default_factory=list)
+    inline_missing_quote: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "threshold": self.threshold,
+            "meaning_check": self.meaning_check,
+            "limitation": self.limitation,
+            "citations": [citation.to_dict() for citation in self.citations],
+            "refusal": self.refusal,
+            "inline_unsupported": list(self.inline_unsupported),
+            "inline_missing_quote": list(self.inline_missing_quote),
+        }
+
+
 # Provider-level streaming events: a tagged union of ``token`` and ``done``
 # (errors are raised as typed exceptions, not encoded as events; SPEC D22 6.1).
 ChatModelEvent = dict[str, Any]
@@ -382,6 +477,7 @@ class IndexStore(ABC):
         limit: int = 50,
         document_id: str | None = None,
         section_path: str | None = None,
+        chunk_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]: ...
 
     @abstractmethod

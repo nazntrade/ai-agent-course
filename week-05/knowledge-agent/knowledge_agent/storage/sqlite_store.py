@@ -493,12 +493,16 @@ class SqliteIndexStore(IndexStore):
         limit: int = 50,
         document_id: str | None = None,
         section_path: str | None = None,
+        chunk_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         clauses = ["index_version_id = ?"]
         params: list[Any] = [index_version_id]
         if document_id:
             clauses.append("document_id = ?")
             params.append(document_id)
+        if chunk_id:
+            clauses.append("chunk_id = ?")
+            params.append(chunk_id)
         where = " AND ".join(clauses)
         with self._lock:
             rows = self._conn.execute(
