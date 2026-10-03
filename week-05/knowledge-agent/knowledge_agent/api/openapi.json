@@ -397,6 +397,39 @@
         "title": "CompareRequest",
         "type": "object"
       },
+      "DialogueCreate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "DialogueCreate",
+        "type": "object"
+      },
+      "DialogueRename": {
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DialogueRename",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -408,6 +441,27 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "MemoryPatchRequest": {
+        "properties": {
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "operations": {
+            "items": {
+              "type": "object"
+            },
+            "title": "Operations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expected_version",
+          "operations"
+        ],
+        "title": "MemoryPatchRequest",
         "type": "object"
       },
       "SearchRequest": {
@@ -479,6 +533,165 @@
           "path"
         ],
         "title": "SourceItem",
+        "type": "object"
+      },
+      "TurnRequest": {
+        "properties": {
+          "client_turn_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Client Turn Id",
+            "type": "string"
+          },
+          "collection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collection Id"
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding"
+          },
+          "index_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Index Version Id"
+          },
+          "max_context_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Context Tokens"
+          },
+          "min_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Score"
+          },
+          "mode": {
+            "default": "with_rag",
+            "enum": [
+              "with_rag",
+              "without_rag"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "postfilter_top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postfilter Top K"
+          },
+          "prefilter_top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefilter Top K"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K"
+          },
+          "use_filter": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Filter"
+          },
+          "use_rewrite": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Rewrite"
+          }
+        },
+        "required": [
+          "client_turn_id",
+          "question"
+        ],
+        "title": "TurnRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -1098,6 +1311,458 @@
           }
         },
         "summary": "Compare"
+      }
+    },
+    "/api/dialogues": {
+      "get": {
+        "operationId": "list_dialogues_api_dialogues_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Dialogues Api Dialogues Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Dialogues"
+      },
+      "post": {
+        "operationId": "create_dialogue_api_dialogues_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DialogueCreate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Create Dialogue Api Dialogues Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Dialogue"
+      }
+    },
+    "/api/dialogues/{dialogue_id}": {
+      "delete": {
+        "operationId": "delete_dialogue_api_dialogues__dialogue_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "confirm",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Confirm",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Delete Dialogue Api Dialogues  Dialogue Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Dialogue"
+      },
+      "get": {
+        "operationId": "get_dialogue_api_dialogues__dialogue_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Dialogue Api Dialogues  Dialogue Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Dialogue"
+      },
+      "patch": {
+        "operationId": "rename_dialogue_api_dialogues__dialogue_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DialogueRename"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Rename Dialogue Api Dialogues  Dialogue Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Dialogue"
+      }
+    },
+    "/api/dialogues/{dialogue_id}/memory": {
+      "get": {
+        "operationId": "get_dialogue_memory_api_dialogues__dialogue_id__memory_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Dialogue Memory Api Dialogues  Dialogue Id  Memory Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Dialogue Memory"
+      },
+      "patch": {
+        "operationId": "patch_dialogue_memory_api_dialogues__dialogue_id__memory_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Patch Dialogue Memory Api Dialogues  Dialogue Id  Memory Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Dialogue Memory"
+      }
+    },
+    "/api/dialogues/{dialogue_id}/turns": {
+      "get": {
+        "operationId": "list_dialogue_turns_api_dialogues__dialogue_id__turns_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Dialogue Turns Api Dialogues  Dialogue Id  Turns Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Dialogue Turns"
+      },
+      "post": {
+        "operationId": "post_dialogue_turn_api_dialogues__dialogue_id__turns_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Post Dialogue Turn Api Dialogues  Dialogue Id  Turns Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Dialogue Turn"
+      }
+    },
+    "/api/dialogues/{dialogue_id}/turns/{turn_id}": {
+      "get": {
+        "operationId": "get_dialogue_turn_api_dialogues__dialogue_id__turns__turn_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dialogue_id",
+            "required": true,
+            "schema": {
+              "title": "Dialogue Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "title": "Turn Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Dialogue Turn Api Dialogues  Dialogue Id  Turns  Turn Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Dialogue Turn"
       }
     },
     "/api/health": {

@@ -1,0 +1,22 @@
+{
+  "schema_version": "d25-expectations-v1",
+  "scenario": "B",
+  "corpus_label": "agents-survey.pdf",
+  "source": "eval/d22/questions.json (facts/sections verified against the extracted corpus, not generated answers)",
+  "fixed_at": "2026-10-03T00:00:01+00:00",
+  "mandatory_answer_rule": "A turn has mandatory_answer=true when the user asks for a factual answer, a weak-context refusal, an out-of-corpus honest reply, a plan continuation or a summary. Pure memory directives (goal/condition setting and a pinpoint condition change) are not answer-bearing. A truncated/empty/errored mandatory answer can never yield a substantive scenario PASS.",
+  "turns": [
+    {"turn_index": 1, "question": "Цель: составить план внедрения RAG-ассистента", "expected_memory": "goal", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 2, "question": "условие: без облачных сервисов", "expected_memory": "constraint", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 3, "question": "условие: только локальные модели", "expected_memory": "constraint", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 4, "question": "условие: коротко", "expected_memory": "constraint", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 5, "question": "Какие компоненты нужны для RAG-системы?", "expected_facts": ["memory", "planning", "retrieval"], "expected_sources": ["2.1 Agent Architecture Design", "2.1.2 Memory Module"], "expected_pages": [3, 10], "mandatory_answer": true},
+    {"turn_index": 6, "question": "измени условие \"коротко\" на \"подробно\"", "expected_memory": "constraint_update_preserves_others", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 7, "question": "Какие компоненты нужны для RAG-системы?", "expected_behavior": "weak_context_refusal", "expected_facts": [], "expected_sources": [], "mandatory_answer": true},
+    {"turn_index": 8, "question": "Продолжи план внедрения", "expected_facts": ["planning", "task decomposition"], "expected_sources": ["2.1.3 Planning Module"], "expected_pages": [10, 13], "mandatory_answer": true},
+    {"turn_index": 9, "question": "Какая сегодня погода в Москве?", "expected_behavior": "honest_dont_know", "expected_facts": [], "expected_sources": [], "mandatory_answer": true},
+    {"turn_index": 10, "question": "как это связано с памятью?", "expected_facts": ["memory", "retrieval"], "expected_sources": ["2.1.2 Memory Module"], "expected_pages": [5, 10], "mandatory_answer": true},
+    {"turn_index": 11, "question": "Дай итоговый план с источниками", "expected_facts": ["planning", "memory"], "expected_sources": ["2.1.3 Planning Module", "2.1.2 Memory Module"], "expected_pages": [5, 13], "mandatory_answer": true},
+    {"turn_index": 12, "question": "Перечисли сохранённые условия", "expected_memory": "constraints_retained", "expected_facts": [], "expected_sources": [], "mandatory_answer": true}
+  ]
+}

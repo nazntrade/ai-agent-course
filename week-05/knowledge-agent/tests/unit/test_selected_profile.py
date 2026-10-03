@@ -314,3 +314,19 @@ def test_blank_stream_delta_is_invalid():
     model=OpenAIChatModel(load_test_profile(ENV),opener=lambda *a,**k:Response())
     with pytest.raises(ChatInvalidResponse):
         list(model.stream_chat(MSG))
+
+
+
+def test_empty_reasoning_budget_metadata_is_safe_and_provider_reported_only():
+    def opener(req, timeout):
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": "", "reasoning_content": "private thought"},
+                                                 "finish_reason": "length"}],
+                                      "usage": {"completion_tokens": 64, "completion_tokens_details": {"reasoning_tokens": 64}}}).encode())
+    model = OpenAIChatModel(load_test_profile(ENV), opener=opener, max_output_tokens=64)
+    with pytest.raises(ChatInvalidResponse) as caught:
+        model.chat(MSG)
+    assert caught.value.details["reasoning_tokens"] == 64
+    assert caught.value.details["visible_content_chars"] == 0
+    assert caught.value.details["reasoning_content_chars"] == len("private thought")
+    assert caught.value.details["requested_output_tokens"] == 64
+    assert "private thought" not in repr(caught.value.details)

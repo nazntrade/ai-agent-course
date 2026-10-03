@@ -1,0 +1,22 @@
+{
+  "schema_version": "d25-expectations-v1",
+  "scenario": "A",
+  "corpus_label": "agents-survey.pdf",
+  "source": "eval/d22/questions.json (facts/sections verified against the extracted corpus, not generated answers)",
+  "fixed_at": "2026-10-03T00:00:00+00:00",
+  "mandatory_answer_rule": "A turn has mandatory_answer=true when the user asks for a factual answer, a reference resolution, an out-of-corpus honest reply or a summary. Pure memory directives (goal/condition setting) are not answer-bearing. A truncated/empty/errored mandatory answer can never yield a substantive scenario PASS.",
+  "turns": [
+    {"turn_index": 1, "question": "Цель: изучить методы обучения автономных агентов", "expected_memory": "goal", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 2, "question": "условие: без кода", "expected_memory": "constraint", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 3, "question": "Какие подходы к обучению агентов описаны в обзоре?", "expected_facts": ["learning", "reinforcement learning", "demonstration", "supervision"], "expected_sources": ["2.2 Agent Capability Acquisition"], "expected_pages": [16, 21], "mandatory_answer": true},
+    {"turn_index": 4, "question": "как это связано с планированием?", "expected_facts": ["planning", "task decomposition", "feedback"], "expected_sources": ["2.1.3 Planning Module"], "expected_pages": [10, 13], "mandatory_answer": true},
+    {"turn_index": 5, "question": "Что описано в разделе про память агентов?", "expected_facts": ["short-term memory", "long-term memory", "retrieval"], "expected_sources": ["2.1.2 Memory Module"], "expected_pages": [5, 10], "mandatory_answer": true},
+    {"turn_index": 6, "question": "Цель: научиться строить RAG-ассистентов", "expected_memory": "goal_update", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 7, "question": "Продолжим: какие компоненты архитектуры агента выделяет обзор?", "expected_facts": ["profiling module", "memory module", "planning module", "action module"], "expected_sources": ["2.1 Agent Architecture Design"], "expected_pages": [3, 4], "requires_restart": true, "mandatory_answer": true},
+    {"turn_index": 8, "question": "измени условие \"без кода\" на \"код можно, только Python\"", "expected_memory": "constraint_update", "expected_facts": [], "expected_sources": [], "mandatory_answer": false},
+    {"turn_index": 9, "question": "Сколько будет два плюс два?", "expected_behavior": "not_required_from_corpus", "expected_facts": [], "expected_sources": [], "mandatory_answer": true},
+    {"turn_index": 10, "question": "Вернёмся к обучению агентов: что ещё важно?", "expected_facts": ["learning", "supervision"], "expected_sources": ["2.2 Agent Capability Acquisition"], "expected_pages": [16, 21], "mandatory_answer": true},
+    {"turn_index": 11, "question": "как это связано с памятью?", "expected_facts": ["memory", "retrieval"], "expected_sources": ["2.1.2 Memory Module"], "expected_pages": [5, 10], "mandatory_answer": true},
+    {"turn_index": 12, "question": "Подведи итог с учётом всех условий", "expected_memory": "goal_and_constraints_retained", "expected_facts": [], "expected_sources": [], "mandatory_answer": true}
+  ]
+}

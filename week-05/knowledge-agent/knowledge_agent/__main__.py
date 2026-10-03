@@ -15,10 +15,12 @@ from .chat.rewrite import ChatQueryRewriter
 from .chat.run_store import FileChatRunStore
 from .chunking.fixed import FixedChunker
 from .chunking.structure import StructureChunker
-from .config import Settings, apply_env_file, load_settings
+from .config import Settings, apply_env_file, load_settings, d25_generation_settings
 from .embedding.ollama_embedder import OllamaEmbedder
+from .service.conversation_service import ConversationService
 from .service.knowledge_service import KnowledgeService
 from .sources import DefaultSourceResolver
+from .storage.conversation_store import SqliteConversationStore
 from .storage.sqlite_store import SqliteIndexStore
 from .text.tokenizer import LexicalTokenizer
 
@@ -135,6 +137,29 @@ def build_chat_service(settings: Settings, service: KnowledgeService) -> ChatSer
     )
 
 
+def build_conversation_service(
+    settings: Settings, chat_service: ChatService
+) -> tuple[ConversationService, SqliteConversationStore]:
+    db_path = Path(settings.dialogue_db_path)
+    if not db_path.is_absolute():
+        db_path = MODULE_DIR / db_path
+    store = SqliteConversationStore(db_path)
+    # D25 dialogue generation has its own adequate output/context allowance.
+    # The existing D22-D24 service and its public budgets remain unchanged.
+    available = chat_service.chat_model.identity().context_length if settings.test_profile else None
+    dialogue_settings = d25_generation_settings(settings, available_context=available)
+    if (chat_service.max_context_tokens != dialogue_settings.chat_context_tokens
+            or chat_service.reserved_output_tokens != dialogue_settings.chat_max_output_tokens):
+        chat_service = build_chat_service(dialogue_settings, chat_service.knowledge)
+    service = ConversationService(
+        store,
+        chat_service,
+        history_max_turns=settings.d25_history_max_turns,
+        history_max_tokens=settings.d25_history_max_tokens,
+    )
+    return service, store
+
+
 def main() -> int:
     if os.environ.get("KNOWLEDGE_SKIP_ENV_FILE") != "1":
         apply_env_file(MODULE_DIR / ".env")
@@ -145,7 +170,13 @@ def main() -> int:
 
     service, store = build_service(settings)
     chat_service = build_chat_service(settings, service)
-    app = create_app(service, chat_service=chat_service, title=settings.ui_title)
+    conversation_service, conversation_store = build_conversation_service(settings, chat_service)
+    app = create_app(
+        service,
+        chat_service=chat_service,
+        conversation_service=conversation_service,
+        title=settings.ui_title,
+    )
     try:
         import uvicorn
 
@@ -154,6 +185,7 @@ def main() -> int:
         return 0
     finally:
         store.close()
+        conversation_store.close()
     return 0
 
 

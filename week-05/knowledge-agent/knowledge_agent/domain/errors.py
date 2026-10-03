@@ -162,3 +162,45 @@ class IndexBusy(IndexConflict):
 class StoreSchemaUnsupported(KnowledgeError):
     code = "store_schema_unsupported"
     http_status = 500
+
+
+# Day 25 conversation store / task memory (SPEC D25 6, 9-11).
+class ConversationError(KnowledgeError):
+    """Base error for the D25 dialogue layer."""
+
+    code = "conversation_error"
+    http_status = 500
+
+
+class DialogueNotFound(ConversationError):
+    code = "dialogue_not_found"
+    http_status = 404
+
+
+class TurnNotFound(ConversationError):
+    code = "turn_not_found"
+    http_status = 404
+
+
+class DeletionRequiresConfirmation(ConversationError):
+    code = "deletion_requires_confirmation"
+    http_status = 409
+
+
+class MemoryConflict(ConversationError):
+    """Optimistic-lock conflict on ``memory.version`` (SPEC D25 9.4)."""
+
+    code = "memory_conflict"
+    http_status = 409
+
+
+class InvalidMemoryOperation(ConversationError):
+    """A memory patch has no user-message grounds or an unknown target."""
+
+    code = "invalid_memory_operation"
+    http_status = 422
+
+
+class ConversationStoreSchemaUnsupported(ConversationError):
+    code = "conversation_store_schema_unsupported"
+    http_status = 500

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..domain.errors import ContextOverflow
 
@@ -77,12 +77,24 @@ class ContextBudget:
         candidates: Sequence[Mapping[str, Any]],
         request_max_context_tokens: int | None = None,
         model_context_length: int | None = None,
+        context_renderer: Callable[[Sequence[Mapping[str, Any]]], str] | None = None,
     ) -> ContextPlan:
         effective = self.effective_context_tokens(
             request_max_context_tokens, model_context_length
         )
         prompt_budget = effective - self.reserved_output_tokens - self.safety_margin
         mandatory_tokens = sum(self.estimate(text) for text in mandatory_texts)
+        # D25 C17: whenever there is documentary content to consider, the rendered
+        # ``<context>`` block (markup + provenance labels) is part of the actual
+        # outgoing request, so its base wrapper is mandatory. A candidate without
+        # text carries no content, so the historical empty-passed behaviour
+        # (no wrapper charged) is preserved.
+        wrapper_base = 0
+        if context_renderer is not None and any(
+            str(candidate.get("text") or "") for candidate in candidates
+        ):
+            wrapper_base = self.estimate(context_renderer([]))
+        mandatory_tokens += wrapper_base
         if prompt_budget <= 0 or mandatory_tokens > prompt_budget:
             raise ContextOverflow(
                 "The instructions and question do not fit the context budget.",
@@ -97,18 +109,32 @@ class ContextBudget:
 
         passed: list[dict[str, Any]] = []
         used = mandatory_tokens
+        context_tokens = wrapper_base
         dropped = 0
         dropped_ids: list[str] = []
         for candidate in candidates:
             estimated = self.estimate(str(candidate.get("text") or ""))
-            if used + estimated > prompt_budget:
+            block_tokens = context_tokens
+            if context_renderer is not None:
+                if estimated:
+                    # Count the actual wrapper text (labels, separators) this
+                    # chunk adds to the outgoing block, not just its raw text.
+                    block_tokens = self.estimate(context_renderer(passed + [candidate]))
+                    incremental = block_tokens - context_tokens
+                else:
+                    incremental = 0
+            else:
+                incremental = estimated
+            if used + incremental > prompt_budget:
                 # Keep the whole chunk out and still try smaller later chunks.
                 dropped += 1
                 chunk_id = candidate.get("chunk_id")
                 if chunk_id is not None:
                     dropped_ids.append(str(chunk_id))
                 continue
-            used += estimated
+            used += incremental
+            if context_renderer is not None:
+                context_tokens = block_tokens
             passed.append(
                 {
                     "rank": candidate.get("rank"),

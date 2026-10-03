@@ -1123,3 +1123,597 @@ wire();
 refreshHealth().catch(markHealthUnavailable);
 setInterval(() => refreshHealth().catch(markHealthUnavailable), 10000);
 refreshCollections().catch((e) => showError(e.message));
+
+// ---- Day 25 mini-chat shell -------------------------------------------------
+
+const d25 = {
+  dialogues: [],
+  dialogueId: null,
+  memory: null,
+  turns: [],
+  busy: false,
+  requestId: 0,
+  lastUserTurnId: null,
+  pendingSubmission: null,
+  turnTotal: 0,
+  olderRequest: null,
+};
+
+function d25NewClientTurnId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return "ui-" + crypto.randomUUID();
+  }
+  return "ui-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
+}
+
+function d25StrategyPayload() {
+  const payload = {
+    mode: "with_rag",
+    top_k: Number($("chat-top-k").value) || 10,
+    min_score: Number($("d23-min-score").value),
+    prefilter_top_k: Number($("d23-prefilter").value) || 20,
+    postfilter_top_k: Number($("d23-postfilter").value) || 5,
+    grounding: true,
+  };
+  const mode = $("d23-mode").value;
+  payload.use_filter = mode === "B" || mode === "D";
+  payload.use_rewrite = mode === "C" || mode === "D";
+  if (!payload.use_filter) {
+    payload.prefilter_top_k = payload.top_k;
+    payload.postfilter_top_k = payload.top_k;
+  }
+  const strategy = $("chat-strategy").value;
+  if (strategy !== "active") payload.strategy = strategy;
+  if (state.collectionId) payload.collection_id = state.collectionId;
+  const maxContext = Number($("chat-max-context").value);
+  if (maxContext > 0) payload.max_context_tokens = maxContext;
+  return payload;
+}
+
+async function refreshDialogues() {
+  const listRequest = d25.requestId;
+  const data = await api("/api/dialogues");
+  if (d25.requestId !== listRequest) return;
+  d25.dialogues = data.dialogues || [];
+  if (!d25.dialogues.length) {
+    d25.dialogueId = null;
+    d25.memory = null;
+    d25.turns = [];
+    renderDialogueList();
+    renderConversation();
+    renderMemory(null);
+    return;
+  }
+  if (!d25.dialogues.some((item) => item.dialogue_id === d25.dialogueId)) {
+    d25.dialogueId = d25.dialogues[0].dialogue_id;
+  }
+  renderDialogueList();
+  await openDialogue(d25.dialogueId);
+}
+
+function renderDialogueList() {
+  const list = $("dialogue-list");
+  list.textContent = "";
+  for (const dialogue of d25.dialogues) {
+    const item = document.createElement("li");
+    if (dialogue.dialogue_id === d25.dialogueId) item.className = "active";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = dialogue.name;
+    name.onclick = () => openDialogue(dialogue.dialogue_id).catch((e) => showError(e.message));
+    item.appendChild(name);
+    const rename = document.createElement("button");
+    rename.textContent = "Rename";
+    rename.onclick = (event) => {
+      if (event && event.stopPropagation) event.stopPropagation();
+      renameDialogue(dialogue).catch((e) => showError(e.message));
+    };
+    item.appendChild(rename);
+    const remove = document.createElement("button");
+    remove.textContent = "Delete";
+    remove.onclick = (event) => {
+      if (event && event.stopPropagation) event.stopPropagation();
+      deleteDialogue(dialogue).catch((e) => showError(e.message));
+    };
+    item.appendChild(remove);
+    list.appendChild(item);
+  }
+}
+
+async function openDialogue(dialogueId) {
+  d25.dialogueId = dialogueId;
+  const loadRequest = ++d25.requestId;
+  d25.olderRequest = null;
+  d25.turns = [];
+  d25.memory = null;
+  d25.turnTotal = 0;
+  renderConversation();
+  renderMemory(null);
+  $("conversation-state").textContent = "";
+  $("conversation-state").className = "conversation-state";
+  renderDialogueList();
+  const [turnsData, dialogue] = await Promise.all([
+    api("/api/dialogues/" + encodeURIComponent(dialogueId) + "/turns?limit=200"),
+    api("/api/dialogues/" + encodeURIComponent(dialogueId)),
+  ]);
+  if (d25.dialogueId !== dialogueId || d25.requestId !== loadRequest) return;
+  d25.turns = turnsData.turns || [];
+  d25.turnTotal = turnsData.total || d25.turns.length;
+  d25.memory = dialogue.memory || null;
+  renderConversation();
+  renderMemory(d25.memory);
+}
+
+async function loadOlderDialogueTurns() {
+  if (d25.olderRequest !== null || !d25.turns.length) return;
+  const dialogueId = d25.dialogueId;
+  const request = d25.requestId;
+  const before = d25.turns[0].ordinal;
+  if (!before) return;
+  d25.olderRequest = request;
+  try {
+    const page = await api("/api/dialogues/" + encodeURIComponent(dialogueId) + "/turns?limit=200&before=" + before);
+    if (d25.dialogueId !== dialogueId || d25.requestId !== request) return;
+    const container = $("conversation");
+    const oldHeight = container.scrollHeight;
+    const oldTop = container.scrollTop;
+    const existing = new Set(d25.turns.map(turn => turn.turn_id));
+    d25.turns = [...(page.turns || []).filter(turn => !existing.has(turn.turn_id)), ...d25.turns];
+    d25.turnTotal = page.total || d25.turnTotal;
+    renderConversation();
+    container.scrollTop = oldTop + container.scrollHeight - oldHeight;
+  } catch (error) {
+    if (d25.dialogueId === dialogueId) showError(error.message);
+  } finally {
+    if (d25.olderRequest === request) d25.olderRequest = null;
+  }
+}
+
+async function createDialogue() {
+  const created = await api("/api/dialogues", { method: "POST", body: JSON.stringify({}) });
+  d25.dialogues.unshift(created);
+  renderDialogueList();
+  await openDialogue(created.dialogue_id);
+}
+
+function dialogueDecision(title, value = null) {
+  return new Promise((resolve) => {
+    const modal = document.createElement("dialog");
+    modal.className = "dialogue-modal";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    modal.appendChild(heading);
+    let input = null;
+    if (value !== null) {
+      input = document.createElement("input");
+      input.value = value;
+      input.setAttribute("aria-label", "Dialogue name");
+      modal.appendChild(input);
+    }
+    const actions = document.createElement("div");
+    actions.className = "row";
+    const accept = document.createElement("button");
+    accept.className = "primary";
+    accept.textContent = value === null ? "Delete dialogue" : "Save name";
+    const cancel = document.createElement("button");
+    cancel.textContent = "Cancel";
+    const finish = (result) => { modal.close(); modal.remove(); resolve(result); };
+    accept.onclick = () => finish(input ? input.value : true);
+    cancel.onclick = () => finish(null);
+    modal.oncancel = (event) => { event.preventDefault(); finish(null); };
+    if (input) input.onkeydown = (event) => {
+      if (event.key === "Enter") { event.preventDefault(); accept.click(); }
+    };
+    actions.appendChild(accept);
+    actions.appendChild(cancel);
+    modal.appendChild(actions);
+    document.body.appendChild(modal);
+    modal.showModal();
+    if (input) { input.focus(); input.select(); }
+  });
+}
+
+async function renameDialogue(dialogue) {
+  const next = await dialogueDecision("Rename dialogue", dialogue.name);
+  if (next === null || !next.trim()) return;
+  await api("/api/dialogues/" + encodeURIComponent(dialogue.dialogue_id), {
+    method: "PATCH", body: JSON.stringify({ name: next.trim() }),
+  });
+  await refreshDialogues();
+}
+
+async function deleteDialogue(dialogue) {
+  if (!await dialogueDecision('Delete dialogue "' + dialogue.name + '"?')) return;
+  await api("/api/dialogues/" + encodeURIComponent(dialogue.dialogue_id) + "?confirm=true", { method: "DELETE" });
+  if (d25.dialogueId === dialogue.dialogue_id) {
+    d25.dialogueId = null;
+    d25.turns = [];
+    d25.memory = null;
+    renderConversation();
+    renderMemory(null);
+  }
+  await refreshDialogues();
+}
+
+function renderConversation() {
+  const container = $("conversation");
+  container.textContent = "";
+  d25.lastUserTurnId = null;
+  if (!d25.turns.length) {
+    const empty = document.createElement("div");
+    empty.className = "memory-empty";
+    empty.textContent = d25.dialogueId
+      ? "No messages yet — ask the first question."
+      : "Create a dialogue to start chatting.";
+    container.appendChild(empty);
+    return;
+  }
+  if (d25.turns.length < d25.turnTotal && d25.turns[0].ordinal > 1) {
+    const older = document.createElement("button");
+    older.textContent = "Load older messages";
+    older.onclick = () => loadOlderDialogueTurns();
+    container.appendChild(older);
+  }
+  for (const turn of d25.turns) {
+    renderTurn(turn);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderTurn(turn) {
+  const container = $("conversation");
+  const user = document.createElement("div");
+  user.className = "message user";
+  const userText = document.createElement("div");
+  userText.className = "text";
+  userText.textContent = turn.user_message || "";
+  user.appendChild(userText);
+  container.appendChild(user);
+  if (turn.turn_id) d25.lastUserTurnId = turn.turn_id;
+
+  const assistant = document.createElement("div");
+  assistant.className = "message assistant";
+  if (["error", "citation_failed", "incomplete"].includes(turn.status) || (turn.answer && turn.answer.truncated)) assistant.className = "message assistant error";
+  if (turn.status === "refused") assistant.className = "message assistant insufficient";
+  if (turn.status === "clarification") assistant.className = "message assistant clarification";
+  const text = document.createElement("div");
+  text.className = "text";
+  text.textContent = (turn.answer && turn.answer.text) || "(no answer)";
+  assistant.appendChild(text);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const parts = ["status: " + (turn.status || "n/a")];
+  if (turn.search_query && turn.search_query !== turn.original_query) {
+    parts.push("search query: " + turn.search_query);
+  }
+  if (turn.answer && turn.answer.finish_reason) parts.push("finish_reason: " + turn.answer.finish_reason);
+  if (turn.answer && turn.answer.truncated) parts.push("truncated");
+  if (turn.error && turn.error.code) parts.push("error: " + turn.error.code);
+  meta.textContent = parts.join(" · ");
+  assistant.appendChild(meta);
+
+  renderTurnSources(assistant, turn);
+  container.appendChild(assistant);
+}
+
+function renderTurnSources(assistant, turn) {
+  const indexVersionId = (turn.settings || {}).index_version_id;
+  const sources = turn.sources || [];
+  const citations = turn.citations || [];
+  const taskMemory = turn.task_state_summary || (turn.answer && turn.answer.task_state_summary);
+  if (taskMemory || (!sources.length && !citations.length)) {
+    const note = document.createElement("div");
+    note.className = "meta";
+    note.textContent = taskMemory
+      ? "Source: your confirmed task memory; no documentary claims."
+      : "No document sources support this turn.";
+    assistant.appendChild(note);
+    return;
+  }
+  const block = document.createElement("div");
+  block.className = "turn-sources";
+  const heading = document.createElement("div");
+  heading.className = "meta";
+  heading.textContent = "Sources & citations";
+  block.appendChild(heading);
+  const grounding = (turn.answer || {}).grounding || {};
+  const checkLine = document.createElement("div");
+  checkLine.className = "meta";
+  checkLine.textContent = "Citation check: " + (grounding.status || (turn.answer || {}).grounding_status || "not checked") +
+    " · Meaning support: " + (grounding.meaning_check && grounding.meaning_check !== "not_performed" ? grounding.meaning_check : "not checked");
+  block.appendChild(checkLine);
+  for (const source of sources) {
+    const item = document.createElement("div");
+    item.className = "turn-source";
+    const pages = source.page_start ? "pages " + source.page_start + "-" + source.page_end : "pages n/a";
+    item.textContent =
+      (source.source || "n/a") + " · " + (source.section || "n/a") + " · chunk_id: " +
+      (source.chunk_id || "n/a") + " · " + pages;
+    if (indexVersionId && source.chunk_id) {
+      const button = document.createElement("button");
+      button.textContent = "Show full chunk";
+      const target = document.createElement("pre");
+      target.className = "fragment-text";
+      button.onclick = () => showFragment(indexVersionId, source.chunk_id, target);
+      item.appendChild(button);
+      item.appendChild(target);
+    }
+    block.appendChild(item);
+  }
+  for (const citation of citations) {
+    const item = document.createElement("div");
+    item.className = "turn-source";
+    item.textContent = "[" + (citation.status || "citation") + "] " + (citation.chunk_id || "");
+    const quote = document.createElement("div");
+    quote.className = "quote";
+    quote.textContent = citation.quote || "";
+    item.appendChild(quote);
+    block.appendChild(item);
+  }
+  assistant.appendChild(block);
+}
+
+function renderMemory(memory) {
+  const container = $("memory-block");
+  container.textContent = "";
+  const heading = document.createElement("h3");
+  heading.textContent = "Task memory";
+  container.appendChild(heading);
+  if (!memory) {
+    const empty = document.createElement("div");
+    empty.className = "memory-empty";
+    empty.textContent = "No task memory yet.";
+    container.appendChild(empty);
+    return;
+  }
+  addMemoryItem(container, "Goal", memory.goal ? memory.goal.text : null, memory.goal ? memory.goal.grounds : []);
+  for (const item of memory.constraints || []) {
+    const label = "Constraint (" + item.status + ")";
+    addMemoryItem(container, label, item.text, item.grounds);
+  }
+  for (const item of memory.terms || []) {
+    addMemoryItem(container, "Term", item.term + " = " + (item.definition || ""), item.grounds);
+  }
+  for (const item of memory.clarifications || []) {
+    addMemoryItem(container, "Clarification", (item.question || "") + " = " + (item.answer || ""), item.grounds);
+  }
+  const edit = document.createElement("button");
+  edit.textContent = "Edit memory";
+  edit.onclick = () => renderMemoryEditor(memory);
+  container.appendChild(edit);
+}
+
+function addMemoryItem(container, label, value, grounds) {
+  const item = document.createElement("div");
+  item.className = "memory-item";
+  const text = document.createElement("div");
+  text.textContent = label + ": " + (value || "—");
+  item.appendChild(text);
+  const groundLine = document.createElement("div");
+  groundLine.className = "grounds";
+  groundLine.textContent = "grounds: ";
+  const dialogueId = d25.dialogueId;
+  const requestId = d25.requestId;
+  const ids = grounds || [];
+  if (!ids.length) groundLine.appendChild(document.createTextNode("none"));
+  for (const id of ids) {
+    const button = document.createElement("button");
+    button.textContent = "Open message " + String(id).slice(0, 16);
+    button.title = String(id);
+    const sourceText = document.createElement("div");
+    sourceText.className = "memory-ground-message";
+    button.onclick = async () => {
+      button.disabled = true;
+      sourceText.textContent = "Loading the original user message…";
+      try {
+        const turn = await api("/api/dialogues/" + encodeURIComponent(dialogueId) + "/turns/" + encodeURIComponent(id));
+        if (dialogueId !== d25.dialogueId || requestId !== d25.requestId) return;
+        sourceText.textContent = "User message " + String(id) + ": " + (turn.user_message || "(empty)");
+      } catch (error) {
+        if (dialogueId === d25.dialogueId && requestId === d25.requestId) sourceText.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+    groundLine.appendChild(button);
+    groundLine.appendChild(sourceText);
+  }
+  item.appendChild(groundLine);
+  container.appendChild(item);
+}
+
+function renderMemoryEditor(memory) {
+  const editorDialogueId = d25.dialogueId;
+  const editorRequestId = d25.requestId;
+  const editorGround = d25.lastUserTurnId;
+  const container = $("memory-block");
+  container.textContent = "";
+  const heading = document.createElement("h3");
+  heading.textContent = "Edit task memory";
+  container.appendChild(heading);
+  const goalInput = document.createElement("input");
+  goalInput.type = "text";
+  goalInput.value = memory.goal ? memory.goal.text : "";
+  goalInput.placeholder = "Goal";
+  container.appendChild(goalInput);
+  const constraintInput = document.createElement("input");
+  constraintInput.type = "text";
+  constraintInput.placeholder = "New constraint";
+  container.appendChild(constraintInput);
+  const constraintEdits = [];
+  for (const item of memory.constraints || []) {
+    if (item.status !== "active") continue;
+    const row = document.createElement("div");
+    row.className = "memory-item";
+    const field = document.createElement("input");
+    field.value = item.text;
+    field.setAttribute("aria-label", "Edit condition: " + item.text);
+    const label = document.createElement("label");
+    const cancelCondition = document.createElement("input");
+    cancelCondition.type = "checkbox";
+    label.appendChild(cancelCondition);
+    label.appendChild(document.createTextNode("Cancel condition"));
+    row.appendChild(field);
+    row.appendChild(label);
+    container.appendChild(row);
+    constraintEdits.push({ item, field, cancelCondition });
+  }
+  const status = document.createElement("div");
+  status.className = "meta";
+  container.appendChild(status);
+  const save = document.createElement("button");
+  save.className = "primary";
+  save.textContent = "Save";
+  save.onclick = async () => {
+    if (d25.dialogueId !== editorDialogueId || d25.requestId !== editorRequestId) return;
+    const ground = editorGround;
+    if (!ground) {
+      status.textContent = "Ask a question first so the edit has user-message grounds.";
+      return;
+    }
+    const operations = [];
+    const goalText = goalInput.value.trim();
+    if (goalText && (!memory.goal || memory.goal.text !== goalText)) {
+      operations.push({ op: "set_goal", text: goalText, grounds: [ground] });
+    }
+    const constraintText = constraintInput.value.trim();
+    if (constraintText) {
+      operations.push({ op: "add_constraint", text: constraintText, grounds: [ground] });
+    }
+    for (const edit of constraintEdits) {
+      if (edit.cancelCondition.checked) {
+        operations.push({ op: "cancel_constraint", target_item_id: edit.item.item_id, grounds: [ground] });
+      } else if (edit.field.value.trim() && edit.field.value.trim() !== edit.item.text) {
+        operations.push({ op: "update_constraint", target_item_id: edit.item.item_id,
+          text: edit.field.value.trim(), grounds: [ground] });
+      }
+    }
+    if (!operations.length) {
+      status.textContent = "Nothing to change.";
+      return;
+    }
+    try {
+      const updatedMemory = await api(
+        "/api/dialogues/" + encodeURIComponent(editorDialogueId) + "/memory",
+        { method: "PATCH", body: JSON.stringify({ expected_version: memory.version, operations }) },
+      );
+      if (d25.dialogueId !== editorDialogueId || d25.requestId !== editorRequestId) return;
+      d25.memory = updatedMemory;
+      renderMemory(d25.memory);
+    } catch (error) {
+      status.textContent = error.message;
+    }
+  };
+  container.appendChild(save);
+  const cancel = document.createElement("button");
+  cancel.textContent = "Cancel";
+  cancel.onclick = () => renderMemory(d25.memory);
+  container.appendChild(cancel);
+}
+
+async function sendDialogueMessage() {
+  if (d25.busy) return;
+  if (!d25.dialogueId) {
+    showError("Create or select a dialogue first.");
+    return;
+  }
+  const input = $("d25-input");
+  const question = input.value.trim();
+  if (!question) return;
+  showError("");
+  const requestId = ++d25.requestId;
+  d25.busy = true;
+  $("d25-send").disabled = true;
+  const stateLine = $("conversation-state");
+  stateLine.className = "conversation-state waiting";
+  stateLine.textContent = "Waiting for the model…";
+  const pending = document.createElement("div");
+  pending.className = "message assistant pending";
+  pending.textContent = "…";
+  $("conversation").appendChild(pending);
+  try {
+    const dialogueId = d25.dialogueId;
+    const prior = d25.pendingSubmission;
+    const clientTurnId = prior && prior.dialogueId === dialogueId && prior.question === question
+      ? prior.clientTurnId : d25NewClientTurnId();
+    d25.pendingSubmission = { dialogueId, question, clientTurnId };
+    const payload = { ...d25StrategyPayload(), client_turn_id: clientTurnId, question };
+    const turn = await api(
+      "/api/dialogues/" + encodeURIComponent(dialogueId) + "/turns",
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+    d25.pendingSubmission = null;
+    if (requestId !== d25.requestId || dialogueId !== d25.dialogueId) return;
+    input.value = "";
+    input.style.height = "auto";
+    if (!d25.turns.some(existing => existing.turn_id === turn.turn_id)) {
+      d25.turns.push(turn);
+      d25.turnTotal += 1;
+    }
+    renderConversation();
+    const currentMemory = await api("/api/dialogues/" + encodeURIComponent(dialogueId) + "/memory");
+    if (requestId !== d25.requestId || dialogueId !== d25.dialogueId) return;
+    d25.memory = currentMemory;
+    renderMemory(d25.memory);
+    if (turn.status === "incomplete" || (turn.answer && turn.answer.truncated)) {
+      stateLine.className = "conversation-state error";
+      stateLine.textContent = "The answer was truncated and is incomplete. It is not a completed response.";
+    } else if (["error", "citation_failed"].includes(turn.status)) {
+      stateLine.className = "conversation-state error";
+      stateLine.textContent = turn.status === "citation_failed"
+        ? "The answer could not be verified against the documents. Check its sources."
+        : "The turn failed: " + ((turn.error && turn.error.code) || "error");
+    } else if (turn.status === "refused" || (turn.answer && turn.answer.insufficient_sources)) {
+      stateLine.className = "conversation-state insufficient";
+      stateLine.textContent = "No suitable sources were found in the selected documents.";
+    } else if (turn.status === "clarification") {
+      stateLine.className = "conversation-state";
+      stateLine.textContent = "The assistant asked for clarification.";
+    } else {
+      stateLine.className = "conversation-state";
+      stateLine.textContent = "Done.";
+    }
+  } catch (error) {
+    if (requestId === d25.requestId) {
+      pending.className = "message assistant error";
+      pending.textContent = error.message;
+      stateLine.className = "conversation-state error";
+      stateLine.textContent = error.message;
+    }
+  } finally {
+    // A dialogue switch invalidates rendering, not the single in-flight request.
+    d25.busy = false;
+    $("d25-send").disabled = false;
+    if (pending.parentNode) pending.parentNode.removeChild(pending);
+  }
+}
+
+function wireD25() {
+  const list = $("dialogue-list");
+  if (!list) return;
+  $("dialogue-new").onclick = () => createDialogue().catch((e) => showError(e.message));
+  $("d25-send").onclick = () => sendDialogueMessage();
+  $("rag-toggle").onclick = () => {
+    const panel = $("rag-panel");
+    if (panel.classList) {
+      const collapsed = panel.classList.toggle("collapsed");
+      $("chat-layout").classList.toggle("rag-hidden", collapsed);
+      $("rag-toggle").setAttribute("aria-expanded", String(!collapsed));
+    }
+  };
+  const input = $("d25-input");
+  input.onkeydown = (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendDialogueMessage();
+    }
+  };
+  input.oninput = () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 180) + "px";
+  };
+}
+
+wireD25();
+refreshDialogues().catch((error) => showError("Could not load dialogues: " + error.message));

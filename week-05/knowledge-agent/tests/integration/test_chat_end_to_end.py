@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -23,6 +22,7 @@ for extra in (str(MODULE_DIR), str(HARNESS_DIR)):
 
 import chat_stub  # noqa: E402
 import embed_stub  # noqa: E402
+from harness.owned_backend import isolated_backend_env  # noqa: E402
 
 CHAT_MODEL = "stub-chat:latest"
 
@@ -66,20 +66,18 @@ class Backend:
     def __init__(self, db_path: Path, embed_url: str, chat_url: str, extra_env: dict | None = None) -> None:
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
-        env = dict(os.environ)
-        env.update(
-            {
-                "KNOWLEDGE_HOST": "127.0.0.1",
-                "KNOWLEDGE_PORT": str(self.port),
-                "KNOWLEDGE_DB_PATH": str(db_path),
-                "EMBED_BASE_URL": embed_url,
-                "CHAT_BASE_URL": chat_url,
-                "CHAT_MODEL": CHAT_MODEL,
-                "KNOWLEDGE_SKIP_ENV_FILE": "1",
-            }
-        )
+        overrides = {
+            "KNOWLEDGE_HOST": "127.0.0.1",
+            "KNOWLEDGE_PORT": str(self.port),
+            "KNOWLEDGE_DB_PATH": str(db_path),
+            "EMBED_BASE_URL": embed_url,
+            "CHAT_BASE_URL": chat_url,
+            "CHAT_MODEL": CHAT_MODEL,
+            "KNOWLEDGE_SKIP_ENV_FILE": "1",
+        }
         if extra_env:
-            env.update(extra_env)
+            overrides.update(extra_env)
+        env = isolated_backend_env(db_path, overrides)
         self.process = subprocess.Popen(
             [sys.executable, "-m", "knowledge_agent"],
             cwd=str(MODULE_DIR),

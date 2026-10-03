@@ -67,6 +67,7 @@ set "SMOKE_WORK_DIR="
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$smokeDir=Join-Path ([IO.Path]::GetTempPath()) ('knowledge-smoke-db-'+[Guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($smokeDir); $smokeDir"`) do set "SMOKE_WORK_DIR=%%I"
 if not defined SMOKE_WORK_DIR exit /b 2
 set "KNOWLEDGE_DB_PATH=%SMOKE_WORK_DIR%\index.sqlite3"
+set "DIALOGUE_DB_PATH=%SMOKE_WORK_DIR%\conversations.sqlite3"
 set "CHAT_RUNS_PATH=%SMOKE_WORK_DIR%\chat-runs"
 set "KNOWLEDGE_SOURCE_PATH="
 
@@ -172,7 +173,7 @@ if defined CHAT_STUB_PID (
     taskkill /F /T /PID %CHAT_STUB_PID% >nul 2>&1
     if errorlevel 1 ( echo WARNING: could not stop the chat stub %CHAT_STUB_PID%; stop it manually. ) else ( echo Stopped the chat stub started by this script. )
 )
-if defined SMOKE_WORK_DIR if exist "%SMOKE_WORK_DIR%" rmdir /s /q "%SMOKE_WORK_DIR%" >nul 2>&1
+if defined SMOKE_WORK_DIR powershell -NoProfile -Command "$smokeRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar); $smokeTarget=[IO.Path]::GetFullPath($env:SMOKE_WORK_DIR).TrimEnd([IO.Path]::DirectorySeparatorChar); if(([IO.Path]::GetDirectoryName($smokeTarget) -ne $smokeRoot) -or ([IO.Path]::GetFileName($smokeTarget) -notmatch '^knowledge-smoke-db-[0-9a-f]{32}$')){ Write-Warning 'Refusing cleanup outside the owned smoke directory'; exit 1 }; if(Test-Path -LiteralPath $smokeTarget){ Remove-Item -LiteralPath $smokeTarget -Recurse -Force }"
 exit /b 0
 
 :ensure_venv

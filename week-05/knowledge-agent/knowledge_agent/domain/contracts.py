@@ -490,6 +490,195 @@ class IndexStore(ABC):
     def db_size_bytes(self) -> int: ...
 
 
+# ---- Day 25 conversation layer (SPEC D25 5-6) --------------------------------
+
+DIALOGUE_SCHEMA_VERSION = "dialogue-v1"
+TURN_SCHEMA_VERSION = "dialogue-turn-v1"
+TASK_MEMORY_SCHEMA_VERSION = "task-memory-v1"
+REFERENCE_RESOLUTION_SCHEMA_VERSION = "reference-resolution-v1"
+
+
+@dataclass
+class TaskMemory:
+    """Task memory (``task-memory-v1``): separate from history and the index."""
+
+    dialogue_id: str
+    version: int = 0
+    goal: dict[str, Any] | None = None
+    clarifications: list[dict[str, Any]] = field(default_factory=list)
+    constraints: list[dict[str, Any]] = field(default_factory=list)
+    terms: list[dict[str, Any]] = field(default_factory=list)
+    schema_version: str = TASK_MEMORY_SCHEMA_VERSION
+
+    def active_constraints(self) -> list[dict[str, Any]]:
+        return [item for item in self.constraints if item.get("status") == "active"]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "dialogue_id": self.dialogue_id,
+            "version": int(self.version),
+            "goal": dict(self.goal) if self.goal else None,
+            "clarifications": [dict(item) for item in self.clarifications],
+            "constraints": [dict(item) for item in self.constraints],
+            "terms": [dict(item) for item in self.terms],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TaskMemory":
+        return cls(
+            dialogue_id=str(payload.get("dialogue_id") or ""),
+            version=int(payload.get("version") or 0),
+            goal=dict(payload["goal"]) if payload.get("goal") else None,
+            clarifications=[dict(item) for item in payload.get("clarifications") or []],
+            constraints=[dict(item) for item in payload.get("constraints") or []],
+            terms=[dict(item) for item in payload.get("terms") or []],
+            schema_version=str(payload.get("schema_version") or TASK_MEMORY_SCHEMA_VERSION),
+        )
+
+
+@dataclass
+class MemoryOperation:
+    """One typed memory patch operation (SPEC D25 6.4)."""
+
+    op: str
+    grounds: list[str] = field(default_factory=list)
+    text: str | None = None
+    target_item_id: str | None = None
+    match_text: str | None = None
+    question: str | None = None
+    answer: str | None = None
+    reason: str | None = None
+    term: str | None = None
+    definition: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"op": self.op, "grounds": list(self.grounds)}
+        for key in ("text", "target_item_id", "match_text", "question", "answer", "reason", "term", "definition"):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MemoryOperation":
+        return cls(
+            op=str(payload.get("op") or ""),
+            grounds=[str(item) for item in payload.get("grounds") or []],
+            text=payload.get("text"),
+            target_item_id=payload.get("target_item_id"),
+            match_text=payload.get("match_text"),
+            question=payload.get("question"),
+            answer=payload.get("answer"),
+            reason=payload.get("reason"),
+            term=payload.get("term"),
+            definition=payload.get("definition"),
+        )
+
+
+@dataclass
+class ReferenceResolution:
+    """``reference-resolution-v1``: original question vs search query (SPEC 6.6)."""
+
+    original_query: str
+    search_query: str
+    used_history: bool = False
+    used_memory: bool = False
+    ambiguous: bool = False
+    clarification_question: str | None = None
+    reason: str | None = None
+    resolved_antecedent: str | None = None
+    schema_version: str = REFERENCE_RESOLUTION_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "original_query": self.original_query,
+            "search_query": self.search_query,
+            "used_history": self.used_history,
+            "used_memory": self.used_memory,
+            "ambiguous": self.ambiguous,
+            "clarification_question": self.clarification_question,
+            "reason": self.reason,
+            "resolved_antecedent": self.resolved_antecedent,
+        }
+
+
+class ConversationStore(ABC):
+    """Dialogue/history/task-memory storage contract (SPEC D25 5.1).
+
+    Implementation-agnostic: the core never sees SQLite. Implementations must
+    keep task memory in a table separate from turns and must never fabricate
+    dialogue history from legacy single-run records (SPEC D25 6.3, 10).
+    """
+
+    @abstractmethod
+    def ensure_schema(self) -> None: ...
+
+    @abstractmethod
+    def create_dialogue(self, name: str | None = None) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def list_dialogues(self) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def get_dialogue(self, dialogue_id: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def rename_dialogue(self, dialogue_id: str, name: str) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def delete_dialogue(self, dialogue_id: str) -> None: ...
+
+    @abstractmethod
+    def append_turn(self, turn: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def commit_turn(
+        self, turn: Mapping[str, Any], memory: Mapping[str, Any] | None,
+        *, expected_version: int,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def user_turn_ids(self, dialogue_id: str) -> set[str]: ...
+
+    @abstractmethod
+    def get_turn(self, dialogue_id: str, turn_id: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def get_turn_by_client_id(
+        self, dialogue_id: str, client_turn_id: str
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_turns(
+        self,
+        dialogue_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+        ascending: bool = True,
+    ) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def count_turns(self, dialogue_id: str) -> int: ...
+
+    @abstractmethod
+    def get_memory(self, dialogue_id: str) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def save_memory(
+        self,
+        dialogue_id: str,
+        memory: Mapping[str, Any],
+        *,
+        expected_version: int,
+    ) -> dict[str, Any]: ...
+
+    def close(self) -> None:
+        """Release resources; implementations may no-op."""
+
+
 def check_index_compatibility(
     expected: Mapping[str, Any], actual: Mapping[str, Any]
 ) -> None:

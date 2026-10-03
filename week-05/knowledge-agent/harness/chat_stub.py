@@ -74,7 +74,20 @@ def _context_chunks(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
             if metadata_remaining > 0:
                 metadata_remaining -= 1
                 continue
-            body.append(line)
+            # D25 conversation context carries exact, selectable excerpts.
+            # This stub must emulate that protocol rather than quote JSON markup.
+            try:
+                excerpt = json.loads(line)
+            except ValueError:
+                excerpt = None
+            if isinstance(excerpt, dict) and isinstance(excerpt.get("text"), str) and (excerpt.get("quote_id") or excerpt.get("evidence_id")):
+                if excerpt.get("evidence_id"):
+                    current.setdefault("evidence_id", str(excerpt["evidence_id"]))
+                elif excerpt.get("quote_id"):
+                    current.setdefault("quote_id", str(excerpt["quote_id"]))
+                body.append(excerpt["text"])
+            else:
+                body.append(line)
         if current is not None:
             current["text"] = "\n".join(body).strip()
             chunks.append(current)
@@ -142,7 +155,13 @@ def _grounded_response(messages: list[dict[str, Any]], fail: str | None) -> str:
             }
         )
     else:
-        citations = [{"chunk_id": chunk_id, "quote": quote}] if chunk_id and quote else []
+        if first.get("evidence_id"):
+            citations = [{"evidence_id": first["evidence_id"]}]
+            answer = answer.replace("[" + chunk_id + "]", "[" + first["evidence_id"] + "]")
+        elif first.get("quote_id"):
+            citations = [{"chunk_id": chunk_id, "quote_id": first["quote_id"]}]
+        else:
+            citations = [{"chunk_id": chunk_id, "quote": quote}] if chunk_id and quote else []
     return json.dumps(
         {
             "answer": answer,

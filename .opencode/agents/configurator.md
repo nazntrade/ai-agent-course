@@ -23,6 +23,8 @@ permission:
     ".project-bootstrap.json.template": ask
     "**/.project-bootstrap.json.template": ask
     ".bootstrap/audit-existing-modules.md": ask
+    ".opencode/WORKFLOW.md": ask
+    "**/.opencode/WORKFLOW.md": ask
     "AGENTS.md": ask
     "**/AGENTS.md": ask
     "PROJECT_RULES.md": ask

@@ -18,6 +18,7 @@ from .routes import create_router
 def create_app(
     service: KnowledgeService,
     chat_service: object | None = None,
+    conversation_service: object | None = None,
     *,
     ui_dir: str | Path | None = None,
     title: str = "Knowledge Agent",
@@ -30,7 +31,7 @@ def create_app(
             "generation (Day 22)."
         ),
     )
-    app.include_router(create_router(service, chat_service))
+    app.include_router(create_router(service, chat_service, conversation_service))
 
     @app.exception_handler(KnowledgeError)
     async def knowledge_error_handler(_: Request, exc: KnowledgeError) -> JSONResponse:

@@ -164,9 +164,16 @@ class OpenAIChatModel(ChatModel):
         if not isinstance(text, str) or not text.strip():
             usage = data.get('usage') if isinstance(data, dict) else None
             output_tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
+            usage_details = usage.get('completion_tokens_details') if isinstance(usage, dict) else None
+            reasoning_tokens = usage_details.get('reasoning_tokens') if isinstance(usage_details, dict) else None
+            reasoning = choice['message'].get('reasoning_content')
             raise ChatInvalidResponse('The selected provider returned an empty answer.',
                 details={'finish_reason': reason if isinstance(reason, str) else None,
-                         'output_tokens': output_tokens if type(output_tokens) is int and output_tokens >= 0 else None})
+                         'output_tokens': output_tokens if type(output_tokens) is int and output_tokens >= 0 else None,
+                         'reasoning_tokens': reasoning_tokens if type(reasoning_tokens) is int and reasoning_tokens >= 0 else None,
+                         'visible_content_chars': len(text) if isinstance(text, str) else None,
+                         'reasoning_content_chars': len(reasoning) if isinstance(reasoning, str) else None,
+                         'requested_output_tokens': (options or {}).get('num_predict', self.max_output_tokens)})
         return self._result(text, reason, data.get('usage'), data.get('model'), started, data.get('timings'))
 
     def stream_chat(self, messages, options=None):
@@ -208,4 +215,3 @@ class OpenAIChatModel(ChatModel):
         if not ended or not answer.strip():
             raise ChatInvalidResponse('The selected-provider stream ended unexpectedly.')
         yield {'type': 'done', 'result': self._result(answer, reason, usage, model, started, timings)}
-

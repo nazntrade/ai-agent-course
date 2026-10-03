@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 from .chat.test_profile import TestProfile, load_test_profile
@@ -56,6 +56,14 @@ DEFAULTS = {
     "RAG_GROUNDING_ENABLED": "1",
     "D24_DATA_PATH": "local-data/d24",
     "D24_QUESTIONS_PATH": "eval/d22/questions.json",
+    # Day 25 mini-chat: a separate conversation SQLite file (history + task
+    # memory) kept apart from the D21 index and from the single-run records.
+    "DIALOGUE_DB_PATH": "local-data/conversations.db",
+    "D25_DATA_PATH": "local-data/d25",
+    "D25_HISTORY_MAX_TURNS": "6",
+    "D25_HISTORY_MAX_TOKENS": "1200",
+    "D25_CHAT_CONTEXT_TOKENS": "0",
+    "D25_CHAT_MAX_OUTPUT_TOKENS": "0",
 }
 
 
@@ -108,6 +116,43 @@ class Settings:
     rag_grounding_enabled: bool = True
     d24_data_path: str = "local-data/d24"
     d24_questions_path: str = "eval/d22/questions.json"
+    # Day 25 (SPEC D25 16). Appended with defaults so existing explicit
+    # ``Settings(...)`` constructions keep working unchanged.
+    dialogue_db_path: str = "local-data/conversations.db"
+    d25_data_path: str = "local-data/d25"
+    d25_history_max_turns: int = 6
+    d25_history_max_tokens: int = 1200
+    d25_chat_context_tokens: int = 0
+    d25_chat_max_output_tokens: int = 0
+
+
+def d25_generation_settings(settings: Settings, *, available_context: int | None = None) -> Settings:
+    """Profile-aware dialogue defaults; zero means automatic, never a fallback model.
+
+    Legacy/stub providers retain their configured window. Selected network
+    reasoning uses sufficient allowance; a selected local profile uses bounded
+    dialogue reserves, still capped by the actual advertised server window.
+    """
+    kind = settings.test_profile.kind if settings.test_profile else None
+    if kind == "remote":
+        context, output = 32768, 8192
+    elif kind == "local":
+        context, output = max(settings.chat_context_tokens, 16384), max(settings.chat_max_output_tokens, 3072)
+    else:
+        context, output = settings.chat_context_tokens, settings.chat_max_output_tokens
+    if settings.d25_chat_context_tokens < 0 or settings.d25_chat_max_output_tokens < 0:
+        raise ValueError("D25 generation allowances must be positive or zero for automatic selection")
+    context = settings.d25_chat_context_tokens or context
+    output = settings.d25_chat_max_output_tokens or output
+    if kind in ("local", "remote") and type(available_context) is int and available_context > 0:
+        effective = min(context, available_context)
+        if settings.d25_chat_context_tokens == 0:
+            context = effective
+        if settings.d25_chat_max_output_tokens == 0:
+            # Only automatic defaults adapt to the real server window. An
+            # explicit reserve remains explicit and fails visibly if it cannot fit.
+            output = min(output, max(1, effective // 4))
+    return replace(settings, chat_context_tokens=context, chat_max_output_tokens=output)
 
 
 def _value(env: Mapping[str, str], key: str) -> str:
@@ -163,6 +208,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         rag_grounding_enabled=_flag(_value(source, "RAG_GROUNDING_ENABLED")),
         d24_data_path=_value(source, "D24_DATA_PATH"),
         d24_questions_path=_value(source, "D24_QUESTIONS_PATH"),
+        dialogue_db_path=_value(source, "DIALOGUE_DB_PATH"),
+        d25_data_path=_value(source, "D25_DATA_PATH"),
+        d25_history_max_turns=int(_value(source, "D25_HISTORY_MAX_TURNS")),
+        d25_history_max_tokens=int(_value(source, "D25_HISTORY_MAX_TOKENS")),
+        d25_chat_context_tokens=int(_value(source, "D25_CHAT_CONTEXT_TOKENS")),
+        d25_chat_max_output_tokens=int(_value(source, "D25_CHAT_MAX_OUTPUT_TOKENS")),
     )
 
 

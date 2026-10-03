@@ -104,13 +104,15 @@ def test_tight_budget_drops_chunks_and_records_it(tmp_path):
         ]
     )
     model = FakeChatModel(text="answer")
-    # chars_per_token=1 so the mandatory system prompt is measurable in chars;
-    # the budget fits the first 400-char chunk and drops the second whole.
+    # chars_per_token=1 so the mandatory system prompt is measurable in chars.
+    # The budget now also counts the rendered <context> wrapper (markup and
+    # provenance labels), so it is sized to fit the first rendered chunk and
+    # drop the second whole.
     service, _ = _service(
         tmp_path,
         knowledge,
         model,
-        max_context_tokens=len(RAG.system) + 500,
+        max_context_tokens=len(RAG.system) + 700,
         reserved_output_tokens=0,
         chars_per_token=1,
         safety_margin=0,

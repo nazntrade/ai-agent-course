@@ -1,26 +1,89 @@
 {
   "schemaVersion": 1,
   "templateVersion": 1,
-  "commonFiles": [".bootstrap/bootstrap-contract.json", ".bootstrap/Test-ProjectBootstrap.ps1"],
-  "launchFiles": ["setup.bat", "test.bat", "smoke_test.bat", "run_app.bat"],
+  "commonFiles": [
+    ".bootstrap/bootstrap-contract.json",
+    ".bootstrap/Test-ProjectBootstrap.ps1"
+  ],
+  "launchFiles": [
+    "setup.bat",
+    "test.bat",
+    "smoke_test.bat",
+    "run_app.bat"
+  ],
   "templates": {
     "Standalone": {
-      "requiredFiles": ["AGENTS.md", "PROJECT_RULES.md", "PROJECT_STATE.md", "STACK_PROFILE.md", "STACK_PROFILES.md", "README.md", "opencode.json", ".env.example", "setup.bat", "test.bat", "smoke_test.bat", "run_app.bat", ".opencode/agents/coordinator.md", ".opencode/agents/architect.md", ".opencode/agents/developer.md", ".opencode/agents/tester.md", ".opencode/agents/configurator.md"],
-      "governanceFiles": ["PROJECT_RULES.md", "STACK_PROFILE.md"],
+      "requiredFiles": [
+        "AGENTS.md",
+        "PROJECT_RULES.md",
+        "PROJECT_STATE.md",
+        "STACK_PROFILE.md",
+        "STACK_PROFILES.md",
+        "README.md",
+        "opencode.json",
+        ".env.example",
+        "setup.bat",
+        "test.bat",
+        "smoke_test.bat",
+        "run_app.bat",
+        ".opencode/agents/coordinator.md",
+        ".opencode/agents/architect.md",
+        ".opencode/agents/developer.md",
+        ".opencode/agents/tester.md",
+        ".opencode/agents/configurator.md",
+        ".opencode/WORKFLOW.md"
+      ],
+      "governanceFiles": [
+        "PROJECT_RULES.md",
+        "STACK_PROFILE.md"
+      ],
       "forbiddenPaths": [],
       "inheritedFiles": []
     },
     "CourseModule": {
-      "requiredFiles": ["MODULE_RULES.md", "MODULE_STATE.md", "README.md", ".env.example", "setup.bat", "test.bat", "smoke_test.bat", "run_app.bat"],
-      "governanceFiles": ["MODULE_RULES.md"],
-      "forbiddenPaths": ["AGENTS.md", "PROJECT_RULES.md", "opencode.json", "opencode.jsonc", ".opencode"],
-      "inheritedFiles": ["AGENTS.md", "PROJECT_RULES.md", "opencode.json", ".opencode/agents/coordinator.md", ".opencode/agents/architect.md", ".opencode/agents/developer.md", ".opencode/agents/tester.md", ".opencode/agents/configurator.md"]
+      "requiredFiles": [
+        "MODULE_RULES.md",
+        "MODULE_STATE.md",
+        "README.md",
+        ".env.example",
+        "setup.bat",
+        "test.bat",
+        "smoke_test.bat",
+        "run_app.bat"
+      ],
+      "governanceFiles": [
+        "MODULE_RULES.md"
+      ],
+      "forbiddenPaths": [
+        "AGENTS.md",
+        "PROJECT_RULES.md",
+        "opencode.json",
+        "opencode.jsonc",
+        ".opencode"
+      ],
+      "inheritedFiles": [
+        "AGENTS.md",
+        "PROJECT_RULES.md",
+        "opencode.json",
+        ".opencode/agents/coordinator.md",
+        ".opencode/agents/architect.md",
+        ".opencode/agents/developer.md",
+        ".opencode/agents/tester.md",
+        ".opencode/agents/configurator.md",
+        ".opencode/WORKFLOW.md"
+      ]
     }
   },
   "testRuntimeDeclaration": {
     "schemaVersion": 1,
     "format": "test-runtime-json",
-    "files": {"Standalone": "PROJECT_RULES.md", "CourseModule": "MODULE_RULES.md"},
-    "stages": ["Specification", "Implementation"]
+    "files": {
+      "Standalone": "PROJECT_RULES.md",
+      "CourseModule": "MODULE_RULES.md"
+    },
+    "stages": [
+      "Specification",
+      "Implementation"
+    ]
   }
 }

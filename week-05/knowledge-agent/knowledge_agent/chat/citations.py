@@ -29,6 +29,7 @@ from ..domain.contracts import (
     GroundingResult,
 )
 from ..domain.errors import ChatInvalidResponse
+from .prompts import evidence_selections
 
 CITATION_RE = re.compile(r"\[([0-9a-fA-F]{16,64})\]")
 _WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
@@ -107,7 +108,9 @@ def _extract_single_object(text: str) -> dict[str, Any] | None:
     return outer[2]
 
 
-def parse_grounded_response(text: str) -> GroundedAnswer:
+def parse_grounded_response(
+    text: str, *, evidence: Mapping[str, Mapping[str, str]] | None = None
+) -> GroundedAnswer:
     """Strictly parse the grounded-JSON provider answer; never repair it.
 
     Any deviation (non-JSON, missing/empty ``answer``, ``citations`` not a list,
@@ -141,12 +144,37 @@ def parse_grounded_response(text: str) -> GroundedAnswer:
     citations = payload.get("citations")
     if not isinstance(citations, list):
         raise _format_error("citations is not a list")
+    registered = evidence_selections(evidence) if evidence is not None else {}
     parsed: list[dict[str, Any]] = []
     for item in citations:
         if not isinstance(item, dict):
             raise _format_error("a citation is not an object")
         chunk_id = item.get("chunk_id")
         quote = item.get("quote")
+        quote_id = item.get("quote_id")
+        evidence_id = item.get("evidence_id")
+        if evidence_id is not None:
+            selected = registered.get(evidence_id) if isinstance(evidence_id, str) else None
+            if selected is None:
+                raise _format_error("unknown evidence selection in passed context")
+            if chunk_id is not None and chunk_id != selected["chunk_id"]:
+                raise _format_error("source contradicts selected evidence")
+            if quote_id is not None and quote_id != selected["quote_id"]:
+                raise _format_error("quote_id contradicts selected evidence")
+            if quote is not None and quote != selected["quote"]:
+                raise _format_error("quote contradicts selected evidence")
+            chunk_id, quote_id, quote = selected["chunk_id"], selected["quote_id"], selected["quote"]
+        if quote_id is not None:
+            if evidence is None or not isinstance(quote_id, str):
+                raise _format_error("quote selection is not available")
+            selected = evidence.get(str(chunk_id), {}).get(quote_id)
+            if not selected:
+                raise _format_error("unknown quote selection in passed context")
+            # An explicit contradictory quotation never becomes a valid one.
+            # Only a provider-selected registered id can resolve exact text.
+            if quote is not None and quote != selected:
+                raise _format_error("quote contradicts its selected excerpt")
+            quote = selected
         translation = item.get("translation")
         if not isinstance(chunk_id, str) or not chunk_id.strip():
             raise _format_error("a citation chunk_id is missing")
@@ -159,8 +187,46 @@ def parse_grounded_response(text: str) -> GroundedAnswer:
                 "chunk_id": chunk_id,
                 "quote": quote,
                 "translation": translation,
+                **({"quote_id": quote_id, "quote_origin": "passed_excerpt"} if quote_id is not None else {}),
+                **({"evidence_id": evidence_id} if evidence_id is not None else {}),
             }
         )
+
+    if evidence is not None:
+        cited_evidence = {item.get("evidence_id") for item in parsed}
+
+        def decode_reference(match):
+            bracket = match[1]
+            # Canonical source hashes are tested before aliases: a genuine hash
+            # may itself begin with e + digits. History is never a source registry.
+            if CITATION_RE.fullmatch("[" + bracket + "]"):
+                if len(bracket) not in {len(key) for key in evidence}:
+                    raise _format_error("inline reference is not one exact chunk_id")
+                # Existing canonical references retain their verifier contract:
+                # unknown/current-but-unquoted IDs are reported as citation_failed,
+                # never repaired or promoted to verified (including after retry).
+                return match[0]
+            looks_like_evidence = any(
+                re.fullmatch(r"[eE][A-Za-z0-9]*", token)
+                for token in re.split(r"[,;:\s-]+", bracket)
+            )
+            if looks_like_evidence:
+                tokens = [token.strip() for token in bracket.split(",")]
+                if not tokens or any(
+                    re.fullmatch(r"e[1-9][0-9]*", token) is None
+                    or token not in registered or token not in cited_evidence
+                    for token in tokens
+                ):
+                    raise _format_error("inline evidence is not an exact selected registered id list")
+                # Decode only explicitly selected IDs, preserving their exact
+                # server-registered excerpts; no typo/fuzzy/missing-quote repair.
+                return " ".join("[" + registered[token]["chunk_id"] + "]" for token in tokens)
+            if re.search(r"[0-9a-fA-F]{16,64}", bracket):
+                raise _format_error("inline reference is not one exact chunk_id")
+            return match[0]
+
+        # Include newlines so malformed lists cannot hide unvalidated markers.
+        answer = re.sub(r"\[([^\]]*)\]", decode_reference, answer)
 
     insufficient = payload.get("insufficient", False)
     if not isinstance(insufficient, bool):

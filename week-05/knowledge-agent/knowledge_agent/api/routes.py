@@ -82,7 +82,41 @@ class CompareRequest(BaseModel):
     save_run: bool = True
 
 
-def create_router(service: KnowledgeService, chat_service: Any | None = None) -> APIRouter:
+class DialogueCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+
+
+class DialogueRename(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class TurnRequest(BaseModel):
+    client_turn_id: str = Field(min_length=1, max_length=200)
+    question: str = Field(min_length=1, max_length=2000)
+    mode: Literal["with_rag", "without_rag"] = "with_rag"
+    collection_id: str | None = None
+    index_version_id: str | None = None
+    strategy: str | None = None
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    prefilter_top_k: int | None = Field(default=None, ge=1, le=50)
+    postfilter_top_k: int | None = Field(default=None, ge=1, le=50)
+    use_filter: bool | None = None
+    use_rewrite: bool | None = None
+    min_score: float | None = None
+    grounding: bool | None = None
+    max_context_tokens: int | None = Field(default=None, ge=1)
+
+
+class MemoryPatchRequest(BaseModel):
+    expected_version: int
+    operations: list[dict[str, Any]]
+
+
+def create_router(
+    service: KnowledgeService,
+    chat_service: Any | None = None,
+    conversation_service: Any | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/health")
@@ -216,7 +250,69 @@ def create_router(service: KnowledgeService, chat_service: Any | None = None) ->
     ) -> dict[str, Any]:
         return _require_chat(chat_service).save_evaluation(run_id, body)
 
+    # -- Day 25 dialogues -------------------------------------------------
+    @router.get("/dialogues")
+    def list_dialogues() -> dict[str, Any]:
+        return {"dialogues": _require_conversation(conversation_service).list_dialogues()}
+
+    @router.post("/dialogues")
+    def create_dialogue(body: DialogueCreate | None = None) -> dict[str, Any]:
+        name = body.name if body is not None else None
+        return _require_conversation(conversation_service).create_dialogue(name)
+
+    @router.get("/dialogues/{dialogue_id}")
+    def get_dialogue(dialogue_id: str) -> dict[str, Any]:
+        return _require_conversation(conversation_service).get_dialogue(dialogue_id)
+
+    @router.patch("/dialogues/{dialogue_id}")
+    def rename_dialogue(dialogue_id: str, body: DialogueRename) -> dict[str, Any]:
+        return _require_conversation(conversation_service).rename_dialogue(dialogue_id, body.name)
+
+    @router.delete("/dialogues/{dialogue_id}")
+    def delete_dialogue(dialogue_id: str, confirm: bool = Query(default=False)) -> dict[str, Any]:
+        return _require_conversation(conversation_service).delete_dialogue(
+            dialogue_id, confirm=confirm
+        )
+
+    @router.get("/dialogues/{dialogue_id}/turns")
+    def list_dialogue_turns(
+        dialogue_id: str,
+        limit: int = Query(default=50, ge=1, le=500),
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        return _require_conversation(conversation_service).list_turns(
+            dialogue_id, limit=limit, before=before
+        )
+
+    @router.get("/dialogues/{dialogue_id}/turns/{turn_id}")
+    def get_dialogue_turn(dialogue_id: str, turn_id: str) -> dict[str, Any]:
+        return _require_conversation(conversation_service).get_turn(dialogue_id, turn_id)
+
+    @router.post("/dialogues/{dialogue_id}/turns")
+    def post_dialogue_turn(dialogue_id: str, body: TurnRequest) -> dict[str, Any]:
+        return _require_conversation(conversation_service).ask(dialogue_id, body.model_dump())
+
+    @router.get("/dialogues/{dialogue_id}/memory")
+    def get_dialogue_memory(dialogue_id: str) -> dict[str, Any]:
+        return _require_conversation(conversation_service).get_memory(dialogue_id)
+
+    @router.patch("/dialogues/{dialogue_id}/memory")
+    def patch_dialogue_memory(dialogue_id: str, body: MemoryPatchRequest) -> dict[str, Any]:
+        return _require_conversation(conversation_service).patch_memory(
+            dialogue_id,
+            expected_version=body.expected_version,
+            operations=body.operations,
+        )
+
     return router
+
+
+def _require_conversation(conversation_service: Any | None) -> Any:
+    if conversation_service is None:
+        from ..domain.errors import ChatUnavailable
+
+        raise ChatUnavailable("The dialogue service is not configured.")
+    return conversation_service
 
 
 def _require_chat(chat_service: Any | None) -> Any:

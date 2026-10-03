@@ -8,7 +8,6 @@ local stub (no external network).
 from __future__ import annotations
 
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -27,6 +26,7 @@ import embed_stub  # noqa: E402
 
 from knowledge_agent.__main__ import build_service  # noqa: E402
 from knowledge_agent.config import Settings  # noqa: E402
+from harness.owned_backend import isolated_backend_env  # noqa: E402
 
 
 def free_port() -> int:
@@ -100,15 +100,15 @@ def run_check(root: Path) -> int:
             raise AssertionError("build did not reach ready")
         store.close()  # simulate a full process shutdown
 
-        env = dict(os.environ)
-        env.update(
+        env = isolated_backend_env(
+            db_path,
             {
                 "KNOWLEDGE_SKIP_ENV_FILE": "1",
                 "KNOWLEDGE_HOST": "127.0.0.1",
                 "KNOWLEDGE_PORT": str(api_port),
                 "KNOWLEDGE_DB_PATH": str(db_path),
                 "EMBED_BASE_URL": f"http://127.0.0.1:{stub_port}",
-            }
+            },
         )
         process = subprocess.Popen(
             [sys.executable, "-m", "knowledge_agent"],

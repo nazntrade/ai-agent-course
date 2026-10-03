@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import sqlite3
 import subprocess
@@ -23,6 +22,7 @@ for extra in (str(MODULE_DIR), str(HARNESS_DIR)):
         sys.path.insert(0, extra)
 
 import embed_stub  # noqa: E402
+from harness.owned_backend import isolated_backend_env  # noqa: E402
 
 
 def free_port() -> int:
@@ -49,19 +49,15 @@ class Backend:
     def __init__(self, db_path: Path, embed_url: str, extra_env: dict | None = None) -> None:
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
-        env = dict(os.environ)
-        env.update(
-            {
-                "KNOWLEDGE_HOST": "127.0.0.1",
-                "KNOWLEDGE_PORT": str(self.port),
-                "KNOWLEDGE_DB_PATH": str(db_path),
-                "EMBED_BASE_URL": embed_url,
-            }
-        )
+        overrides = {
+            "KNOWLEDGE_HOST": "127.0.0.1",
+            "KNOWLEDGE_PORT": str(self.port),
+            "KNOWLEDGE_DB_PATH": str(db_path),
+            "EMBED_BASE_URL": embed_url,
+        }
         if extra_env:
-            env.update(extra_env)
-        env["KNOWLEDGE_SKIP_ENV_FILE"] = "1"
-        env["KNOWLEDGE_DB_PATH"] = str(db_path)
+            overrides.update(extra_env)
+        env = isolated_backend_env(db_path, overrides)
         self.process = subprocess.Popen(
             [sys.executable, "-m", "knowledge_agent"],
             cwd=str(MODULE_DIR),
