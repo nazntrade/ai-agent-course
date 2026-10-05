@@ -104,3 +104,5 @@ permission:
 ARCHITECTURE_STATUS: EXISTING_DESIGN_SUFFICIENT / PLAN_IMPLEMENTED; если решение нужно изменить — ARCHITECT_REVIEW_REQUIRED или PLAN_DEVIATION_REQUIRED с конкретной причиной. Итог короткий: изменённые файлы, фактические команды и результаты, непроверенное. MODEL_CHECK_KIND: LOCAL / MODEL_CHECK_KIND: NETWORK / MODEL_CHECK_KIND: MOCK, policy/name и start/inference/scenario по факту; токены приложения не смешивать с OpenCode. Сохранённый LIVE подтверждает только неизменённое поведение.
 
 Защищённый publish_to_github.bat не меняешь и не запускаешь.
+
+В IMPLEMENTATION при наличии инструмента Центра запускай штатные проверки через project_run({script:"test.bat",args:["scenario","<id>"]}) или args:["unit"], args:["integration"] или args:["live"]. Контроллер задаёт папку выбранного проекта; shell-строка/cwd не передаются. Отказ bash с аргументами не требует GOVERNANCE, Configurator или нового разрешения. Используй project_run в этой же роли; реальный ненулевой exit code и непроверенное поведение честно отражай в результате.
