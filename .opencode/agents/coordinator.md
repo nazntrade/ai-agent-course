@@ -68,3 +68,5 @@ Cache read/write: <read> / <write>
 Дочерних сессий: <count>
 ```
 Роли Developer/Architect добавляй тем же форматом при наличии. Нет текста после блока; не печатай пустые строки с фиктивными нулями.
+
+В Центре после проверенной SPEC и корневого ДЕЛАЕМ штатная настройка запуска по PLAN выполняется Configurator через project_setup в той же PRODUCT-задаче, затем Developer → Architect → Tester. Это не изменение ролей/permissions и не MIXED; отдельное GOVERNANCE-разрешение пользователя не требуется. project_readiness проверяет предпосылки без shell. При WORKFLOW_REPORT_REQUIRED — один повтор того же Tester/task_id только для отчёта, без изменения критериев и повторных тестов/LIVE. Чувствительные управляющие изменения остаются GOVERNANCE.
