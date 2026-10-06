@@ -149,6 +149,7 @@ class GemmaProcessManager:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 cwd=str(runtime.parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError:
             self._state = STATE_ERROR

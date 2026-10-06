@@ -184,3 +184,30 @@ def test_ask_no_rag_returns_no_sources_or_citations(tmp_path):
     }).json()
     assert body["rag"]["sources"] == []
     assert body["rag"]["citations"] is None
+
+
+def test_rag_provenance_survives_reopening_dialogue(tmp_path):
+    client, service = make_client(tmp_path)
+    did = client.post("/api/dialogues", json={}).json()["dialogue_id"]
+    answer = client.post("/api/ask", json={"dialogue_id": did, "question": "capital of France", "rag_enabled": True, "min_score": .5}).json()
+    reopened = client.get("/api/dialogues/" + did).json()
+    rag = reopened["messages"][-1]["parameters"]["rag"]
+    assert rag["sources"] == answer["rag"]["sources"]
+    assert rag["sources"][0]["quote"] == "The capital of France is Paris."
+    assert rag["sources"][0]["chunk_id"]
+    assert rag["citations"] == answer["rag"]["citations"]
+    service.close()
+
+
+def test_filtered_empty_context_skips_generation_and_returns_honest_refusal(tmp_path):
+    client, service = make_client(tmp_path)
+    service.rag.search = lambda *args, **kwargs: []
+    def forbidden_call(*args, **kwargs):
+        raise AssertionError("Generation must not run without relevant documents")
+    service.local_provider.chat = forbidden_call
+    did = client.post("/api/dialogues", json={}).json()["dialogue_id"]
+    answer = client.post("/api/ask", json={"dialogue_id": did, "question": "unknown fact", "rag_enabled": True}).json()
+    assert answer["answer"]["parameters"]["generation_skipped"] is True
+    assert "don't know" in answer["answer"]["text"]
+    assert answer["rag"]["sources"] == []
+    service.close()

@@ -57,3 +57,22 @@ def test_private_env_loading_accepts_utf8_bom_and_preserves_explicit_environment
     assert settings.missing_network_config() == []
     assert settings.deepseek_model_id == "explicit-model"
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+
+def test_week_env_inheritance_module_override_and_explicit_environment(tmp_path, monkeypatch):
+    from app.config import apply_env_file
+    module = tmp_path / "module"
+    module.mkdir()
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=fake-week-key\nDEEPSEEK_MODEL_ID=week-model\nUNRELATED_SETTING=ignored\n", encoding="utf-8")
+    (module / ".env").write_text("DEEPSEEK_MODEL_ID=module-model\n", encoding="utf-8")
+    for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL_ID", "UNRELATED_SETTING"):
+        monkeypatch.delenv(key, raising=False)
+    apply_env_file(module / ".env")
+    assert load_settings().deepseek_api_key == "fake-week-key"
+    assert load_settings().deepseek_model_id == "module-model"
+    import os
+    assert "UNRELATED_SETTING" not in os.environ
+    monkeypatch.setenv("DEEPSEEK_MODEL_ID", "explicit-model")
+    apply_env_file(module / ".env")
+    assert load_settings().deepseek_model_id == "explicit-model"
+    monkeypatch.delenv("DEEPSEEK_API_KEY")

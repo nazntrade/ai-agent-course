@@ -5,6 +5,7 @@ const state = {
   dialogueId: null,
   dialogues: [],
   busy: false,
+  memoryVersion: 0,
 };
 
 async function api(path, options) {
@@ -41,9 +42,10 @@ async function refreshProvider() {
   state.provider = result.selected;
   document.getElementById("btn-local").classList.toggle("active", result.selected === "local");
   document.getElementById("btn-network").classList.toggle("active", result.selected === "network");
+  if (state.busy) { setStateBadge("generating"); return; }
   if (result.selected === "local") {
     setStateBadge(result.local_state);
-    setNotice(result.local_error || "");
+    if (result.local_error) setNotice(result.local_error);
   } else {
     setStateBadge("network");
     setNotice(result.missing_config && result.missing_config.length
@@ -67,11 +69,11 @@ async function loadDialogues() {
     const rename = document.createElement("button");
     rename.className = "icon";
     rename.textContent = "Rename";
-    rename.onclick = (event) => { event.stopPropagation(); renameDialogue(dialogue); };
+    rename.onclick = (event) => { event.stopPropagation(); renameDialogue(dialogue, item); };
     const remove = document.createElement("button");
     remove.className = "icon danger";
     remove.textContent = "Delete";
-    remove.onclick = (event) => { event.stopPropagation(); deleteDialogue(dialogue); };
+    remove.onclick = (event) => { event.stopPropagation(); deleteDialogue(dialogue, item); };
     const actions = document.createElement("span");
     actions.className = "dialogue-actions";
     actions.append(rename, remove);
@@ -80,18 +82,46 @@ async function loadDialogues() {
   }
 }
 
-async function renameDialogue(dialogue) {
-  const proposed = window.prompt("Rename dialogue", dialogue.name);
-  if (proposed === null || !proposed.trim()) return;
-  await api("/api/dialogues/" + encodeURIComponent(dialogue.dialogue_id), {
-    method: "PATCH",
-    body: JSON.stringify({ name: proposed.trim() }),
+async function renameDialogue(dialogue, row) {
+  const activeName = row.querySelector(".dialogue-name");
+  if (!activeName) return;
+  const field = document.createElement("input");
+  field.className = "rename-input";
+  field.setAttribute("aria-label", "Dialogue name");
+  field.value = dialogue.name;
+  activeName.replaceWith(field);
+  field.focus(); field.select();
+  let finished = false;
+  async function finish(save) {
+    if (finished) return;
+    finished = true;
+    try {
+      if (save && field.value.trim()) await api("/api/dialogues/" + encodeURIComponent(dialogue.dialogue_id), {
+        method: "PATCH", body: JSON.stringify({name: field.value.trim()}),
+      });
+    } catch (error) { setNotice(error.message); }
+    await loadDialogues();
+  }
+  field.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); finish(true); }
+    if (event.key === "Escape") finish(false);
   });
-  await loadDialogues();
+  field.addEventListener("blur", () => finish(true));
 }
 
-async function deleteDialogue(dialogue) {
-  if (!window.confirm("Delete dialogue \"" + dialogue.name + "\"?")) return;
+async function deleteDialogue(dialogue, row) {
+  if (!row) return;
+  const approved = await new Promise(resolve => {
+    const box = document.createElement("div");
+    box.className = "delete-confirmation";
+    const question = document.createElement("span"); question.textContent = "Delete this dialogue?";
+    const yes = document.createElement("button"); yes.className = "icon danger"; yes.textContent = "Confirm delete";
+    const no = document.createElement("button"); no.className = "icon"; no.textContent = "Cancel";
+    yes.onclick = () => { box.remove(); resolve(true); };
+    no.onclick = () => { box.remove(); resolve(false); };
+    box.append(question, yes, no); row.appendChild(box);
+  });
+  if (!approved) return;
   await api("/api/dialogues/" + encodeURIComponent(dialogue.dialogue_id), { method: "DELETE" });
   if (state.dialogueId === dialogue.dialogue_id) {
     state.dialogueId = null;
@@ -112,6 +142,20 @@ function renderMessages(messages) {
     bubble.textContent = message.is_error
       ? "Error: " + ((message.parameters && message.parameters.error_code) || "generation failed")
       : message.text;
+    if (message.role === "assistant" && !message.is_error) {
+      const meta = document.createElement("small");
+      meta.className = "answer-meta";
+      meta.textContent = "\n" + (message.model || "") + " · " + Math.round(message.latency_ms || 0) + " ms";
+      bubble.appendChild(meta);
+    }
+    const rag = message.parameters && message.parameters.rag;
+    if (rag && rag.enabled && rag.sources.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary"); summary.textContent = "Sources and citation check";
+      const proof = document.createElement("pre");
+      proof.textContent = rag.sources.map(s => s.label + " · " + s.chunk_id + "\n“" + s.quote + "”").join("\n\n") + "\n\n" + JSON.stringify(rag.citations, null, 2);
+      details.append(summary, proof); bubble.appendChild(details);
+    }
     container.appendChild(bubble);
   }
   container.scrollTop = container.scrollHeight;
@@ -121,7 +165,14 @@ async function openDialogue(dialogueId) {
   state.dialogueId = dialogueId;
   const dialogue = await api("/api/dialogues/" + encodeURIComponent(dialogueId));
   renderMessages(dialogue.messages);
+  state.memoryVersion = dialogue.memory.version;
+  document.getElementById("memory-goal").value = dialogue.memory.goal || "";
+  document.getElementById("memory-constraints").value = (dialogue.memory.constraints || []).join("\n");
   document.getElementById("memory-view").textContent = JSON.stringify(dialogue.memory, null, 2);
+  const latest = [...dialogue.messages].reverse().find(m => m.role === "assistant" && !m.is_error);
+  const rag = latest && latest.parameters && latest.parameters.rag;
+  renderSources(rag ? rag.sources : []);
+  document.getElementById("citation-view").textContent = rag && rag.citations ? JSON.stringify(rag.citations, null, 2) : "";
   await loadDialogues();
 }
 
@@ -155,6 +206,7 @@ async function send() {
   }
   const input = document.getElementById("input");
   const question = input.value.trim();
+  const requestDialogueId = state.dialogueId;
   if (!question) return;
   state.busy = true;
   setStateBadge("generating");
@@ -163,15 +215,17 @@ async function send() {
     const result = await api("/api/ask", {
       method: "POST",
       body: JSON.stringify({
-        dialogue_id: state.dialogueId,
+        dialogue_id: requestDialogueId,
         question,
+        use_rewrite: document.getElementById("search-rewrite").checked,
+        min_score: document.getElementById("search-min-score").value === "" ? null : Number(document.getElementById("search-min-score").value),
         rag_enabled: ragEnabled,
         provider: state.provider,
       }),
     });
-    input.value = "";
-    input.style.height = "auto";
-    await openDialogue(state.dialogueId);
+    if (state.dialogueId !== requestDialogueId) return;
+    if (input.value.trim() === question) { input.value = ""; input.style.height = "auto"; }
+    await openDialogue(requestDialogueId);
     renderSources(result.rag.enabled ? result.rag.sources : []);
     document.getElementById("citation-view").textContent =
       result.rag.citations ? JSON.stringify(result.rag.citations, null, 2) : "";
@@ -193,6 +247,9 @@ function renderSources(sources) {
     item.innerHTML = '<span class="label"></span> <span class="score"></span>';
     item.querySelector(".label").textContent = source.label || source.source || "source";
     item.querySelector(".score").textContent = source.score != null ? "(" + source.score + ")" : "";
+    const details = document.createElement("div");
+    details.textContent = "chunk_id: " + source.chunk_id + (source.quote ? "\n“" + source.quote + "”" : "");
+    item.appendChild(details);
     panel.appendChild(item);
   }
 }
@@ -278,6 +335,19 @@ function wire() {
     await openDialogue(created.dialogue_id);
   };
   document.getElementById("btn-send").onclick = send;
+  document.getElementById("btn-save-memory").onclick = async () => {
+    if (!state.dialogueId) { setNotice("Create a dialogue first."); return; }
+    try {
+      await api("/api/dialogues/" + encodeURIComponent(state.dialogueId) + "/memory", {
+        method: "PATCH", body: JSON.stringify({expected_version: state.memoryVersion, memory: {
+          goal: document.getElementById("memory-goal").value.trim(),
+          constraints: document.getElementById("memory-constraints").value.split("\n").map(s => s.trim()).filter(Boolean),
+        }}),
+      });
+      await openDialogue(state.dialogueId);
+      setNotice("Task memory saved.");
+    } catch (error) { setNotice(error.message); }
+  };
   document.getElementById("btn-index").onclick = indexDocument;
   document.getElementById("btn-search").onclick = search;
   document.getElementById("btn-compare").onclick = compare;
@@ -311,7 +381,7 @@ async function init() {
   await loadDialogues();
   state.dialogueId = state.dialogues.length ? state.dialogues[0].dialogue_id : null;
   if (state.dialogueId) await openDialogue(state.dialogueId);
-  setInterval(refreshProvider, 4000);
+  setInterval(() => refreshProvider().catch(() => { setStateBadge("error"); setNotice("The application connection was lost. Retrying…"); }), 4000);
 }
 
 init();

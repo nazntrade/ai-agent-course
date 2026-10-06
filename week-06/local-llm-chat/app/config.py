@@ -155,5 +155,7 @@ def load_env_file(path: str | Path) -> dict[str, str]:
 
 def apply_env_file(path: str | Path) -> None:
     """Load ``.env`` values not already present in the environment."""
-    for key, value in load_env_file(path).items():
-        os.environ.setdefault(key, value)
+    merged = {**load_env_file(Path(path).parent.parent / ".env"), **load_env_file(path)}
+    for key, value in merged.items():
+        if key in DEFAULTS:
+            os.environ.setdefault(key, value)

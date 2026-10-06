@@ -19,7 +19,7 @@ from .errors import (
     ProviderNotConfigured,
 )
 from .local_process.gemma_manager import GemmaProcessManager
-from .providers.base import AnswerProvider, ChatMessage
+from .providers.base import AnswerProvider, ChatMessage, ChatResult
 from .providers.local_llama import LocalLlamaProvider
 from .providers.network_deepseek import DeepSeekProvider
 from .rag.embedder import OllamaEmbedder
@@ -179,32 +179,45 @@ class ChatService:
             history=history,
             fragments=fragments if rag_enabled else [],
             rag_enabled=rag_enabled,
+            memory=self.dialogues.get_memory(dialogue_id),
         )
 
-        with self._generation_lock:
-            epoch = self._generation_epoch
-            if name == PROVIDER_LOCAL:
-                self.gemma.ensure_started()
-                self.gemma.set_generating(True)
-            try:
-                result = answer_provider.chat(messages)
-            except ProviderNotConfigured:
-                self._record_error(dialogue_id, name, "provider_not_configured")
-                raise
-            except Exception as exc:  # noqa: BLE001 - record and re-raise typed errors
-                self._record_error(dialogue_id, name, type(exc).__name__)
-                raise
-            finally:
+        if rag_enabled and not fragments:
+            result = ChatResult(
+                text="I don't know from the available documents. Please clarify the question or index a relevant document.",
+                model="no-model (insufficient-context)", finish_reason="stop", usage=None,
+                latency_ms=0.0, parameters={"generation_skipped": True, "reason": "insufficient_context"},
+            )
+        else:
+            with self._generation_lock:
+                epoch = self._generation_epoch
                 if name == PROVIDER_LOCAL:
-                    self.gemma.set_generating(False)
+                    self.gemma.ensure_started()
+                    self.gemma.set_generating(True)
+                try:
+                    result = answer_provider.chat(messages)
+                except ProviderNotConfigured:
+                    self._record_error(dialogue_id, name, "provider_not_configured")
+                    raise
+                except Exception as exc:  # noqa: BLE001 - record and re-raise typed errors
+                    self._record_error(dialogue_id, name, type(exc).__name__)
+                    raise
+                finally:
+                    if name == PROVIDER_LOCAL:
+                        self.gemma.set_generating(False)
 
-            # A switch happened while generating: do not write into a foreign
-            # active dialogue (I10). The message is still stored on its own
-            # dialogue, which is the correct owner.
-            if epoch != self._generation_epoch:
-                self._record_error(dialogue_id, name, "stale_generation")
-                raise ProviderError("The provider changed during generation; answer discarded.")
+                # A switch happened while generating: do not write into a foreign
+                # active dialogue (I10). The message is still stored on its own
+                # dialogue, which is the correct owner.
+                if epoch != self._generation_epoch:
+                    self._record_error(dialogue_id, name, "stale_generation")
+                    raise ProviderError("The provider changed during generation; answer discarded.")
 
+        citations = CitationVerifier(fragments).verify(result.text).to_dict() if rag_enabled else None
+        rag_metadata = {
+            "enabled": rag_enabled, "sources": trace["sources"] if rag_enabled else [],
+            "rewrite": rewrite.to_dict() if rag_enabled else None, "citations": citations,
+        }
         stored = self.dialogues.append_message(
             {
                 "dialogue_id": dialogue_id,
@@ -215,7 +228,7 @@ class ChatService:
                 "usage": result.usage.to_dict() if result.usage else None,
                 "finish_reason": result.finish_reason,
                 "latency_ms": result.latency_ms,
-                "parameters": result.parameters,
+                "parameters": {**result.parameters, "rag": rag_metadata},
             }
         )
         citations = None

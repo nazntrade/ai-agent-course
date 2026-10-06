@@ -90,6 +90,12 @@ class CitationVerifier:
         checks: list[CitationCheck] = []
         seen: set[str] = set()
 
+        # Extract explicit quote/reference pairs without inventing a quote.
+        extracted = [
+            {"reference": m.group(2), "quote": m.group(1)}
+            for m in re.finditer(r'["“]([^"”]+)["”]\s*\[([^\]\s]+)\]', answer_text or "")
+        ]
+        quoted_citations = list(quoted_citations) + extracted
         # Structured citations explicitly quote a fragment.
         for citation in quoted_citations:
             reference = str(citation.get("chunk_id") or citation.get("reference") or "")

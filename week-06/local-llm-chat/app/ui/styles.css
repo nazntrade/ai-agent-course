@@ -124,3 +124,16 @@ button.icon.danger { color: var(--err); }
 .tools h3 { font-size: 13px; margin: 14px 0 6px; }
 .memory { background: var(--panel-2); padding: 8px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; }
 pre { white-space: pre-wrap; word-break: break-word; }
+
+.answer-meta { display: block; color: var(--muted); font-size: 12px; margin-top: 8px; }
+#memory-goal, #memory-constraints { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid #2c3341; border-radius: 6px; padding: 8px; font: inherit; margin: 5px 0 12px; }
+.source-item { overflow-wrap: anywhere; white-space: pre-wrap; }
+button:disabled { opacity: .6; cursor: wait; }
+
+.rename-input { width: 100%; min-width: 0; background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); padding: 5px; }
+
+.delete-confirmation { flex-basis: 100%; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.dialogue-list li:has(.delete-confirmation) { flex-wrap: wrap; }
+.msg details { font-size: 13px; margin-top: 10px; }
+.msg summary { cursor: pointer; color: var(--muted); }
+.msg details pre { max-height: 300px; overflow: auto; }

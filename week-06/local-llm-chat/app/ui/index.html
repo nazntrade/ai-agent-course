@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Local LLM Chat</title>
-  <link rel="stylesheet" href="/assets/styles.css" />
+  <link rel="stylesheet" href="/assets/styles.css?v=d26-final-3" />
 </head>
 <body>
   <header class="topbar">
@@ -68,11 +68,16 @@
       </section>
       <section>
         <h3>Task memory</h3>
+        <label for="memory-goal">Goal</label>
+        <textarea id="memory-goal" rows="2" placeholder="What should the assistant help you achieve?"></textarea>
+        <label for="memory-constraints">Constraints</label>
+        <textarea id="memory-constraints" rows="3" placeholder="One constraint per line"></textarea>
+        <button id="btn-save-memory" class="secondary">Save task memory</button>
         <pre id="memory-view" class="memory"></pre>
       </section>
     </aside>
   </main>
 
-  <script src="/assets/app.js?v=d26-runtime-fix"></script>
+  <script src="/assets/app.js?v=d26-final-3"></script>
 </body>
 </html>

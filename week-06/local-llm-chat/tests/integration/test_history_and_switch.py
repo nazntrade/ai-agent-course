@@ -126,3 +126,23 @@ def test_dialogue_storage_is_isolated_between_databases(tmp_path):
     other = SqliteDialogueStore(str(tmp_path / "other.db"))
     assert other.list_dialogues() == []
     other.close()
+
+
+def test_saved_task_memory_reaches_model_after_old_history_is_trimmed(tmp_path):
+    service, store, local, _, _ = build(tmp_path)
+    dialogue = store.create_dialogue("memory")
+    did = dialogue["dialogue_id"]
+    store.save_memory(did, {"goal": "Explain ORION", "constraints": ["Answer in Russian"]}, expected_version=0)
+    for _ in range(8):
+        store.append_message({"dialogue_id": did, "role": "user", "text": "old " * 800})
+    captured = []
+    original = local.chat
+    def observe(messages, options=None):
+        captured.extend(messages)
+        return original(messages, options)
+    local.chat = observe
+    service.ask(did, "What is my goal?", provider="local")
+    assert "Explain ORION" in captured[0].content
+    assert "Answer in Russian" in captured[0].content
+    assert sum(len(m.content) for m in captured) <= 12000
+    service.close()

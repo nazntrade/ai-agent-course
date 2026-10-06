@@ -15,6 +15,7 @@ successes. Exit code: 0 = all required local checks passed; 1 = a real failure;
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import os
 import sys
 import tempfile
@@ -47,6 +48,7 @@ def save(name: str, payload: dict) -> None:
 def _answer_payload(record: dict, question: str) -> dict:
     answer = record["answer"]
     return {
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
         "question": question,
         "provider": record["provider"],
         "model": answer["model"],
@@ -61,9 +63,6 @@ def _answer_payload(record: dict, question: str) -> dict:
 
 def _is_json_object(text: str) -> tuple[bool, dict | str]:
     candidate = text.strip()
-    if candidate.startswith("```"):
-        candidate = candidate.strip("`")
-        candidate = candidate.split("\n", 1)[-1] if "\n" in candidate else candidate
     try:
         parsed = json.loads(candidate)
     except ValueError as exc:
@@ -71,6 +70,20 @@ def _is_json_object(text: str) -> tuple[bool, dict | str]:
     if not isinstance(parsed, dict):
         return False, "not a JSON object"
     return True, parsed
+
+
+def valid_city_json(text: str) -> tuple[bool, dict | None]:
+    valid, parsed = _is_json_object(text)
+    if not valid:
+        return False, None
+    good = (
+        set(parsed) == {"city", "country", "population_millions"}
+        and parsed["city"] == "Paris" and parsed["country"] == "France"
+        and isinstance(parsed["population_millions"], (int, float))
+        and not isinstance(parsed["population_millions"], bool)
+        and parsed["population_millions"] > 0
+    )
+    return bool(good), parsed
 
 
 def run() -> int:
@@ -98,12 +111,12 @@ def run() -> int:
     try:
         # E2-style preflight within the application stack.
         preflight = service.local_provider.preflight()
-        save("preflight.json", {"provider": "local", "preflight": preflight, "identity": service.local_provider.identity()})
+        save("preflight-health.json", {"provider": "local", "preflight": preflight, "identity": service.local_provider.identity()})
         if not preflight.get("reachable"):
             # Start own Gemma via the manager, then re-probe.
             service.ensure_local_ready()
             preflight = service.local_provider.preflight()
-            save("preflight.json", {"provider": "local", "preflight": preflight, "identity": service.local_provider.identity()})
+            save("preflight-health.json", {"provider": "local", "preflight": preflight, "identity": service.local_provider.identity()})
         emit("D26_PREFLIGHT", "PASS" if preflight.get("reachable") else "FAIL")
 
         service.select_provider("local")
@@ -114,7 +127,7 @@ def run() -> int:
         first = service.ask(dialogue_id, q1["question"], provider="local")
         payload = _answer_payload(first, q1["question"])
         payload["expected_value"] = q1["expected_value"]
-        payload["value_ok"] = str(q1["expected_value"]) in payload["text"]
+        payload["value_ok"] = payload["text"].strip() == str(q1["expected_value"])
         save("gemma-q1.json", payload)
         save("preflight.json", {**payload, "preflight": preflight, "identity": service.local_provider.identity()})
         results["q1"] = payload["value_ok"]
@@ -122,10 +135,10 @@ def run() -> int:
         q2 = QUESTIONS["q2"]
         second = service.ask(dialogue_id, q2["question"], provider="local")
         payload = _answer_payload(second, q2["question"])
-        valid, parsed = _is_json_object(payload["text"])
-        payload["json_valid"] = valid
-        payload["parsed"] = parsed if valid else None
-        payload["required_keys_present"] = bool(valid and all(k in parsed for k in q2["required_keys"]))
+        valid, parsed = valid_city_json(payload["text"])
+        payload["json_valid"] = _is_json_object(payload["text"])[0]
+        payload["parsed"] = parsed
+        payload["required_keys_present"] = valid
         save("gemma-q2.json", payload)
         results["q2"] = payload["json_valid"] and payload["required_keys_present"]
 
@@ -133,6 +146,7 @@ def run() -> int:
         third = service.ask(dialogue_id, q3["question"], provider="local")
         payload = _answer_payload(third, q3["question"])
         payload["expected_value"] = q3["expected_value"]
+        payload["meaning_check"] = "not_assessed"  # Tester must inspect the actual reasoning.
         payload["value_ok"] = str(q3["expected_value"]) in payload["text"]
         save("gemma-q3.json", payload)
         results["q3"] = payload["value_ok"]
@@ -152,12 +166,12 @@ def run() -> int:
                     payload = _answer_payload(record, question["question"])
                     if number == 2:
                         valid, parsed = _is_json_object(payload["text"])
-                        fields_ok = valid and set(parsed) == set(question["required_keys"]) and isinstance(parsed["city"], str) and isinstance(parsed["country"], str) and isinstance(parsed["population_millions"], (int, float)) and not isinstance(parsed["population_millions"], bool)
+                        fields_ok, parsed = valid_city_json(payload["text"])
                         payload.update(json_valid=valid, required_keys_present=bool(fields_ok))
                         content_ok = bool(fields_ok)
                     else:
                         payload["expected_value"] = question["expected_value"]
-                        content_ok = str(question["expected_value"]) in payload["text"]
+                        content_ok = payload["text"].strip() == str(question["expected_value"]) if number == 1 else str(question["expected_value"]) in payload["text"]
                         payload["value_ok"] = content_ok
                     results[f"deepseek_q{number}"] = bool(content_ok and payload["text"].strip() and payload["finish_reason"] == "stop")
                     save(f"deepseek-q{number}.json", payload)
