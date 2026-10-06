@@ -1,0 +1,16 @@
+# Local modules never leave the module: environment, data, caches, secrets.
+.venv/
+local-data/
+*.db
+*.sqlite
+*.sqlite3
+index/
+indexes/
+models/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+!.env.example

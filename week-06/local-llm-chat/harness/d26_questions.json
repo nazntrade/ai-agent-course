@@ -1,0 +1,28 @@
+{
+  "schema_version": "d26-questions-v1",
+  "q1": {
+    "id": "Q1",
+    "kind": "fact_arithmetic",
+    "question": "A shop had 47 apples. It sold 19 and then received 26 more. How many apples does it have now? Reply with the final number only.",
+    "expected_value": 54
+  },
+  "q2": {
+    "id": "Q2",
+    "kind": "json_fields",
+    "question": "Return ONLY a JSON object with exactly these keys: \"city\" (string), \"country\" (string), \"population_millions\" (number). Use Paris as the city. No markdown, no explanation.",
+    "required_keys": {"city": "str", "country": "str", "population_millions": "number"}
+  },
+  "q3": {
+    "id": "Q3",
+    "kind": "reasoning",
+    "question": "A train travels 60 km in 40 minutes at a constant speed. What is its speed in km/h? Show the steps and the final answer.",
+    "expected_value": 90
+  },
+  "rag_control": {
+    "id": "RAG-CONTROL",
+    "document_label": "d26-rag-control.txt",
+    "document_text": "The secret code for project ORION is 7391. Only this document states the ORION code.",
+    "question": "What is the secret code for project ORION?",
+    "expected_substring": "7391"
+  }
+}

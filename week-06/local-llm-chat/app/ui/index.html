@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local LLM Chat</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Local LLM Chat</h1>
+    <div class="provider-switch" role="group" aria-label="Answer provider">
+      <button id="btn-local" class="provider active" data-provider="local">Local — Gemma 12B</button>
+      <button id="btn-network" class="provider" data-provider="network">Network — DeepSeek</button>
+    </div>
+    <div class="status">
+      <span id="state-badge" class="badge unloaded">unloaded</span>
+      <button id="btn-unload" class="secondary">Unload Gemma</button>
+      <button id="btn-toggle-panel" class="secondary" aria-controls="right-panel" aria-expanded="true">Hide settings</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2>Dialogues</h2>
+        <button id="btn-new-dialogue" class="secondary">New</button>
+      </div>
+      <ul id="dialogue-list" class="dialogue-list"></ul>
+    </aside>
+
+    <section class="chat">
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <label class="rag-toggle">
+          <input type="checkbox" id="rag-toggle" /> RAG mode
+        </label>
+        <textarea id="input" rows="1" placeholder="Type a message… (Shift+Enter for a new line)"></textarea>
+        <button id="btn-send">Send</button>
+      </div>
+      <p id="notice" class="notice" hidden></p>
+    </section>
+
+    <aside id="right-panel" class="right-panel">
+      <div class="sidebar-header">
+        <h2>Knowledge</h2>
+      </div>
+      <section id="rag-panel" class="rag-panel" hidden>
+        <h3>RAG sources</h3>
+        <div id="sources"></div>
+        <h3>Citation check</h3>
+        <pre id="citation-view" class="memory"></pre>
+      </section>
+      <section id="rag-tools" class="tools" hidden>
+        <h3>Index a document</h3>
+        <input id="doc-label" placeholder="Document label" />
+        <textarea id="doc-text" rows="3" placeholder="Paste document text"></textarea>
+        <button id="btn-index" class="secondary">Index</button>
+        <h3>Search</h3>
+        <input id="search-query" placeholder="Search query" />
+        <label class="rag-toggle">
+          <input type="checkbox" id="search-rewrite" /> Rewrite query
+        </label>
+        <input id="search-min-score" type="number" min="0" max="1" step="0.05" placeholder="min score (0-1)" />
+        <button id="btn-search" class="secondary">Search</button>
+        <button id="btn-compare" class="secondary">Compare filtered / unfiltered</button>
+        <div id="search-results"></div>
+      </section>
+      <section>
+        <h3>Task memory</h3>
+        <pre id="memory-view" class="memory"></pre>
+      </section>
+    </aside>
+  </main>
+
+  <script src="/assets/app.js?v=d26-runtime-fix"></script>
+</body>
+</html>
