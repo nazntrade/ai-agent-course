@@ -30,6 +30,98 @@ function setStateBadge(value) {
   badge.className = "badge " + value;
 }
 
+// D28: external profile badge.
+function updateExternalBadge(active, info, missing) {
+  const badge = document.getElementById("external-badge");
+  if (active) {
+    badge.hidden = false;
+    badge.textContent = "external";
+    if (info && info.model) {
+      badge.title = "External profile: " + info.kind + " — " + info.model;
+    }
+  } else {
+    badge.hidden = true;
+  }
+  return badge;
+}
+
+// D28: model info badge.
+function updateModelInfo(text) {
+  const el = document.getElementById("model-info");
+  el.textContent = text || "";
+}
+
+// D28: model selector.
+function updateModelSelector(enabled) {
+  const sel = document.getElementById("model-selector");
+  if (!sel) return;
+  sel.disabled = !enabled;
+  sel.title = enabled ? "Select a GGUF model" : "Model selection is controlled by the external profile";
+}
+
+async function refreshModels() {
+  try {
+    const result = await api("/api/models");
+    const sel = document.getElementById("model-selector");
+    if (!sel) return;
+    // Preserve current selection.
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Select model...</option>';
+    for (const m of result.models) {
+      const opt = document.createElement("option");
+      opt.value = m.name;
+      opt.textContent = m.source === "deepseek" ? m.name + " (DeepSeek)" : m.name;
+
+      sel.appendChild(opt);
+    }
+    if (current && [...sel.options].some(o => o.value === current)) {
+      sel.value = current;
+    }
+  } catch (_) {
+    // Models endpoint unavailable — keep default.
+  }
+}
+
+async function selectModel(modelName) {
+  if (!modelName || state.switching) return;
+  state.switching = true;
+  try {
+    await api("/api/models/select", {
+      method: "POST",
+      body: JSON.stringify({ model_id: modelName }),
+    });
+    await refreshProvider();
+    await refreshModels();
+  } catch (error) {
+    setNotice(error.message);
+  } finally {
+    state.switching = false;
+  }
+}
+
+// D28: collection info.
+async function refreshCollections() {
+  try {
+    const result = await api("/api/rag/collections");
+    const infoEl = document.getElementById("collection-info");
+    const nameEl = document.getElementById("collection-name");
+    const countEl = document.getElementById("chunk-count");
+    if (result.collections && result.collections.length) {
+      infoEl.hidden = false;
+      const col = result.collections.find(c => c.name === "agents-survey") || result.collections[0];
+      nameEl.textContent = col.name;
+      countEl.textContent = col.chunk_count;
+      document.getElementById("embedding-info").textContent = " · " + col.dimension + "d · " + col.model;
+      document.getElementById("index-form").hidden = col.name === "agents-survey";
+      document.getElementById("index-readonly").hidden = col.name !== "agents-survey";
+    } else {
+      infoEl.hidden = true;
+    }
+  } catch (_) {
+    document.getElementById("collection-info").hidden = true;
+  }
+}
+
 function setNotice(text) {
   const notice = document.getElementById("notice");
   if (!text) { notice.hidden = true; return; }
@@ -42,10 +134,33 @@ async function refreshProvider() {
   state.provider = result.selected;
   document.getElementById("btn-local").classList.toggle("active", result.selected === "local");
   document.getElementById("btn-network").classList.toggle("active", result.selected === "network");
+
+  // D28: external profile badge + model selector state.
+  const extBadge = updateExternalBadge(
+    result.external_active || false,
+    result.external_info,
+    result.external_missing,
+  );
+  updateModelSelector(!result.external_active);
+  for (const id of ["btn-local", "btn-network", "btn-unload"]) document.getElementById(id).disabled = !!result.external_active;
+  if (result.external_missing?.length) setNotice("External profile error: " + result.external_missing.join(", "));
+
+  // D28: model info badge.
+  if (result.external_active && result.external_info && result.external_info.model) {
+    updateModelInfo((result.external_info.model_file || result.external_info.model) + " (external; API: " + result.external_info.model + ")");
+  } else if (result.model_name) {
+    // Use the factual model name from the provider identity.
+    updateModelInfo(result.model_name + " (" + (result.config_source || result.selected) + ")");
+  } else {
+    updateModelInfo("");
+  }
+
   if (state.busy) { setStateBadge("generating"); return; }
   if (result.selected === "local") {
     setStateBadge(result.local_state);
     if (result.local_error) setNotice(result.local_error);
+  } else if (result.selected === "external") {
+    setStateBadge("external");
   } else {
     setStateBadge("network");
     setNotice(result.missing_config && result.missing_config.length
@@ -149,6 +264,12 @@ function renderMessages(messages) {
       bubble.appendChild(meta);
     }
     const rag = message.parameters && message.parameters.rag;
+    if (rag && rag.enabled && rag.citations) {
+      const check = document.createElement("div");
+      check.className = "citation-summary " + (rag.citations.status === "failed" ? "citation-failed" : "");
+      check.textContent = "Citations: " + rag.citations.status + " · Meaning: not automatically assessed";
+      bubble.appendChild(check);
+    }
     if (rag && rag.enabled && rag.sources.length) {
       const details = document.createElement("details");
       const summary = document.createElement("summary"); summary.textContent = "Sources and citation check";
@@ -248,7 +369,7 @@ function renderSources(sources) {
     item.querySelector(".label").textContent = source.label || source.source || "source";
     item.querySelector(".score").textContent = source.score != null ? "(" + source.score + ")" : "";
     const details = document.createElement("div");
-    details.textContent = "chunk_id: " + source.chunk_id + (source.quote ? "\n“" + source.quote + "”" : "");
+    details.textContent = (source.evidence_view || "index text") + (source.reading_locations?.length ? " · " + source.reading_locations.map(p => "page " + p.page + ", column " + p.column).join("; ") : "") + "\nchunk_id: " + source.chunk_id + (source.quote ? "\n“" + source.quote + "”" : "");
     item.appendChild(details);
     panel.appendChild(item);
   }
@@ -373,11 +494,18 @@ function wire() {
     document.getElementById("rag-panel").hidden = !event.target.checked;
     document.getElementById("rag-tools").hidden = !event.target.checked;
   });
+  // D28: model selector change.
+  const modelSel = document.getElementById("model-selector");
+  if (modelSel) {
+    modelSel.addEventListener("change", () => selectModel(modelSel.value));
+  }
 }
 
 async function init() {
   wire();
   await refreshProvider();
+  await refreshModels();
+  await refreshCollections();
   await loadDialogues();
   state.dialogueId = state.dialogues.length ? state.dialogues[0].dialogue_id : null;
   if (state.dialogueId) await openDialogue(state.dialogueId);

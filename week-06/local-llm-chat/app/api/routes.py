@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Query
 from pydantic import BaseModel, Field
 
-from ..config import PROVIDER_LOCAL, PROVIDER_NETWORK
-from ..errors import DialogueNotFound, InvalidRequest
+from ..config import PROVIDER_EXTERNAL, PROVIDER_LOCAL, PROVIDER_NETWORK
+from ..errors import DialogueNotFound, InvalidRequest, ProviderError
 
 
 class ProviderSelect(BaseModel):
-    provider: Literal["local", "network"]
+    provider: Literal["local", "network", "external"]
     dialogue_id: str | None = None
 
 
@@ -33,7 +35,7 @@ class AskRequest(BaseModel):
     dialogue_id: str = Field(min_length=1, max_length=200)
     question: str = Field(min_length=1, max_length=4000)
     rag_enabled: bool = False
-    provider: Literal["local", "network"] | None = None
+    provider: Literal["local", "network", "external"] | None = None
     use_rewrite: bool = False
     min_score: float | None = Field(default=None, ge=0.0, le=1.0)
     top_k: int | None = Field(default=None, ge=1, le=50)
@@ -42,6 +44,10 @@ class AskRequest(BaseModel):
 class DemoDocument(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=100000)
+
+
+class ModelSelect(BaseModel):
+    model_id: str = Field(min_length=1, max_length=500)
 
 
 def create_router(service: Any) -> APIRouter:
@@ -123,7 +129,7 @@ def create_router(service: Any) -> APIRouter:
         top_k: int = Query(default=5, ge=1, le=50),
         min_score: float | None = Query(default=None, ge=0.0, le=1.0),
         use_rewrite: bool = Query(default=False),
-        provider: str | None = Query(default=None, pattern="^(local|network)$"),
+        provider: str | None = Query(default=None, pattern="^(local|network|external)$"),
     ) -> dict[str, Any]:
         return service.search(query, top_k=top_k, min_score=min_score, use_rewrite=use_rewrite, provider=provider)
 
@@ -133,7 +139,7 @@ def create_router(service: Any) -> APIRouter:
         top_k: int = Query(default=3, ge=1, le=50),
         min_score: float | None = Query(default=None, ge=0.0, le=1.0),
         use_rewrite: bool = Query(default=False),
-        provider: str | None = Query(default=None, pattern="^(local|network)$"),
+        provider: str | None = Query(default=None, pattern="^(local|network|external)$"),
     ) -> dict[str, Any]:
         return service.compare(query, top_k=top_k, min_score=min_score, use_rewrite=use_rewrite, provider=provider)
 
@@ -142,5 +148,69 @@ def create_router(service: Any) -> APIRouter:
         from ..mcp.connection_point import describe_connection_point
 
         return describe_connection_point()
+
+    # -- D28: external profile & model selection -------------------------
+
+    @router.get("/external-profile")
+    def external_profile() -> dict[str, Any]:
+        active = service.external_profile_active
+        info = service.external_profile_info if active else {}
+        return {
+            "active": active,
+            "missing": service.settings.external_profile_errors(),
+            "info": info,
+        }
+
+    @router.get("/models")
+    def list_models() -> dict[str, Any]:
+        """List .gguf files from the configured model directory (D28).
+
+        When network (DeepSeek) configuration is available, DeepSeek model
+        variants are appended so the UI can offer them.
+        """
+        model_dir = Path(service.settings.gguf_dir)
+        models: list[dict[str, Any]] = []
+        if model_dir.is_dir():
+            for p in sorted(model_dir.rglob("*.gguf")):
+                if p.name.lower().startswith("mmproj"):
+                    continue
+                models.append({
+                    "name": p.relative_to(model_dir).as_posix(),
+                    "path": str(p),
+                    "size": p.stat().st_size,
+                    "source": "gguf",
+                })
+        # C05: add DeepSeek variants when network config is available.
+        if not service.settings.missing_network_config():
+            for name in service.settings.deepseek_models or (service.settings.deepseek_model_id,):
+                models.append({"name": name, "source": "deepseek", "size": 0})
+        return {"models": models}
+
+    @router.post("/models/select")
+    def select_model_api(body: ModelSelect) -> dict[str, Any]:
+        """Select a GGUF model by name (only when no external profile active)."""
+        if service.external_profile_active:
+            raise ProviderError(
+                "Model selection is controlled by the external profile.",
+            )
+        return service.select_model(body.model_id)
+
+    @router.get("/rag/collections")
+    def rag_collections() -> dict[str, Any]:
+        """Return collection info from the week-05 index (D28)."""
+        index_path = service.settings.week05_index_path
+        try:
+            from ..rag.external_index import ExternalIndex
+            idx = ExternalIndex(index_path)
+            collections = idx.list_collections()
+            schema = idx.inspect_schema()
+            idx.close()
+            return {
+                "collections": collections,
+                "dimension": schema.get("dimension", 0),
+                "total_chunks": schema.get("chunks", 0),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"collections": [], "error": str(exc), "dimension": 0, "total_chunks": 0}
 
     return router

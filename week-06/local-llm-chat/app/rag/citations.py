@@ -99,7 +99,7 @@ class CitationVerifier:
         # Structured citations explicitly quote a fragment.
         for citation in quoted_citations:
             reference = str(citation.get("chunk_id") or citation.get("reference") or "")
-            if not reference or reference in seen:
+            if not reference:
                 continue
             seen.add(reference)
             checks.append(self._check(reference, str(citation.get("quote") or "")))

@@ -65,10 +65,15 @@ class OllamaEmbedder:
 
     def preflight(self) -> dict[str, Any]:
         try:
-            status, _ = self._transport("GET", self.base_url + "/api/tags", None, 3.0)
+            status, body = self._transport("GET", self.base_url + "/api/tags", None, 3.0)
         except ProviderUnavailable:
             return {"reachable": False, "model_present": False}
-        return {"reachable": 200 <= status < 300, "model_present": 200 <= status < 300}
+        try:
+            models = json.loads(body).get("models", [])
+            match = next((m for m in models if m.get("name") == self.model or m.get("model") == self.model), None)
+        except (ValueError, TypeError, AttributeError):
+            match = None
+        return {"reachable": 200 <= status < 300, "model_present": bool(match), "digest": match.get("digest") if match else None}
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return self._embed([self.document_prefix + t for t in texts])

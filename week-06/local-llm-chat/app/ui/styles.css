@@ -52,6 +52,22 @@ body {
 .badge.ready { background: rgba(56,193,114,.15); color: var(--ok); }
 .badge.loading, .badge.generating { background: rgba(245,166,35,.15); color: var(--warn); }
 .badge.error { background: rgba(224,82,82,.15); color: var(--err); }
+.badge.external { background: rgba(245,166,35,.2); color: var(--warn); }
+.badge.model-info { background: var(--panel-2); color: var(--muted); font-size: 11px; }
+
+.model-select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid #2c3341;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  min-width: 140px;
+}
+.model-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 button { cursor: pointer; border-radius: 8px; border: none; padding: 8px 12px; font-size: 13px; }
 button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid #2c3341; }
@@ -109,6 +125,8 @@ button.icon.danger { color: var(--err); }
 .notice { color: var(--warn); padding: 0 20px 10px; margin: 0; }
 
 .rag-panel { background: var(--panel-2); border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+.collection-info { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.collection-info #collection-name { color: var(--text); font-weight: 600; }
 .source-item { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
 .source-item .label { color: var(--text); font-weight: 600; }
 .tools input, .tools textarea {
@@ -137,3 +155,13 @@ button:disabled { opacity: .6; cursor: wait; }
 .msg details { font-size: 13px; margin-top: 10px; }
 .msg summary { cursor: pointer; color: var(--muted); }
 .msg details pre { max-height: 300px; overflow: auto; }
+
+/* Keep model controls readable at laptop and recording widths. */
+.topbar { flex-wrap: wrap; }
+.topbar .status { flex-wrap: wrap; }
+.model-select { max-width: 340px; }
+.badge.model-info { max-width: 360px; overflow-wrap: anywhere; text-transform: none; }
+@media (max-width: 1200px) { .status { margin-left: 0; } .layout { grid-template-columns: 190px minmax(320px, 1fr) 290px; } }
+
+.citation-summary { margin-top: 10px; font-size: 13px; color: #a7b2c5; }
+.citation-failed { color: #ffba89; border-left: 3px solid #ffba89; padding-left: 8px; }

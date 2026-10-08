@@ -8,9 +8,11 @@ different dialogue/provider (I10). No-RAG never attaches document sources (I8).
 from __future__ import annotations
 
 import threading
+import time
+from pathlib import Path
 from typing import Any, Mapping
 
-from .config import PROVIDER_LOCAL, PROVIDER_NETWORK, Settings
+from .config import PROVIDER_EXTERNAL, PROVIDER_LOCAL, PROVIDER_NETWORK, Settings
 from .context.builder import ContextBuilder
 from .dialogues.store import SqliteDialogueStore
 from .errors import (
@@ -20,10 +22,13 @@ from .errors import (
 )
 from .local_process.gemma_manager import GemmaProcessManager
 from .providers.base import AnswerProvider, ChatMessage, ChatResult
+from .providers.external_http import ExternalHttpProvider
 from .providers.local_llama import LocalLlamaProvider
 from .providers.network_deepseek import DeepSeekProvider
 from .rag.embedder import OllamaEmbedder
 from .rag.citations import CitationVerifier
+from .rag.grounded_answer import generate_grounded
+from .rag.external_index import ExternalIndex
 from .rag.rewrite import ChatQueryRewriter, RewriteResult, no_rewrite
 from .rag.store import RagStore
 
@@ -37,9 +42,10 @@ class ChatService:
         *,
         local_provider: AnswerProvider | None = None,
         network_provider: AnswerProvider | None = None,
+        external_provider: AnswerProvider | None = None,
         gemma_manager: GemmaProcessManager | None = None,
         dialogue_store: SqliteDialogueStore | None = None,
-        rag_store: RagStore | None = None,
+        rag_store: RagStore | ExternalIndex | None = None,
         embedder: OllamaEmbedder | None = None,
         context_builder: ContextBuilder | None = None,
         query_rewriter: Any | None = None,
@@ -60,6 +66,8 @@ class ChatService:
             max_output_tokens=settings.deepseek_max_output_tokens,
             temperature=settings.deepseek_temperature,
         )
+        # D28: optional external provider when AI_TEST_MODEL_* profile is set.
+        self.external_provider = external_provider
         self.gemma = gemma_manager or GemmaProcessManager(
             runtime_path=settings.gemma_runtime_path,
             gguf_path=settings.gemma_gguf_path,
@@ -73,7 +81,11 @@ class ChatService:
         self.dialogues = dialogue_store or SqliteDialogueStore(settings.dialogue_db_path)
         self.rag = rag_store
         self.embedder = embedder
-        self.context = context_builder or ContextBuilder()
+        if isinstance(rag_store, ExternalIndex) and embedder is not None:
+            rag_store.validate_embedder(embedder)
+        self.context = context_builder or ContextBuilder(
+            max_context_chars=settings.rag_max_context_chars
+        )
         # The rewriter uses whichever answer provider is selected at call time
         # unless an explicit rewriter is injected for tests.
         self._query_rewriter = query_rewriter
@@ -82,17 +94,74 @@ class ChatService:
         # Bumped on every provider switch; a generation that finishes under a
         # different epoch is stale and must not be treated as an active answer.
         self._generation_epoch = 0
+        # Restore selection without loading a model during application startup.
+        if not self.settings.external_profile_present():
+            saved_local = self.dialogues.get_state("selected_local_model", "")
+            if saved_local:
+                root = Path(self.settings.gguf_dir).resolve()
+                candidate = (root / saved_local).resolve()
+                if candidate.is_relative_to(root) and candidate.is_file() and candidate.suffix.lower() == ".gguf" and not candidate.name.lower().startswith("mmproj"):
+                    self.gemma.gguf_path = str(candidate)
+                    self.gemma.model_id = saved_local
+                    self.local_provider.model_id = saved_local
+            saved_network = self.dialogues.get_state("selected_network_model", "")
+            if saved_network in (self.settings.deepseek_models or (self.settings.deepseek_model_id,)):
+                self.network_provider.model_id = saved_network
 
     # -- provider selection ----------------------------------------------
+
+    @property
+    def external_profile_active(self) -> bool:
+        """Return ``True`` when a complete external profile is configured."""
+        return self.settings.external_profile_complete()
+
+    @property
+    def external_profile_info(self) -> dict[str, Any]:
+        """Return external profile metadata (kind, model, source)."""
+        if not self.external_profile_active:
+            return {}
+        info: dict[str, Any] = {
+            "kind": self.settings.test_model_kind,
+            "model": self.settings.test_model_name,
+            "source": "external_env",
+        }
+        if self.settings.test_model_path:
+            info["model_file"] = Path(self.settings.test_model_path).name
+        if self.settings.test_model_base_url:
+            info["base_url"] = self.settings.test_model_base_url
+        if self.settings.test_model_id:
+            info["model_id"] = self.settings.test_model_id
+        return info
+
     def selected_provider(self) -> str:
         stored = self.dialogues.get_state(STATE_KEY_PROVIDER, PROVIDER_LOCAL)
+        if self.external_profile_active:
+            return PROVIDER_EXTERNAL
         return stored if stored in (PROVIDER_LOCAL, PROVIDER_NETWORK) else PROVIDER_LOCAL
 
+    def _validate_profile(self) -> None:
+        errors = self.settings.external_profile_errors()
+        if errors:
+            raise ProviderError("External profile is invalid; no fallback is allowed.", details={"configuration_errors": errors})
+
     def provider_for(self, name: str) -> AnswerProvider:
+        self._validate_profile()
+        if name not in (PROVIDER_LOCAL, PROVIDER_NETWORK, PROVIDER_EXTERNAL):
+            raise ProviderError("Unknown provider.")
+        if name == PROVIDER_EXTERNAL:
+            if self.external_provider is None:
+                raise ProviderError("External profile is configured but no provider instance.")
+            return self.external_provider
         return self.local_provider if name == PROVIDER_LOCAL else self.network_provider
 
     def select_provider(self, name: str, *, dialogue_id: str | None = None) -> dict[str, Any]:
         """Serialize a provider switch; switching to network stops only own Gemma."""
+        if self.external_profile_active:
+            raise ProviderError(
+                "Model selection is controlled by the external profile. "
+                "Clear AI_TEST_MODEL_* variables to unlock selection.",
+                details={"missing": self.settings.external_profile_missing()},
+            )
         if name not in (PROVIDER_LOCAL, PROVIDER_NETWORK):
             raise ProviderError("Unknown provider.", details={"provider": name})
         with self._switch_lock:
@@ -105,10 +174,80 @@ class ChatService:
                 self.dialogues.set_state(STATE_KEY_PROVIDER + ":active_dialogue", dialogue_id)
             return self.provider_state()
 
+    def select_model(self, model_id: str) -> dict[str, Any]:
+        """Select a GGUF model by name (only when no external profile active).
+
+        Only the application's own runtime is affected.
+        Resolves the model name to an actual file path in the configured GGUF
+        directory and restarts the local process with the new model.
+        """
+        if self.external_profile_active:
+            raise ProviderError(
+                "Model selection is controlled by the external profile.",
+            )
+        self._validate_profile()
+        with self._generation_lock, self._switch_lock:
+            self._generation_epoch += 1
+            if model_id in (self.settings.deepseek_models or (self.settings.deepseek_model_id,)):
+                if self.settings.missing_network_config():
+                    raise ProviderNotConfigured("DeepSeek is not configured.", details={"missing": self.settings.missing_network_config()})
+                self.gemma.stop()
+                self.network_provider.model_id = model_id
+                self.dialogues.set_state(STATE_KEY_PROVIDER, PROVIDER_NETWORK)
+                self.dialogues.set_state("selected_network_model", model_id)
+                return {"selected": model_id, "provider": PROVIDER_NETWORK}
+            # Resolve model_id to an actual GGUF file path.
+            model_dir = Path(self.settings.gguf_dir)
+            candidate = (model_dir / model_id).resolve()
+            if not candidate.is_relative_to(model_dir.resolve()) or candidate.suffix.lower() != ".gguf" or candidate.name.lower().startswith("mmproj") or not candidate.is_file():
+                raise ProviderError(
+                    "GGUF model file not found.",
+                    details={"model": model_id, "searched_path": str(candidate)},
+                )
+            # Update internal gguf_path so the process uses the real file.
+            self.gemma.stop()
+            self.gemma.gguf_path = str(candidate)
+            self.gemma.model_id = model_id
+            # Also update the local provider's model_id.
+            self.local_provider.model_id = model_id
+            # Start the selected model only after the old owned process exited.
+            self.dialogues.set_state(STATE_KEY_PROVIDER, PROVIDER_LOCAL)
+            self.dialogues.set_state("selected_local_model", model_id)
+            state = self.gemma.ensure_started()
+            return {
+                "selected": model_id,
+                "local_state": state.get("state"),
+            }
+
     def provider_state(self) -> dict[str, Any]:
         selected = self.selected_provider()
         local_state = self.gemma.state_snapshot()
-        state = local_state
+
+        # D28: external profile info.
+        ext_active = self.external_profile_active
+        ext_info = self.external_profile_info if ext_active else None
+        ext_missing = self.settings.external_profile_errors()
+        if ext_missing:
+            return {"selected": "external", "external_active": True, "external_missing": ext_missing, "external_info": {}, "model_name": self.settings.test_model_name, "config_source": "invalid_external_profile", "local_state": local_state["state"], "local_pid": local_state["pid"], "local_error": None}
+
+        if selected == PROVIDER_EXTERNAL:
+            ext_status = self.external_provider.status() if self.external_provider else None
+            return {
+                "selected": selected,
+                "local_state": local_state["state"],
+                "local_pid": local_state["pid"],
+                "local_error": local_state["error"],
+                "network_reachable": None,
+                "network_detail": None,
+                "missing_config": [],
+                "external_active": True,
+                "external_info": ext_info,
+                "external_missing": ext_missing,
+                "external_reachable": ext_status.reachable if ext_status else None,
+                "external_detail": ext_status.detail if ext_status else None,
+                "model_name": self.external_provider.identity().get("model") if self.external_provider else self.settings.test_model_name,
+                "config_source": "external_env",
+            }
         if selected == PROVIDER_NETWORK:
             network_status = self.network_provider.status()
             return {
@@ -119,19 +258,36 @@ class ChatService:
                 "network_reachable": network_status.reachable,
                 "network_detail": network_status.detail,
                 "missing_config": self.network_provider.missing_config(),
+                "external_active": False,
+                "external_info": None,
+                "external_missing": [],
+                "external_reachable": None,
+                "external_detail": None,
+                "model_name": self.network_provider.identity().get("model"),
+                "config_source": "network_deepseek",
             }
         return {
             "selected": selected,
-            "local_state": state["state"],
-            "local_pid": state["pid"],
-            "local_error": state["error"],
+            "local_state": local_state["state"],
+            "local_pid": local_state["pid"],
+            "local_error": local_state["error"],
             "network_reachable": None,
             "network_detail": None,
             "missing_config": [],
+            "external_active": ext_active,
+            "external_info": ext_info,
+            "external_missing": ext_missing,
+            "external_reachable": None,
+            "external_detail": None,
+            "model_name": self.local_provider.identity().get("model"),
+            "config_source": "local_gguf",
         }
 
     def ensure_local_ready(self) -> dict[str, Any]:
         """Idempotent local start; declares ready only on confirmed availability."""
+        self._validate_profile()
+        if self.external_profile_active:
+            raise ProviderError("External profile owns generation; local loading is blocked.")
         with self._switch_lock:
             return self.gemma.ensure_started()
 
@@ -151,6 +307,15 @@ class ChatService:
         min_score: float | None = None,
         top_k: int | None = None,
     ) -> dict[str, Any]:
+        # C03: reject a partial external profile — never fall through to Gemma.
+        if not self.external_profile_active and self.settings.external_profile_partial():
+            raise ProviderError(
+                "External profile is partially configured; generation is blocked.",
+                details={"missing": self.settings.external_profile_missing()},
+            )
+        self._validate_profile()
+        if self.external_profile_active and provider == PROVIDER_LOCAL:
+            raise ProviderError("External profile is active; local override is blocked.")
         name = provider or self.selected_provider()
         answer_provider = self.provider_for(name)
 
@@ -159,20 +324,29 @@ class ChatService:
             {"dialogue_id": dialogue_id, "role": "user", "text": question}
         )
 
+        retrieval_started = time.perf_counter()
         fragments: list[dict[str, Any]] = []
         rewrite: RewriteResult = no_rewrite(question)
         if rag_enabled:
             if self.rag is None or self.embedder is None:
                 raise ProviderError("RAG is enabled but retrieval is not configured.")
             if use_rewrite:
-                rewriter = self._query_rewriter or ChatQueryRewriter(answer_provider)
+                # When external profile is active, use the external provider
+                # for query rewrite; otherwise fall back to the selected provider.
+                rewriter_model = answer_provider
+                if self.external_profile_active and self.external_provider:
+                    rewriter_model = self.external_provider
+                rewriter = self._query_rewriter or ChatQueryRewriter(rewriter_model)
                 rewrite = rewriter.rewrite(question)
             search_query = rewrite.search_query
+            if isinstance(self.rag, ExternalIndex):
+                self.rag.verify_runtime_embedding(self.embedder)
             query_vector = self.embedder.embed_query(search_query)
             fragments = self.rag.search(
                 query_vector, top_k=top_k or self.settings.rag_top_k, min_score=min_score
             )
 
+        retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 3) if rag_enabled else 0.0
         history = self.dialogues.list_messages(dialogue_id)[:-1]  # exclude the just-added user turn
         messages, trace = self.context.build(
             question=question,
@@ -182,6 +356,8 @@ class ChatService:
             memory=self.dialogues.get_memory(dialogue_id),
         )
 
+        # Verify citations only against the evidence actually sent after budgeting.
+        fragments = [{**source, "text": source["quote"]} for source in trace["sources"]] if rag_enabled else []
         if rag_enabled and not fragments:
             result = ChatResult(
                 text="I don't know from the available documents. Please clarify the question or index a relevant document.",
@@ -195,7 +371,7 @@ class ChatService:
                     self.gemma.ensure_started()
                     self.gemma.set_generating(True)
                 try:
-                    result = answer_provider.chat(messages)
+                    result = generate_grounded(answer_provider, messages, fragments) if rag_enabled else answer_provider.chat(messages)
                 except ProviderNotConfigured:
                     self._record_error(dialogue_id, name, "provider_not_configured")
                     raise
@@ -241,6 +417,8 @@ class ChatService:
             "answer": result.to_dict(),
             "rag": {
                 "enabled": rag_enabled,
+                "retrieval_ms": retrieval_ms,
+                "context": {k: v for k, v in trace.items() if k != "sources"},
                 "sources": trace["sources"] if rag_enabled else [],
                 "rewrite": rewrite.to_dict() if rag_enabled else None,
                 "citations": citations,
@@ -284,9 +462,11 @@ class ChatService:
             raise ProviderError("Retrieval is not configured.")
         rewrite: RewriteResult = no_rewrite(query)
         if use_rewrite:
-            name = provider or self.selected_provider()
+            name = PROVIDER_EXTERNAL if self.external_profile_active else (provider or self.selected_provider())
             rewriter = self._query_rewriter or ChatQueryRewriter(self.provider_for(name))
             rewrite = rewriter.rewrite(query)
+        if isinstance(self.rag, ExternalIndex):
+            self.rag.verify_runtime_embedding(self.embedder)
         vector = self.embedder.embed_query(rewrite.search_query)
         results = self.rag.search(vector, top_k=top_k, min_score=min_score)
         return {"query": query, "search_query": rewrite.search_query, "rewrite": rewrite.to_dict(), "results": results}
@@ -304,9 +484,11 @@ class ChatService:
             raise ProviderError("Retrieval is not configured.")
         rewrite: RewriteResult = no_rewrite(query)
         if use_rewrite:
-            name = provider or self.selected_provider()
+            name = PROVIDER_EXTERNAL if self.external_profile_active else (provider or self.selected_provider())
             rewriter = self._query_rewriter or ChatQueryRewriter(self.provider_for(name))
             rewrite = rewriter.rewrite(query)
+        if isinstance(self.rag, ExternalIndex):
+            self.rag.verify_runtime_embedding(self.embedder)
         vector = self.embedder.embed_query(rewrite.search_query)
         comparison = self.rag.compare(vector, top_k=top_k, min_score=min_score)
         comparison["query"] = query
