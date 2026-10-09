@@ -17,6 +17,10 @@ from .routes import create_router
 def create_app(service: object, *, ui_dir: str | Path | None = None, title: str = "Local LLM Chat") -> FastAPI:
     app = FastAPI(title=title, version=__version__, description="D26 local Gemma / network DeepSeek chat.")
     app.include_router(create_router(service))
+    from ..optimization import OptimizationLab
+    from .optimization_routes import optimization_router
+    service.optimization = OptimizationLab(service)
+    app.include_router(optimization_router(service.optimization))
 
     @app.exception_handler(AppError)
     async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
@@ -48,6 +52,10 @@ def create_app(service: object, *, ui_dir: str | Path | None = None, title: str 
         @app.get("/", include_in_schema=False)
         def ui_index() -> FileResponse:
             return FileResponse(static_dir / "index.html")
+
+        @app.get("/optimization", include_in_schema=False)
+        def optimization_ui() -> FileResponse:
+            return FileResponse(static_dir / "optimization.html")
 
         @app.get("/index.html", include_in_schema=False)
         def ui_index_file() -> FileResponse:

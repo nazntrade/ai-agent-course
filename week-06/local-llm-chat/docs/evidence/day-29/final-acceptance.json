@@ -1,0 +1,91 @@
+{
+  "at": "2026-10-09T04:25:42.562290+00:00",
+  "result": "PASS",
+  "scope": "All twelve frozen D29 product criteria; not a claim of flawless citations or general autonomous Centre performance.",
+  "reviewer": "independent read-only d29_spec_review; did not implement or edit product",
+  "criteria": [
+    {
+      "id": "C_COMPARE",
+      "result": "PASS"
+    },
+    {
+      "id": "C_PARAMS",
+      "result": "PASS"
+    },
+    {
+      "id": "C_PROFILE",
+      "result": "PASS"
+    },
+    {
+      "id": "C_PROMPT",
+      "result": "PASS"
+    },
+    {
+      "id": "C_QUANT",
+      "result": "PASS"
+    },
+    {
+      "id": "C_README",
+      "result": "PASS"
+    },
+    {
+      "id": "C_REGRESSION",
+      "result": "PASS"
+    },
+    {
+      "id": "C_REPRODUCIBLE",
+      "result": "PASS"
+    },
+    {
+      "id": "C_SPEC_DOCS",
+      "result": "PASS"
+    },
+    {
+      "id": "C_TASK_SET",
+      "result": "PASS"
+    },
+    {
+      "id": "C_UI_BROWSER",
+      "result": "PASS"
+    },
+    {
+      "id": "C_VIDEO",
+      "result": "PASS"
+    }
+  ],
+  "architecture_review": "PASS",
+  "docx_review": {
+    "result": "PASS",
+    "pages": [
+      8,
+      4
+    ],
+    "all_pages_visually_inspected": true
+  },
+  "video_review": {
+    "result": "PASS",
+    "full_decode_exit": 0,
+    "width": 1920,
+    "height": 1080,
+    "duration_s": 204.88,
+    "decoded_frames": 4874,
+    "independently_viewed_frame_count": 18,
+    "coverage": "baseline, candidate/apply actual context, custom, six full pairs, length, new RAG chat, Network/history, restored default"
+  },
+  "live_comparison": {
+    "run": "20261009T034252857916Z",
+    "answers_reviewed": 12,
+    "factual_regression": false
+  },
+  "tests": {
+    "unit_passed": 59,
+    "integration_passed": 35,
+    "remote_live": "NOT_RUN"
+  },
+  "limitations": [
+    "Candidate planning/evaluation exact-quotation and attribution defects remain documented.",
+    "One installed same-model Q5 variant: weight-quantization A/B unavailable.",
+    "Small task set; whole-profile comparison, no isolated parameter causality or statistical significance.",
+    "Resources are process CPU and sampled host working set, not VRAM or energy."
+  ]
+}

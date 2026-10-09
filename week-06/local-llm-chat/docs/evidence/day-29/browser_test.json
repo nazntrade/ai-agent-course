@@ -1,0 +1,53 @@
+{
+  "result": "pass",
+  "launch": "run_app.bat with explicit own environment, APP_SKIP_ENV_FILE=1; no external profile",
+  "actions": [
+    {
+      "action": "Apply baseline in browser",
+      "observed": "server verified8192, PID2484"
+    },
+    {
+      "action": "Apply optimized in browser",
+      "observed": "server verified6144, PID26672"
+    },
+    {
+      "action": "Open all six comparison rows",
+      "observed": "Complete before/after answers, independent factual review and exact citation defects visible"
+    },
+    {
+      "action": "Open8token probe",
+      "observed": "length and visibly unfinished answer"
+    },
+    {
+      "action": "Send new RAG memory question in main chat",
+      "observed": "Real Qwen answer2802ms; memory reading/writing/reflection included; sources retained"
+    },
+    {
+      "action": "Restart via run_app.bat and reopen chat",
+      "observed": "Prior dialogue and answer persisted in SQLite"
+    },
+    {
+      "action": "Switch Local to Network without sending",
+      "observed": "Network selected; missing DEEPSEEK_API_KEY displayed without its value"
+    },
+    {
+      "action": "Switch back Local and verify default",
+      "observed": "optimized0.1/512/6144 restored; actual context6144 confirmed, owned PID18884"
+    },
+    {
+      "action": "Apply custom temperature0.2 then restore candidate0.1",
+      "observed": "Active custom, actual context6144 verified on same owned PID18884; candidate restored; no benchmark rerun"
+    }
+  ],
+  "limitations": [
+    "Remote LIVE not run; Network adapter regression mock/loopback only."
+  ],
+  "screenshots": [
+    "screens/profile-final.png",
+    "screens/results-final.png",
+    "screens/chat-final.png",
+    "screens/history-final.png",
+    "screens/final-app-proof.png",
+    "screens/custom-profile.png"
+  ]
+}

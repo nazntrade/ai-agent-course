@@ -1,0 +1,6 @@
+2026-10-09 final check
+UNIT:59passed
+INTEGRATION:35passed(mock/loopback, Network adapter and cancellation included)
+LIVE:test.bat scenario d29-optimization PASS; run20261009T034252857916Z,12realanswers plus length probe
+Browser:actual RAG chat, Local/Network UI toggle and persisted history PASS
+Remote LIVE NOT_RUN

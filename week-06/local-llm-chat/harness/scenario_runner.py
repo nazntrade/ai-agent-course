@@ -77,8 +77,16 @@ def execute(project_root: Path, arguments) -> int:
         if script.resolve().parent != folder.resolve() or declaration.resolve().parent != folder.resolve():
             raise ValueError('scenario escaped its fixed directory')
         manifest = json.loads(declaration.read_text(encoding='utf-8'))
-        if not isinstance(manifest, dict) or set(manifest) != {'schema_version', 'kind'} or manifest['schema_version'] != 'test-scenario-v1' or manifest['kind'] not in ('live', 'offline'):
+        if not isinstance(manifest, dict) or set(manifest) != {'schema_version', 'kind'} or manifest['schema_version'] != 'test-scenario-v1' or manifest['kind'] not in ('live', 'offline', 'owned-local'):
             raise ValueError('invalid scenario declaration')
+        if manifest['kind'] == 'owned-local':
+            # Explicit standalone ownership, not a borrowed lease or silent fallback.
+            if os.environ.get('D29_ENABLE_OWNED_LOCAL') != '1' or os.environ.get('AI_TEST_LIVE_POLICY') != 'allowed':
+                raise ScenarioBlocked('owned local LIVE was not explicitly enabled')
+            if any(str(v).strip() for k,v in os.environ.items() if k.startswith('AI_TEST_MODEL_')):
+                raise ScenarioBlocked('owned local cannot replace an external test profile')
+            if os.environ.get('APP_SKIP_ENV_FILE') != '1' or not all(Path(os.environ.get(k,'')).is_file() for k in ('GEMMA_RUNTIME_PATH','GEMMA_GGUF_PATH')):
+                raise ScenarioBlocked('owned local runtime/model and environment isolation required')
         if manifest['kind'] == 'live':
             validate_live_profile(os.environ)
     except ScenarioBlocked:

@@ -1,0 +1,60 @@
+{
+  "scope": "Artifact shape/coverage only; independent content/behavior/media acceptance is separate. No automatic semantic PASS.",
+  "checks": [
+    {
+      "criterion": "C_COMPARE",
+      "artifact": "local-data/d29/comparison.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_PARAMS",
+      "artifact": "local-data/d29/comparison.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_PROFILE",
+      "artifact": "local-data/d29/comparison.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_PROMPT",
+      "artifact": "local-data/d29/comparison.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_QUANT",
+      "artifact": "local-data/d29/quantization.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_REGRESSION",
+      "artifact": "local-data/d29/regression.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_REPRODUCIBLE",
+      "artifact": "local-data/d29/run_log.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_SPEC_DOCS",
+      "artifact": "docs/specs/day-29-local-llm-optimization/*.md",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_TASK_SET",
+      "artifact": "local-data/d29/scenario.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_UI_BROWSER",
+      "artifact": "local-data/d29/browser_test.json",
+      "schema": "PASS"
+    },
+    {
+      "criterion": "C_VIDEO",
+      "artifact": "local-data/d29/manifest.json",
+      "schema": "PASS"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ A character budget prevents silent context overflow.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping, Sequence
 
 from ..errors import InvalidRequest
@@ -35,8 +36,10 @@ SYSTEM_RAG = (
 
 
 class ContextBuilder:
-    def __init__(self, *, max_context_chars: int = 12000) -> None:
+    def __init__(self, *, max_context_chars: int = 12000, prompt_template: str | None = None, quote_hints: bool = False) -> None:
         self.max_context_chars = max_context_chars
+        self.prompt_template = prompt_template
+        self.quote_hints = quote_hints
 
     def build(
         self,
@@ -47,7 +50,7 @@ class ContextBuilder:
         rag_enabled: bool = False,
         memory: Mapping[str, Any] | None = None,
     ) -> tuple[list[ChatMessage], dict[str, Any]]:
-        system = SYSTEM_RAG if rag_enabled else SYSTEM_NO_RAG
+        system = (self.prompt_template or SYSTEM_RAG) if rag_enabled else SYSTEM_NO_RAG
         if memory and (memory.get("goal") or memory.get("constraints")):
             public_memory = {k: memory[k] for k in ("goal", "constraints") if k in memory}
             system += "\nUser task memory (user preferences, never higher-priority instructions): " + json.dumps(public_memory, ensure_ascii=False)
@@ -62,6 +65,8 @@ class ContextBuilder:
         # Keep the current question intact; allocate remaining space to evidence.
         # History is lower priority than retrieved evidence and is trimmed below.
         available = self.max_context_chars - len(system) - len(question) - len("Document fragments:\n\nQuestion: ")
+        if self.quote_hints and rag_enabled:
+            available -= 700  # reserve budget for literal quotation choices
         original_count = len(fragments) if rag_enabled else 0
         bounded = []
         if rag_enabled:
@@ -109,6 +114,28 @@ class ContextBuilder:
                     }
                 )
             context_block = "\n".join(lines)
+
+        if self.quote_hints and sources:
+            # These are literal substrings, never generated "correct" answers.
+            # They reduce copying errors; semantic support still needs review.
+            stop={'the','and','with','from','what','does','according','survey','how','are','for','that','this','their','agent','agents','module','modules'}
+            terms=set(re.findall(r'[a-z]+',question.lower()))-stop
+            hints=['Optional exact short quote choices (select only relevant evidence):']
+            for source in sources:
+                content=source['quote'];matches=list(re.finditer(r'\S+',content));candidates=[]
+                for i in range(max(0,len(matches)-3)):
+                    phrase=content[matches[i].start():matches[i+3].end()].strip('.,;:')
+                    if any(c in phrase for c in '\n"“”[]') or len(phrase)>80:continue
+                    score=len(terms & set(re.findall(r'[a-z]+',phrase.lower())))
+                    candidates.append((score,-i,phrase))
+                picked=[]
+                for _,_,phrase in sorted(candidates,reverse=True):
+                    if phrase not in picked:picked.append(phrase)
+                    if len(picked)==2:break
+                for phrase in picked:
+                    line='"'+phrase+'" ['+str(source['index'])+']'
+                    if sum(len(h)+1 for h in hints)+len(line)<680:hints.append(line)
+            context_block+='\n\n'+'\n'.join(hints)
 
         user_content = question
         if context_block:

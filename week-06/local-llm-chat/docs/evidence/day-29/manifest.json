@@ -1,0 +1,22 @@
+{
+  "video_path": "demo.mp4",
+  "size_bytes": 5199751,
+  "duration_s": 204.88,
+  "width": 1920,
+  "height": 1080,
+  "codec": "H264",
+  "coverage": [
+    "baseline profile",
+    "temperature max_tokens actual context",
+    "task prompt template",
+    "installed quantization and unavailable A/B",
+    "six before-after answers and independent factual quality",
+    "latency CPU RAM",
+    "missing evidence and truncation",
+    "selected optimized default",
+    "actual new RAG chat answer"
+  ],
+  "capture": "Actual browser frames during real UI actions; pauses between demonstration segments removed; Russian subtitles burned in. Full MP4 decoded without error.",
+  "sha256": "6f15dac38d48d5e5c27517e33a1a6be89ab0d589dd404fa8bb7f3431dcaf75e5",
+  "decode_check": "PASS: entire H264 file decoded, 4874 frames, 1920x1080"
+}

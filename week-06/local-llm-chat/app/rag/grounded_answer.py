@@ -7,8 +7,8 @@ import json
 from ..providers.base import ChatMessage
 from .citations import CitationVerifier
 
-def generate_grounded(provider, messages, fragments):
-    result=provider.chat(messages)
+def generate_grounded(provider, messages, fragments, options=None):
+    result=provider.chat(messages, options=options) if options else provider.chat(messages)
     if not fragments:
         return result
     verifier=CitationVerifier(fragments)
@@ -22,7 +22,8 @@ def generate_grounded(provider, messages, fragments):
             "or paraphrase WITHOUT quotation marks and cite the supporting fragment. Preserve supported facts; explicitly state missing evidence. "
             "Provide the corrected answer, not an explanation of these instructions. Validation errors: "+json.dumps(errors))
         previous=result
-        result=provider.chat([*messages,ChatMessage("assistant",previous.text),ChatMessage("user",correction)])
+        corrected_messages=[*messages,ChatMessage("assistant",previous.text),ChatMessage("user",correction)]
+        result=provider.chat(corrected_messages, options=options) if options else provider.chat(corrected_messages)
         checked=verifier.verify(result.text)
         attempts.append({"text":result.text,"model":result.model,"finish_reason":result.finish_reason,"latency_ms":result.latency_ms,"usage":result.usage.to_dict() if result.usage else None,"citation_check":checked.to_dict()})
         result.latency_ms=round(previous.latency_ms+result.latency_ms,3)

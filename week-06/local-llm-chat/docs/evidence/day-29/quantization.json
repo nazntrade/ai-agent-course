@@ -1,0 +1,21 @@
+{
+  "model_family": "Qwen3.6-35B-A3B",
+  "selected_file": "Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
+  "variants": [
+    {
+      "name": "Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
+      "size_bytes": 26592508896
+    }
+  ],
+  "decision": "unavailable",
+  "reason": "Weight quantization is a GGUF file property, not temperature or KV cache precision. Other model families are not a same-model quantization comparison.",
+  "inventory_status": "ONLY_ONE_COMPARABLE_QUANT_AVAILABLE",
+  "explanation": "Weight quantization is a GGUF file property, not temperature or KV cache precision. Other model families are not a same-model quantization comparison.",
+  "available_models": [
+    {
+      "file": "Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
+      "quant": "Q5_K_XL",
+      "size_mb": 26592.508896
+    }
+  ]
+}

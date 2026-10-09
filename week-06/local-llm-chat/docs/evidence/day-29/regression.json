@@ -1,0 +1,8 @@
+{
+  "chat": "pass",
+  "local_provider": "pass",
+  "network_provider": "pass",
+  "history": "pass",
+  "rag": "pass",
+  "scope": "59unit +35integration mock/loopback; owned-local LIVE12answers and actual browser chat. Remote LIVE not run."
+}

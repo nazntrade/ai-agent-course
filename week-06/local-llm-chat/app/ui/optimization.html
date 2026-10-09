@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>D29 · Local LLM Optimization</title><link rel="stylesheet" href="/assets/optimization.css"></head><body>
+<header><a href="/">← Chat & knowledge</a><span class="tag">DAY 29 / LOCAL INFERENCE</span><h1>Make the model fit the task.</h1><p>One survey. Six questions. The same model, measured before and after.</p></header>
+<main><section class="settings"><div class="section-title"><h2>Generation profile</h2><span id="runtime" class="tag">Model not loaded</span></div>
+<div class="presets"><button id="baseline">Baseline · before</button><button id="optimized">Candidate · after</button><span id="active">Default: baseline pending review</span></div>
+<div class="fields"><label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05"></label><label>Max output tokens<input id="max_tokens" type="number" min="16" max="4096"></label><label>Model context · tokens<input id="context_window" type="number" min="2048" max="65536" step="1024"></label><label>Evidence budget · characters<input id="max_context_chars" type="number" min="1000" max="48000"></label></div>
+<label class="prompt-label">Task prompt template<textarea id="prompt_template" rows="5"></textarea></label>
+<label class="hint-option"><input id="quote_hints" type="checkbox"> Offer literal short quote choices from the supplied evidence</label>
+<div class="actions"><button id="apply" class="primary">Apply & verify model context</button><span>Changing the token window restarts this application's own server.</span></div><p id="message" role="status"></p></section>
+<section class="quant"><h2>Weight quantization</h2><p id="quant"></p><div id="files"></div><p class="muted">GGUF weight precision and KV cache precision are different settings. Other model families are not a fair quantization comparison.</p></section>
+<section><div class="section-title"><div><h2>Live comparison</h2><p class="muted">4 factual questions · 2 missing-evidence probes · controlled truncation</p></div><button id="compare" class="primary">Run before / after</button></div><p id="progress">Idle</p><div id="metrics" class="metrics"></div><div id="review"></div><div id="answers"></div></section></main>
+<footer>Latency: complete answer incl. citation correction. CPU: owned process time. RAM: sampled working set, GPU memory excluded. Quality requires inspection of full answers against supplied evidence.</footer>
+<script src="/assets/optimization.js"></script></body></html>

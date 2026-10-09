@@ -156,6 +156,7 @@ class ChatService:
 
     def select_provider(self, name: str, *, dialogue_id: str | None = None) -> dict[str, Any]:
         """Serialize a provider switch; switching to network stops only own Gemma."""
+        self._check_optimization_busy()
         if self.external_profile_active:
             raise ProviderError(
                 "Model selection is controlled by the external profile. "
@@ -164,8 +165,13 @@ class ChatService:
             )
         if name not in (PROVIDER_LOCAL, PROVIDER_NETWORK):
             raise ProviderError("Unknown provider.", details={"provider": name})
+        # Signal cancellation before waiting for inference to finish; never stop
+        # the owned descriptor until the shared lifecycle section is available.
         with self._switch_lock:
+            self._check_optimization_busy()
             self._generation_epoch += 1
+        with self._generation_lock, self._switch_lock:
+            self._check_optimization_busy()
             if name == PROVIDER_NETWORK:
                 # Always stops only the process owned by this service (R4.4).
                 self.gemma.stop()
@@ -181,12 +187,14 @@ class ChatService:
         Resolves the model name to an actual file path in the configured GGUF
         directory and restarts the local process with the new model.
         """
+        self._check_optimization_busy()
         if self.external_profile_active:
             raise ProviderError(
                 "Model selection is controlled by the external profile.",
             )
         self._validate_profile()
         with self._generation_lock, self._switch_lock:
+            self._check_optimization_busy()
             self._generation_epoch += 1
             if model_id in (self.settings.deepseek_models or (self.settings.deepseek_model_id,)):
                 if self.settings.missing_network_config():
@@ -210,6 +218,12 @@ class ChatService:
             self.gemma.model_id = model_id
             # Also update the local provider's model_id.
             self.local_provider.model_id = model_id
+            lab = getattr(self, "optimization", None)
+            if lab:
+                lab.active = None
+                lab.last_runtime = None
+                self.gemma.context_tokens = self.settings.gemma_context_tokens
+                lab.restore_default()
             # Start the selected model only after the old owned process exited.
             self.dialogues.set_state(STATE_KEY_PROVIDER, PROVIDER_LOCAL)
             self.dialogues.set_state("selected_local_model", model_id)
@@ -285,18 +299,35 @@ class ChatService:
 
     def ensure_local_ready(self) -> dict[str, Any]:
         """Idempotent local start; declares ready only on confirmed availability."""
+        self._check_optimization_busy()
         self._validate_profile()
         if self.external_profile_active:
             raise ProviderError("External profile owns generation; local loading is blocked.")
-        with self._switch_lock:
+        with self._generation_lock, self._switch_lock:
+            self._check_optimization_busy()
             return self.gemma.ensure_started()
 
     def unload_local(self) -> dict[str, Any]:
-        with self._switch_lock:
+        self._check_optimization_busy()
+        with self._generation_lock, self._switch_lock:
+            self._check_optimization_busy()
             return self.gemma.unload()
 
     # -- generation -------------------------------------------------------
-    def ask(
+    def _check_optimization_busy(self):
+        lab = getattr(self, "optimization", None)
+        if lab and lab.busy:
+            from .errors import InvalidRequest
+            raise InvalidRequest("Optimization is busy; wait for the comparison/profile switch.")
+
+    def ask(self, *args, **kwargs):
+        # Profile changes and provider switches cannot cross prompt preparation/inference.
+        self._check_optimization_busy()
+        with self._generation_lock:
+            self._check_optimization_busy()
+            return self._ask(*args, **kwargs)
+
+    def _ask(
         self,
         dialogue_id: str,
         question: str,
@@ -339,16 +370,16 @@ class ChatService:
                 rewriter = self._query_rewriter or ChatQueryRewriter(rewriter_model)
                 rewrite = rewriter.rewrite(question)
             search_query = rewrite.search_query
-            if isinstance(self.rag, ExternalIndex):
-                self.rag.verify_runtime_embedding(self.embedder)
-            query_vector = self.embedder.embed_query(search_query)
-            fragments = self.rag.search(
-                query_vector, top_k=top_k or self.settings.rag_top_k, min_score=min_score
-            )
+            from .rag.retrieval import retrieve
+            fragments = retrieve(self.rag, self.embedder, search_query,
+                top_k=top_k or self.settings.rag_top_k, min_score=min_score)
 
         retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 3) if rag_enabled else 0.0
         history = self.dialogues.list_messages(dialogue_id)[:-1]  # exclude the just-added user turn
-        messages, trace = self.context.build(
+        lab = getattr(self, "optimization", None)
+        profile = lab.active if lab and name == PROVIDER_LOCAL else None
+        builder = ContextBuilder(max_context_chars=profile.max_context_chars, prompt_template=profile.prompt_template, quote_hints=profile.quote_hints) if profile else self.context
+        messages, trace = builder.build(
             question=question,
             history=history,
             fragments=fragments if rag_enabled else [],
@@ -371,7 +402,10 @@ class ChatService:
                     self.gemma.ensure_started()
                     self.gemma.set_generating(True)
                 try:
-                    result = generate_grounded(answer_provider, messages, fragments) if rag_enabled else answer_provider.chat(messages)
+                    options = profile.options() if profile else None
+                    result = generate_grounded(answer_provider, messages, fragments, options=options) if rag_enabled else (answer_provider.chat(messages, options=options) if options else answer_provider.chat(messages))
+                    if profile:
+                        result.parameters.update({"profile": profile.name, "context_window": self.gemma.context_tokens, "prompt_template": profile.prompt_template})
                 except ProviderNotConfigured:
                     self._record_error(dialogue_id, name, "provider_not_configured")
                     raise
