@@ -1,0 +1,11 @@
+.runtime/
+.venv/
+__pycache__/
+.pytest_cache/
+android/.gradle/
+android/*/build/
+android/local.properties
+*.local.json
+.env
+.env.*
+!.env.example

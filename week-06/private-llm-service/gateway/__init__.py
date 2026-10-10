@@ -1,0 +1,1 @@
+"""Private text chat gateway."""

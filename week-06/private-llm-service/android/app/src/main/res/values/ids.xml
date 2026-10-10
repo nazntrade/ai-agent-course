@@ -1,0 +1,11 @@
+<resources>
+    <item name="new_conversation" type="id"/><item name="refresh" type="id"/><item name="settings" type="id"/>
+    <item name="empty" type="id"/><item name="conversation_items" type="id"/><item name="back" type="id"/>
+    <item name="chat_title" type="id"/><item name="rename" type="id"/><item name="delete" type="id"/>
+    <item name="message_scroll" type="id"/><item name="message_items" type="id"/><item name="job_status" type="id"/>
+    <item name="stop" type="id"/><item name="retry" type="id"/><item name="dismiss" type="id"/>
+    <item name="message_input" type="id"/><item name="send" type="id"/><item name="server_input" type="id"/>
+    <item name="token_input" type="id"/><item name="save_settings" type="id"/><item name="connection_status" type="id"/>
+    <item name="device_id" type="id"/><item name="settings_done" type="id"/><item name="disconnect" type="id"/>
+    <item name="dialog_title" type="id"/>
+</resources>

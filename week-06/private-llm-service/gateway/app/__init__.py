@@ -1,0 +1,1 @@
+"""Single-process gateway components."""
