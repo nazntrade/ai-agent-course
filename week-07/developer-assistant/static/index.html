@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Developer Assistant</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<header><div><span class="eyebrow">WEEK 7 · DEVELOPER WORKSPACE</span><h1>Developer Assistant</h1></div><span id="connection">Connecting…</span></header>
+<main>
+<aside>
+<section><h2>Project</h2><label for="project">Selected project</label><select id="project"></select><details><summary>Add another project</summary><label for="root">Project folder</label><input id="root" placeholder="Absolute project folder"><button id="add-project">Add project</button></details><button id="index">Index README + docs</button><p id="index-state">No index loaded</p><details><summary>Import documentation</summary><input id="upload" type="file" accept=".md,.txt,.json,.yaml,.yml"><p class="muted">Copies into docs/imported. Reindex afterwards.</p></details><button id="branch">Read MCP branch</button><pre id="branch-result"></pre></section>
+<section><h2>System Tools</h2><label for="tool">Capability</label><select id="tool"><option value="project_tree">Project tree</option><option value="read_project_file">Read file</option><option value="search_project_text">Search text</option><option value="run_project_tests">Trusted tests</option></select><label for="tool-input">File / search / suite</label><input id="tool-input" placeholder="README.md / phrase / smoke"><button id="tool-run">Run tool</button><pre id="tool-result"></pre></section>
+<section><h2>Scheduled tasks</h2><label for="schedule-time">Run at local time</label><input id="schedule-time" type="datetime-local"><label for="schedule-interval">Repeat after completion in minutes</label><input id="schedule-interval" type="number" min="0" max="10080" value="0"><p class="muted">0 means once. Uses the selected model and question. App must remain open.</p><label><input id="schedule-telegram" type="checkbox"> Send completed report to my Telegram</label><button id="schedule-create">Schedule question</button><div id="schedules"></div></section>
+<section><h2>History</h2><div id="history"></div></section>
+</aside>
+<article>
+<section class="compose"><h2>Ask about your project</h2><p>Documentation gives knowledge. MCP gives live project context. Tools perform bounded actions.</p><div class="row"><div><label for="provider">Model</label><select id="provider"><option value="local">Local</option><option value="deepseek">DeepSeek</option></select></div><div class="profile" id="profile"></div></div><label for="question">Question or task</label><textarea id="question" rows="3" placeholder="/help Explain the project structure and how RAG and MCP work together."></textarea><details><summary>Advanced</summary><label><input id="allow-tools" type="checkbox"> Allow model System Tools</label><p class="muted">Ordinary /help uses RAG and live MCP directly. Enable tools only when the task needs extra inspection.</p></details><div class="actions"><button id="ask" class="primary">Run /help</button><button id="web">Search web with Tavily MCP</button><button id="stop" disabled>Stop</button></div><p id="notice" role="status"></p></section>
+<section><div class="row"><h2>Task & plan</h2><span id="status" class="badge">Ready</span></div><p id="task-question" class="muted"></p><ol id="plan"></ol></section>
+<section><div class="row"><h2>Result</h2><div class="actions"><button id="retry" disabled>Retry as new run</button><button id="telegram" disabled>Send report to me</button></div></div><p id="result-meta" class="muted"></p><div id="answer" class="answer">Index your project, then ask a question with /help.</div></section>
+<section><h2>Sources</h2><p class="muted">References are evidence to inspect. Their presence alone does not prove correctness.</p><div id="sources"></div></section>
+<section><h2>Execution log</h2><div id="events"></div></section>
+</article>
+</main><footer>Independent learning prototype · One selected provider · Bounded tools · No hidden fallback</footer>
+<script src="/static/app.js"></script></body></html>

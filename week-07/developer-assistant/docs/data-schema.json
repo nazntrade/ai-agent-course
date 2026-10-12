@@ -1,0 +1,69 @@
+{
+  "title": "Developer Assistant persisted records",
+  "storage": "SQLite with WAL and FTS5",
+  "task": {
+    "id": "unique run identifier; retry gets a new id",
+    "project_id": "owner-selected project identifier",
+    "question": "original normalized question without /help prefix",
+    "provider": [
+      "local",
+      "deepseek"
+    ],
+    "status": [
+      "queued",
+      "running",
+      "completed",
+      "failed",
+      "cancelled"
+    ],
+    "quality": "NOT_ASSESSED until an independent content review",
+    "sources": "relative path, start/end lines, source hash, chunk id, label, excerpt",
+    "plan": "steps with id, depends_on, check and execution status"
+  },
+  "document": {
+    "key": [
+      "project_id",
+      "relative_path"
+    ],
+    "version": "SHA-256 of decoded UTF-8 text"
+  },
+  "chunk": {
+    "id": "stable for an unchanged source",
+    "metadata": [
+      "path",
+      "hash",
+      "start",
+      "end",
+      "heading"
+    ]
+  },
+  "delivery": {
+    "key": "task_id",
+    "states": [
+      "sending",
+      "sent",
+      "failed",
+      "uncertain"
+    ]
+  },
+  "schedules": {
+    "fields": [
+      "id",
+      "project_id",
+      "question",
+      "provider",
+      "mode",
+      "due",
+      "interval_minutes",
+      "telegram",
+      "enabled",
+      "inflight",
+      "last_task_id",
+      "last_status",
+      "delivery",
+      "error"
+    ],
+    "next_run": "After previous completion; no overlapping or catch-up burst",
+    "restart": "Interrupted trigger is paused for owner review"
+  }
+}

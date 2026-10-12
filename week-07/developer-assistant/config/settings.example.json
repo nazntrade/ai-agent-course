@@ -1,0 +1,11 @@
+{
+  "local_url": "http://localhost:8792/v1",
+  "local_model": "local-model",
+  "remote_url": "https://api.deepseek.com/v1",
+  "remote_model": "deepseek-flash",
+  "temperature": 0.6,
+  "max_tokens": 8192,
+  "context_chars": 18000,
+  "thinking": true,
+  "runtime": {}
+}
