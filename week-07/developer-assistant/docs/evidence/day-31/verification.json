@@ -1,6 +1,6 @@
 {
   "task": "D31",
-  "status": "BEHAVIOR_AND_ARTIFACTS_VERIFIED_PUBLICATION_GATE_SEPARATE",
+  "status": "INDEPENDENT_ACCEPTANCE_PASS",
   "offline": {
     "entrypoint": "test.bat",
     "tests": 31,
@@ -43,7 +43,9 @@
     "video": {
       "filename": "D31_Демонстрация.mp4",
       "format": "MP4 H264 1920x1080 30 fps",
-      "source": "Real application screen capture; long waits explicitly shortened"
+      "source": "Real application screen capture; long waits explicitly shortened",
+      "sha256": "049a85cd1305aaccadb64fa5c8c6252d313378fb5693e43f17c0e81c428e3e5d",
+      "duration_s": 180.73
     }
   },
   "review_roles": [
@@ -51,5 +53,26 @@
     "Independent post implementation Architect",
     "Independent product Tester"
   ],
-  "publication": "Verify commit push against remote branch; no private runtime or keys published"
+  "publication": "Reviewed implementation commit is published and matches remote main; this final record adds documentation only.",
+  "criteria": {
+    "D01": "PASS",
+    "D02": "PASS",
+    "D03": "PASS",
+    "D04": "PASS",
+    "D05": "PASS",
+    "D06": "PASS",
+    "U01": "PASS",
+    "U02": "PASS",
+    "U03": "PASS",
+    "U04": "PASS",
+    "U05": "PASS",
+    "U06": "PASS",
+    "U07": "PASS",
+    "U08": "PASS",
+    "U09": "PASS",
+    "U10": "PASS",
+    "scheduled_tasks": "PASS"
+  },
+  "reviewed_code_commit": "ad1f85ddc0a2618ffb0adb449de490af9543b167",
+  "reviewed_remote_main_matches": true
 }
