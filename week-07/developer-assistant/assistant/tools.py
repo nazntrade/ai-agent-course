@@ -168,7 +168,11 @@ async def deliver_saved_report(settings,store,tid):
         if old:
             return {'status':old['status'],'message_id':old['message_id'],'duplicate_prevented':True}
         c.execute('INSERT INTO deliveries VALUES (?,?,?)',(tid,'sending',None))
-    text=settings.scrub('D31 Developer Assistant report\nProvider: '+task['provider']+'\nQuestion: '+task['question']+'\n\n'+task['answer'])[:3900]
+    if task.get('mode')=='review':
+        r=task['review'];count=sum(len(u.get('result',{}).get('findings',[])) for u in r['units'])
+        text=settings.scrub(f"D32 AI review · PR #{r['number']}\nProvider: {r['provider']}\nExecution: {r['status']} · Findings: {count}\nQuality: NOT_ASSESSED\nHead: {r['head_sha'][:12]}\n{r['url']}")
+    else:
+        text=settings.scrub('D31 Developer Assistant report\nProvider: '+task['provider']+'\nQuestion: '+task['question']+'\n\n'+task['answer'])[:3900]
     try:
         async with httpx.AsyncClient(timeout=25) as c:
             r=await c.post('https://api.telegram.org/bot'+settings.telegram_token+'/sendMessage',json={'chat_id':settings.telegram_chat,'text':text,'disable_web_page_preview':True})

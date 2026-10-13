@@ -44,6 +44,15 @@ class ScheduleBody(TaskBody):
     telegram: bool=False
 class ScheduleToggle(Body):
     enabled: bool
+class ReviewConnect(Body):
+    repository: str=Field(min_length=3,max_length=200)
+    scope: str=Field(default='week-07/developer-assistant',max_length=250)
+class ReviewBody(Body):
+    number: int=Field(ge=1,le=10000000)
+    provider: Literal['local','deepseek']='local'
+    chat_id: str | None=None
+    telegram: bool=False
+    repository: str | None=Field(default=None,max_length=200)
 
 def create_app(settings=None):
     s=settings or Settings.load()
@@ -51,6 +60,8 @@ def create_app(settings=None):
     default=store.project(MODULE,'Developer Assistant')
     runtime=LocalRuntime(s);service=Service(store,s,Provider(s,runtime))
     scheduler=Scheduler(store,service)
+    from .review_service import Reviews
+    reviews=Reviews(service)
     @asynccontextmanager
     async def lifespan(app):
         scheduler.start()
@@ -79,6 +90,22 @@ def create_app(settings=None):
     def idle():
         if service.busy():
             raise HTTPException(409,'Wait for active task or Stop before changing project documents')
+    @app.get('/api/projects/{pid}/reviews/connection')
+    def review_connection(pid:str):return reviews.connection(pid)
+    @app.post('/api/projects/{pid}/reviews/connect')
+    async def review_connect(pid:str,b:ReviewConnect):
+        idle();return await reviews.connect(pid,b.repository,b.scope)
+    @app.post('/api/projects/{pid}/reviews/authenticate')
+    async def review_authenticate(pid:str):
+        idle();return await reviews.authenticate(pid)
+    @app.get('/api/projects/{pid}/reviews/pulls')
+    async def review_pulls(pid:str):return await reviews.list(pid)
+    @app.post('/api/projects/{pid}/reviews')
+    async def review_create(pid:str,b:ReviewBody):
+        if b.repository is not None and b.repository!=reviews.connection(pid)['repository']:raise ValueError('Review repository changed')
+        return reviews.create(pid,b.number,b.provider,b.chat_id,b.telegram)
+    @app.post('/api/projects/{pid}/reviews/sync')
+    async def review_sync(pid:str,b:ReviewBody):return await reviews.sync(pid,b.number,b.chat_id,b.telegram,b.repository)
     @app.get('/api/projects/{pid}/schedules')
     def schedules(pid:str):
         store.get_project(pid);return {'schedules':scheduler.list(pid)}
@@ -167,9 +194,17 @@ def create_app(settings=None):
         old=store.task(tid)
         if old['status'] in {'queued','running'}:
             raise ValueError('Stop active task before retry')
+        if old['mode']=='review':
+            req=old.get('review_request')
+            if not req:raise ValueError('Imported CI report cannot be retried; select PR for a manual review')
+            return reviews.create(old['project_id'],req['number'],old['provider'],old.get('chat_id'),req.get('telegram',False))
         return service.create(old['project_id'],old['question'],old['provider'],old['mode'],old.get('allow_tools',False),old.get('chat_id'))
     @app.post('/api/tasks/{tid}/telegram')
     async def telegram(tid:str):
+        t=store.task(tid)
+        if t.get('mode')=='review':
+            if t.get('review',{}).get('origin')=='ci':return dict(t['review'].get('notification',{'status':'not_recorded'}),duplicate_prevented=True)
+            return await reviews.notify(t)
         return await service.report(tid)
     @app.get('/')
     def home():

@@ -1,0 +1,49 @@
+name: D32 automatic AI review
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'week-07/developer-assistant/**'
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: d32-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout trusted base engine only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install dependencies from trusted base
+        working-directory: week-07/developer-assistant
+        run: python -m pip install -r requirements.txt
+      - name: Review fixed PR snapshots
+        working-directory: week-07/developer-assistant
+        env:
+          ASSISTANT_SKIP_ENV: '1'
+          ASSISTANT_DATA: /tmp/d32-review-state
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          D32_DEEPSEEK_MODEL: ${{ vars.D32_DEEPSEEK_MODEL || 'deepseek-flash' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m assistant.review_cli --event "$GITHUB_EVENT_PATH" --provider deepseek --publish --telegram --output local-data/review-output
+      - name: Preserve honest review output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: d32-review
+          path: week-07/developer-assistant/local-data/review-output/
+          if-no-files-found: warn
+          retention-days: 14

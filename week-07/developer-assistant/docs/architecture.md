@@ -80,3 +80,40 @@ The sidebar selects project-scoped saved chats. The main thread presents each ru
 Chats and task_chats are additive SQLite metadata. Legacy runs are linked idempotently without rewriting their original payloads or delivery IDs. Delete archives an inactive chat; restore is available in History. Atomic BEGIN IMMEDIATE validation prevents a chat archive racing a task start or enabled schedule save. Active/queued work and enabled/inflight schedules must be explicitly stopped or paused first. Retry stays in its original chat. A paused schedule cannot re-enable while that chat is archived. Each model call still uses its current question and bounded project evidence, not an implicit full-history context.
 
 Polling ignores stale project/chat requests and older snapshots cannot revive a terminal run. Expanded sources and reading position remain intact. Loaded active runs outside the latest page are refreshed in bounded rotating batches. The mobile sidebar traps focus and restores it on close; Workspace uses a native modal dialog with tabbed sections.
+
+## PR review architecture (D32)
+
+`github_review.GitHub` is a fixed HTTPS GitHub REST adapter. It reads PR metadata,
+paginates files and fetches exact base/head source content. Regular blob modes are
+checked in both snapshot trees before content access; symlinks, submodules, secret
+paths, binary and unsupported files do not become context. Hunk addition/deletion
+counts must match PR file metadata. Repository/scope/SHA form an immutable cache key;
+metadata is fetched afresh to detect a new head. The cache keeps at most eight entries.
+
+`ReviewCorpus` builds an independent in-memory SQLite FTS5 index from documentation
+and related source code snapshots. It never changes the persisted D31 docs index.
+Chunks carry SHA, source kind, decoded-content hash and line coordinates. Each unit
+retrieves up to eight bounded snippets. The engine sends only its fixed diff and these
+snippets to the explicitly selected Provider. No full chat history or golden expected
+answers enter that prompt. Syntax-valid output still needs independent semantic review.
+
+`Reviews` creates ordinary project/chat-linked task records with mode=review. It uses
+Service.jobs and Service.lock, so /help, scheduled jobs and model reviews serialize.
+Cancellation cancels the active coroutine and checks persisted terminal state before
+saving a late answer. Restart leaves interrupted runs failed. Notification delivery is
+a separate outcome; analysis survives notification errors. Review imports use a stable
+repository/PR/head/origin key, retain old heads and refresh stale status without duplicate
+chat turns or model calls. Telegram imports do not resend CI's own delivery.
+
+`review_cli` runs the same engine from the trusted base workflow. PR title/path/event
+data never supplies executable code, dependencies or shell arguments. Same-repository
+PRs can publish one bot-owned head-labelled comment, Markdown job summary and JSON/MD
+artifact. Forks are skipped. Concurrency cancels the previous run, and a current-head
+check additionally prevents stale publication. CI notification intent/result persists
+in the marked comment; reruns preserve sent/failed/uncertain delivery state.
+
+Publication, notification, technical execution and semantic quality are distinct. A
+failed GitHub publication keeps the validated model report in the artifact and fails
+the pipeline, rather than claiming it was posted. Coverage omissions produce PARTIAL.
+Local and DeepSeek manual runs use the same engine; Local stays on the owner computer,
+while DeepSeek receives the selected source excerpts at its official API origin.

@@ -78,6 +78,18 @@
     ],
     "archive": "Recoverable hide; immutable runs and reports retained"
   },
+  "review": {
+    "schema": 1,
+    "identity": ["repository", "PR number", "base_sha", "head_sha", "project scope"],
+    "status": ["completed", "partial", "failed", "cancelled"],
+    "quality": "NOT_ASSESSED; execution never implies independent semantic acceptance",
+    "units": "Selected changed-file patch, changed HEAD lines, source snapshots and validated structured findings",
+    "sources": "Separate FTS5 docs/code corpus; repo, exact SHA, kind, path, hash, start/end lines, chunk ID and label",
+    "limitations": "Missing/oversized/binary/truncated/omitted diff and incomplete context remain visible",
+    "publication": "Separate GitHub comment outcome; stale head cannot publish as current",
+    "notification": "Separate fixed-owner delivery status/message ID; uncertainty never automatically retries",
+    "review_imports": "Stable repository/PR/head/origin to saved task ID; no duplicate CI chat turns"
+  },
   "task_chats": {
     "fields": [
       "task_id",

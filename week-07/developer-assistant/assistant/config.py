@@ -19,6 +19,7 @@ class Settings:
     tavily_key: str = field(default='', repr=False)
     telegram_token: str = field(default='', repr=False)
     telegram_chat: str = field(default='', repr=False)
+    github_key: str = field(default='', repr=False)
     runtime: dict = field(default_factory=dict, repr=False)
     temperature: float = 0.6
     max_tokens: int = 8192
@@ -39,6 +40,7 @@ class Settings:
         s.tavily_key = os.getenv('TAVILY_API_KEY','')
         s.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN','')
         s.telegram_chat = os.getenv('TELEGRAM_CHAT_ID','')
+        s.github_key = os.getenv('GITHUB_TOKEN','')
         s.validate()
         return s
 
@@ -56,7 +58,7 @@ class Settings:
 
     def scrub(self, text):
         text = str(text)
-        for value in (self.local_key,self.remote_key,self.tavily_key,self.telegram_token,self.telegram_chat):
+        for value in (self.local_key,self.remote_key,self.tavily_key,self.telegram_token,self.telegram_chat,self.github_key):
             if value:
                 text = text.replace(value, '[redacted]')
         return text
@@ -66,5 +68,6 @@ class Settings:
                 'local_key_configured':bool(self.local_key), 'deepseek_configured':bool(self.remote_key),
                 'tavily_configured':bool(self.tavily_key),
                 'telegram_configured':bool(self.telegram_token and self.telegram_chat),
+                'github_authenticated':bool(self.github_key),
                 'temperature':self.temperature,'max_tokens':self.max_tokens,
                 'context_chars':self.context_chars,'thinking':self.thinking}

@@ -52,3 +52,41 @@ POST /api/schedules accepts project_id, question, provider, mode, due (timezone 
 GET /api/projects/{project_id}/chats lists active chats; include_archived=true includes recoverable deleted chats. POST to the same path creates a chat with title (1 to 80 trimmed characters). GET /api/chats/{chat_id} reads metadata. POST /api/chats/{chat_id}/rename accepts title; /archive hides an inactive conversation; /restore makes it active again. Active or scheduled chats cannot be archived silently.
 
 GET /api/chats/{chat_id}/tasks returns chronological latest tasks, next_before cursor, and run_order; optional before and limit (1 to 200) retrieve earlier pages. Existing project-wide history remains available, including archived run evidence. Task and schedule creation optionally accept chat_id; unknown, archived and other-project chat targets are rejected before execution. Legacy callers without chat_id resolve an active default conversation. Retry and scheduled results remain linked to the original chat. No chat operation invokes a model or sends a report.
+
+## PR review routes (D32)
+
+GET `/api/projects/{pid}/reviews/connection` returns repository and project scope.
+POST `/api/projects/{pid}/reviews/connect` accepts `{repository, scope}`; repository is
+`owner/name`, scope is a relative directory in it. It verifies public repository access
+and persists project metadata, without model calls. GET `/reviews/pulls` under the same
+project returns at most 30 open PRs. Refresh is explicit, with no background model calls.
+An opt-in browser watcher reuses pulls and sync: at most five PRs per 60-second cycle,
+no overlapping cycles and no model calls. It captures project/chat/repository and pauses
+on context change/error. The browser page must stay open; server schedules are separate.
+
+POST `/api/projects/{pid}/reviews/authenticate` is an explicit owner action without
+credential arguments. It requires the connected repository to match the selected
+project's trusted Git origin, uses fixed noninteractive Git credential lookup and
+returns only authenticated/repository/scope metadata. The in-memory client is bound
+to that repository. Credentials never become UI responses, model context or SQLite.
+
+POST `/api/projects/{pid}/reviews` accepts number, provider=local|deepseek, optional
+chat_id, telegram=false. It returns a queued ordinary task. GET `/api/tasks/{id}` reads
+its status/report; POST `/api/tasks/{id}/stop` cancels it; retry uses a new run ID. Imported
+CI tasks cannot silently re-run a model; choose the PR for a manual review instead.
+
+POST `/api/projects/{pid}/reviews/sync` accepts number and optional chat_id. It reads
+only the GitHub Actions bot's marked comment and validates its bounded JSON envelope,
+repository, PR, project scope, revision, sources and finding coordinates. Same-head
+imports are idempotent; old-head results are stale history. It does not invoke a model,
+extract an arbitrary archive or repeat a CI Telegram notification.
+
+POST `/api/tasks/{id}/telegram` for a manual saved review sends the short fixed-owner
+report through the existing Telegram MCP with repository/PR/head dedup. For imported
+CI results it returns the recorded CI delivery status without resending. Telegram error
+or uncertainty never changes a saved analysis to a fake successful notification.
+
+Review result status completed|partial is separate from task execution completed.
+Review semantic quality is NOT_ASSESSED. Provider failures and invalid output fail the
+task; missing coverage/context remains partial. Findings use only supplied source labels
+and changed HEAD lines. The reviewed code is never executed by these routes.

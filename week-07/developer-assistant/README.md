@@ -123,3 +123,87 @@ MP4 передаются отдельно; веса моделей, ключи, 
 и Telegram delivery ID сохраняются. Новые чаты имеют собственные имена и связи с проектом.
 Неактивное удаление — обратимый архив, а не физическое уничтожение доказательств.
 Расписание привязано к чату: после архивирования его нельзя снова включить до восстановления.
+
+## Day 32: automatic pull request review
+
+D32 extends this same application. A GitHub pull request proposes changes from a
+separate branch; the reviewer never merges or modifies that branch. The pipeline is
+`PR event → fixed base/head diff → documentation + related code retrieval → selected
+model → validated JSON/Markdown → GitHub comment, artifact and optional Telegram`.
+
+Open **PR review** in the chat header or Workspace. Connect `owner/repository` and
+the project directory inside it (this module defaults to `week-07/developer-assistant`).
+Refresh lists open PRs. **Review with selected model** uses the composer Local or
+DeepSeek choice and saves a turn into the current chat. **Sync GitHub report** imports
+the CI result without invoking a model. Diff, coverage, source versions and data flow
+expand below the report. Stop cancels the same single worker used by ordinary /help.
+Source excerpts include repository, exact SHA, relative path, lines and content hash.
+The optional **Watch GitHub reports for this chat** checkbox checks at most five open
+PRs every 60 seconds while this browser page remains open. It only imports existing CI
+reports, never invokes a model, does not overlap polling cycles, and pauses on a changed
+project/chat/repository or an error. Imports target the captured chat, not a newly selected
+one. Duplicate heads remain deduplicated. It is not a server-side scheduled model run.
+
+The automatic workflow is `.github/workflows/day32-review.yml`. It triggers on
+`pull_request_target` opened/synchronize/reopened and only same-repository PRs whose
+changes include this module. It checks out the exact trusted **base** commit, installs
+base dependencies and reads head files only via REST. It does not execute/import PR
+code, install head dependencies, accept shell commands from PR fields or run on a home
+computer. Fork PRs skip the secret-dependent job. Actions are pinned to reviewed SHAs.
+
+Repository Actions **secrets** required for CI: `DEEPSEEK_API_KEY`. Optional owner
+notifications: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. Configure these through
+GitHub settings, never commit their values. `GITHUB_TOKEN` is provided by Actions with
+contents read and pull-requests write. Optional Actions variable `D32_DEEPSEEK_MODEL`
+selects the model; default `deepseek-flash`. Manual reviews preserve the application’s
+existing Local/DeepSeek parameters and never switch providers silently. Cloud runners
+cannot reach a model at this PC’s loopback address; Local review therefore runs here.
+
+Public repository reads work without authentication but GitHub limits request rates.
+The optional **Use existing Git login** owner action verifies that the repository
+matches the selected project's Git origin, uses the normal noninteractive OS Git
+credential helper, and keeps authentication in memory scoped to that repository.
+It never returns or stores the credential, exports keys, or asks the model to authenticate.
+Alternatively an owner can configure `GITHUB_TOKEN` for the application environment.
+
+The trusted workflow invokes `python -m assistant.review_cli --event "$GITHUB_EVENT_PATH"
+--provider deepseek --publish --telegram --output local-data/review-output`. Event fields
+are read and validated as JSON; they are not inserted into shell commands. The same CLI
+supports `--repo owner/repository --pr 1 --scope project/directory` for an authorized
+manual setup. The Actions job summary and `d32-review` artifact retain review.md/json;
+one owned marked PR comment is updated for a new head. A superseded head cannot publish
+as current, and imports label older results STALE. A validated saved review can trigger
+a short fixed-owner Telegram message. Persisted intent prevents blind duplicate sends;
+uncertain delivery remains uncertain, and notification failure does not erase analysis.
+
+The reviewer retrieves a **separate FTS5 corpus** of fixed documentation and code
+snapshots. The D31 README/docs index remains unchanged. Small per-file review units
+carry relevant docs, siblings/callers and changed code; only selected excerpts go to the
+model. It processes at most 12 selected files, 12 documents, 20 related code paths,
+8 retrieved chunks per unit, and a 12000-character patch per file. Missing/binary/
+oversized/truncated patches, unsupported/deleted-only cases, omitted selected files and
+missing context are explicit PARTIAL limitations. No provider calls are made for a unit
+without both documentation and code context. Context discovery is bounded; full semantic
+understanding of the repository is not promised. Transient provider failures retry at
+most three times; schema/permission failures are not looped.
+
+Findings carry category, severity, changed HEAD path/line, explanation, impact,
+recommendation and supplied evidence IDs. Malformed JSON, fake source IDs and invalid
+line coordinates fail validation. A completed execution is **not** a semantic PASS:
+quality stays `NOT_ASSESSED` until independent assessment. Empty categories mean no
+substantiated finding, not guaranteed bug-free code. Reviewer tools cannot execute PR
+scripts or obey instructions embedded inside code comments/documents.
+The report separates execution_status, coverage_status, collection_limitations and
+model_limitations. For example, all files can be technically processed while the model
+states that tests were not run: coverage can be complete, the semantic limitation stays
+visible, and quality does not become PASS. Overall review status remains partial when
+limitations are present; that label does not silently erase completed file processing.
+
+`examples/review_demo` is an isolated benign quotation fixture with its contract in
+`docs/review-demo.md`. A demonstration PR may introduce a wrong discount formula or
+rename `total` while its caller still expects it. The working app does not import this
+fixture, and faulty demo code must not merge. Correct changes provide false-positive
+controls. `tests/test_review.py` verifies scope, snapshots, pagination, retrieval, output
+validation, Stop/restart, shared-worker serialization and notification/import dedup.
+Offline fixtures do not prove LIVE model accuracy or an actual Actions run; those require
+separate evidence. D31 historical evidence remains in `docs/evidence/day-31`.
