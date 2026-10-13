@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 import os
+import hashlib
 from pathlib import Path
 import httpx
 from .config import Settings
@@ -11,10 +12,17 @@ from .provider import Provider
 from .github_review import GitHub,repository,DEFAULT_SCOPE
 from .review import run_review,markdown
 
-def append_summary(settings,text):
+def append_summary(settings,text,output):
     summary=os.getenv('GITHUB_STEP_SUMMARY')
-    if summary:
-        with open(summary,'a',encoding='utf-8') as f:f.write(settings.scrub(text)+'\n')
+    if not summary:return None
+    # GitHub supplies the step-owned file. Read only this exact file after our write,
+    # never an arbitrary repository path or credential file.
+    with open(summary,'a',encoding='utf-8') as f:f.write(settings.scrub(text)+'\n')
+    content=Path(summary).read_bytes()
+    (output/'job-summary.md').write_bytes(content)
+    receipt={'file':'job-summary.md','bytes':len(content),'sha256':hashlib.sha256(content).hexdigest()}
+    (output/'summary-receipt.json').write_text(json.dumps(receipt,indent=2),encoding='utf-8')
+    return receipt
 
 def publication_state(report,result):
     report['publication']=result
@@ -54,19 +62,19 @@ async def execute(args):
                 if not report['stale']:publication_state(report,await github.publish(report,markdown(report)))
             except ValueError as e:report['notification']={'status':'failed_or_uncertain','error':settings.scrub(str(e))}
         text=markdown(report)
+        report['summary_receipt']=append_summary(settings,text,folder)
         (folder/'review.json').write_text(settings.scrub(json.dumps(report,ensure_ascii=False,indent=2)),encoding='utf-8')
         (folder/'review.md').write_text(settings.scrub(text),encoding='utf-8')
-        append_summary(settings,text)
         print(json.dumps({'status':report['status'],'quality':report['quality'],'head_sha':report['head_sha'],'file_count':len(report['units']),
-                          'publication':report.get('publication'),'notification':report.get('notification')},ensure_ascii=False))
+                          'publication':report.get('publication'),'notification':report.get('notification'),'summary_receipt':report['summary_receipt']},ensure_ascii=False))
         return 1 if report.get('publication',{}).get('status')=='failed' else 0
     except Exception as e:
         message=settings.scrub(str(e)) if isinstance(e,ValueError) else 'Review pipeline failed; no successful review recorded'
         failure={'status':'failed','quality':'NOT_ASSESSED','error':message,'repo':repo,'number':number,'head_sha':expected_head,'base_sha':expected_base}
-        (folder/'review.json').write_text(json.dumps(failure,indent=2),encoding='utf-8')
         failure_text='# AI review failed\n\n'+message+'\n\nNo clean review was recorded.'
         (folder/'review.md').write_text(failure_text,encoding='utf-8')
-        append_summary(settings,failure_text)
+        failure['summary_receipt']=append_summary(settings,failure_text,folder)
+        (folder/'review.json').write_text(json.dumps(failure,indent=2),encoding='utf-8')
         print(json.dumps(failure));return 1
     finally:await runtime.close()
 
