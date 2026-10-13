@@ -9,3 +9,6 @@ android/local.properties
 .env
 .env.*
 !.env.example
+
+# Raw verification protocols remain local; publish the reviewed summary README.
+docs/artifacts/*.json
