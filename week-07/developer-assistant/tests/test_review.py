@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import shutil
+import subprocess
 from unittest.mock import AsyncMock,patch
 import httpx
 from assistant.config import Settings
@@ -125,6 +127,39 @@ class GitHubBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report['notification']['message_id'],42);self.assertEqual(c.request.await_args.args[0],'PATCH')
 
 class EvidenceBoundaries(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'),'Optional JavaScript runtime unavailable; real browser check remains required')
+    def test_actual_pr_loader_ignores_out_of_order_context_and_preserves_selection(self):
+        # Execute the shipped loader with deterministic deferred network replies,
+        # not a second Python implementation of its generation guard.
+        js=(Path(__file__).resolve().parents[1]/'static/review.js').read_text(encoding='utf-8')
+        loader=js[js.index('let reviewLoadGeneration='):js.index('// Polling open GitHub reports')]
+        program=r'''
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const requests=[],fields={'review-repo':{value:''},'review-scope':{value:''}};
+const prs={options:[],value:'1',replaceChildren(...items){this.options=items;this.value='';}};
+const ctx=vm.createContext({projectId:'p',chatId:'c',epoch:1,state:{textContent:''},prs,num:{value:'1'},
+ el:id=>fields[id],node:(tag,text)=>({tag,text,value:''}),api:path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}))});
+vm.runInContext(LOADER,ctx);
+const conn={repository:'owner/repo',scope:'project'},listing={connection:conn,pulls:[{number:1,title:'Demo'}]};
+const tick=()=>new Promise(setImmediate);
+(async()=>{
+ vm.runInContext("reviewLoadedRepository='owner/repo';globalThis.first=loadReviews()",ctx);
+ requests[0].resolve(conn);await tick();
+ vm.runInContext('globalThis.second=loadReviews()',ctx);requests[2].resolve(conn);await tick();
+ requests[3].resolve(listing);await ctx.second;
+ assert.equal(prs.options.length,2);assert.equal(prs.value,'1');
+ requests[1].resolve(listing);await ctx.first;assert.equal(prs.options.length,2);
+ vm.runInContext('globalThis.third=loadReviews()',ctx);requests[4].resolve(conn);await tick();
+ ctx.projectId='other';ctx.chatId='other-chat';ctx.epoch=2;
+ requests[5].resolve({connection:{repository:'old/repo',scope:'old'},pulls:[{number:99,title:'Stale'}]});await ctx.third;
+ assert.equal(fields['review-repo'].value,'owner/repo');assert.equal(prs.options.length,2);
+ vm.runInContext('globalThis.fourth=loadReviews()',ctx);ctx.epoch=3;requests[6].reject(Error('Obsolete failure'));await ctx.fourth;
+ console.log('JavaScript loader race/context/selection checks passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''.replace('LOADER',json.dumps(loader))
+        env={k:v for k,v in __import__('os').environ.items() if k.upper() in {'SYSTEMROOT','PATH','PATHEXT','TEMP','TMP'}}
+        result=subprocess.run([shutil.which('node'),'-'],input=program,capture_output=True,text=True,timeout=10,env=env)
+        self.assertEqual(result.returncode,0,result.stderr)
     def test_existing_git_login_requires_exact_origin_and_fixed_noninteractive_lookup(self):
         from types import SimpleNamespace
         with patch('assistant.github_review.subprocess.run',side_effect=[SimpleNamespace(returncode=0,stdout='https://github.com/owner/repo.git'),SimpleNamespace(returncode=0,stdout='password=fake-token\n')]) as run:

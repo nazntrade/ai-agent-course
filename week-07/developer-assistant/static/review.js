@@ -14,8 +14,8 @@ const label=node('label','Open pull requests');label.htmlFor='review-prs';const 
 const num=field('review-number','PR number','For example: 1','number');num.min='1';num.max='10000000';
 const check=node('label',undefined,'check-label'),tg=node('input');tg.type='checkbox';tg.id='review-telegram';check.append(tg,document.createTextNode(' Notify my configured Telegram after manual review'));reviewPanel.append(check);
 const state=node('p','','muted');state.id='review-state';reviewPanel.append(state);
-reviewPanel.append(button('Review with selected model',async()=>{const pid=projectId,v=epoch,cid=chatId;if(!cid||selectedChat?.archived)throw Error('Choose an active chat');await api(`/api/projects/${pid}/reviews`,{number:reviewNumber(),provider:el('provider').value,chat_id:cid,telegram:tg.checked});if(v!==epoch)return;el('workspace').close();await refreshThread(true);notice('PR review queued. Stop is available in its chat turn.');},'primary full'));
-reviewPanel.append(button('Sync GitHub report into this chat',async()=>{const pid=projectId,v=epoch;const d=await api(`/api/projects/${pid}/reviews/sync`,{number:reviewNumber(),chat_id:chatId,telegram:false});if(v!==epoch)return;notice(d.message);await refreshThread(true);if(d.imported.length)el('workspace').close();},'full'));
+reviewPanel.append(button('Review with selected model',async()=>{const pid=projectId,v=epoch,cid=chatId;if(!cid||selectedChat?.archived)throw Error('Choose an active chat');await api(`/api/projects/${pid}/reviews`,{number:reviewNumber(),repository:reviewLoadedRepository,provider:el('provider').value,chat_id:cid,telegram:tg.checked});if(v!==epoch)return;el('workspace').close();await refreshThread(true);if(v!==epoch)return;notice('PR review queued. Stop is available in its chat turn.');},'primary full'));
+reviewPanel.append(button('Sync GitHub report into this chat',async()=>{const pid=projectId,v=epoch;const d=await api(`/api/projects/${pid}/reviews/sync`,{number:reviewNumber(),repository:reviewLoadedRepository,chat_id:chatId,telegram:false});if(v!==epoch)return;notice(d.message);await refreshThread(true);if(v!==epoch)return;if(d.imported.length)el('workspace').close();},'full'));
 const watchLabel=node('label',undefined,'check-label'),watchInput=node('input');watchInput.type='checkbox';watchInput.id='review-watch';watchLabel.append(watchInput,document.createTextNode(' Watch GitHub reports for this chat'));reviewPanel.append(watchLabel);
 const watchState=node('p','Opt-in: every 60 seconds while this page is open, checks up to five open PRs. No model calls. Changing project/chat pauses the watcher.','muted');reviewPanel.append(watchState);
 let reviewWatch=null,reviewWatchTimer=null,reviewWatchBusy=false;
@@ -31,7 +31,24 @@ const flow=node('details');flow.append(node('summary','Where the data goes'),nod
 document.querySelector('.drawer-content').append(reviewPanel);
 document.querySelector('.header-actions').prepend(button('PR review',()=>{showWorkspace('review');return loadReviews();},'quiet'));
 function reviewNumber(){const n=Number(num.value);if(!Number.isInteger(n)||n<1||n>10000000)throw Error('Enter a valid PR number');return n;}
-async function loadReviews(){const pid=projectId,v=epoch;state.textContent='Reading GitHub…';const conn=await api(`/api/projects/${pid}/reviews/connection`);if(v!==epoch)return;el('review-repo').value=conn.repository;el('review-scope').value=conn.scope;prs.replaceChildren(node('option','Select an open PR'));prs.options[0].value='';if(!conn.repository){state.textContent='Connect your repository first.';return;}const d=await api(`/api/projects/${pid}/reviews/pulls`);if(v!==epoch)return;for(const pr of d.pulls){const o=node('option',`#${pr.number} · ${pr.title}`);o.value=pr.number;prs.append(o);}state.textContent=`${d.pulls.length} open PRs · ${conn.repository} · scope: ${conn.scope||'repository root'}. Refresh/Sync never invokes a model.`;}
+let reviewLoadGeneration=0,reviewLoadedRepository='';
+async function loadReviews(){
+  const pid=projectId,cid=chatId,v=epoch,generation=++reviewLoadGeneration;
+  const current=()=>generation===reviewLoadGeneration&&pid===projectId&&cid===chatId&&v===epoch;
+  state.textContent='Reading GitHub…';
+  try{
+    const conn=await api(`/api/projects/${pid}/reviews/connection`);if(!current())return;
+    const listing=conn.repository?await api(`/api/projects/${pid}/reviews/pulls`):{pulls:[],connection:conn};if(!current())return;
+    if(listing.connection.repository!==conn.repository||listing.connection.scope!==conn.scope){state.textContent='Repository changed while reading GitHub. Refresh again.';return;}
+    const chosen=reviewLoadedRepository===conn.repository?(prs.value||String(num.value||'')):'';
+    const placeholder=node('option','Select an open PR');placeholder.value='';const options=[placeholder];const seen=new Set();
+    for(const pr of listing.pulls){if(seen.has(pr.number))continue;seen.add(pr.number);const o=node('option',`#${pr.number} · ${pr.title}`);o.value=String(pr.number);options.push(o);}
+    // Commit one complete result, never append into a list changed by a newer request.
+    prs.replaceChildren(...options);if(seen.has(Number(chosen)))prs.value=chosen;
+    el('review-repo').value=conn.repository;el('review-scope').value=conn.scope;reviewLoadedRepository=conn.repository;
+    state.textContent=conn.repository?`${seen.size} open PRs · ${conn.repository} · scope: ${conn.scope||'repository root'}. Refresh/Sync never invokes a model.`:'Connect your repository first.';
+  }catch(e){if(current())throw e;}
+}
 // Polling open GitHub reports is deliberately explicit (Refresh/Sync), bounded and free of model calls.
 const originalUpdateCard=updateCard;
 updateCard=function(card,t){originalUpdateCard(card,t);if(t.mode!=='review')return;const r=t.review;card.meta.textContent+=r?` · ${r.origin} · ${r.stale?'STALE':r.status.toUpperCase()} · ${r.head_sha.slice(0,8)}`:' · PR review';
