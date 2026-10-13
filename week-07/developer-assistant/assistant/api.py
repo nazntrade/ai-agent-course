@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 import asyncio
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ConfigDict
@@ -28,6 +28,9 @@ class TaskBody(Body):
     provider: Literal['local','deepseek']='local'
     mode: Literal['help','web']='help'
     allow_tools: bool=False
+    chat_id: str | None = Field(default=None,max_length=64)
+class ChatBody(Body):
+    title: str = Field(default='New chat',min_length=1,max_length=80)
 class ToolBody(Body):
     name: Literal['project_tree','read_project_file','search_project_text','run_project_tests']
     arguments: dict = Field(default_factory=dict)
@@ -82,10 +85,28 @@ def create_app(settings=None):
     @app.post('/api/schedules')
     def schedule(b:ScheduleBody):
         if b.allow_tools: raise ValueError('Scheduled runs use the bounded default workflow')
-        return scheduler.create(b.project_id,b.question,b.provider,b.due,b.interval_minutes,b.telegram,b.mode)
+        return scheduler.create(b.project_id,b.question,b.provider,b.due,b.interval_minutes,b.telegram,b.mode,b.chat_id)
     @app.post('/api/schedules/{sid}')
     def toggle_schedule(sid:str,b:ScheduleToggle):
         return scheduler.toggle(sid,b.enabled)
+    @app.get('/api/projects/{pid}/chats')
+    def chats(pid:str,include_archived:bool=False):
+        return {'chats':store.chats(pid,include_archived)}
+    @app.post('/api/projects/{pid}/chats')
+    async def new_chat(pid:str,b:ChatBody):
+        return store.create_chat(pid,s.scrub(b.title))
+    @app.get('/api/chats/{cid}')
+    def chat(cid:str): return store.chat(cid)
+    @app.post('/api/chats/{cid}/rename')
+    async def rename_chat(cid:str,b:ChatBody):
+        return store.rename_chat(cid,s.scrub(b.title))
+    @app.post('/api/chats/{cid}/archive')
+    async def archive_chat(cid:str): return store.archive_chat(cid)
+    @app.post('/api/chats/{cid}/restore')
+    async def restore_chat(cid:str): return store.archive_chat(cid,False)
+    @app.get('/api/chats/{cid}/tasks')
+    def chat_tasks(cid:str,before:int | None=Query(default=None,ge=1),limit:int=Query(default=50,ge=1,le=200)):
+        return store.chat_tasks(cid,before,limit)
     @app.get('/api/health')
     def health():
         return {'application':'developer-assistant','version':'1.0.0','status':'ok'}
@@ -134,7 +155,7 @@ def create_app(settings=None):
         store.get_project(pid);return {'tasks':store.tasks(pid)}
     @app.post('/api/tasks')
     async def task(b:TaskBody):
-        return service.create(b.project_id,b.question,b.provider,b.mode,b.allow_tools)
+        return service.create(b.project_id,b.question,b.provider,b.mode,b.allow_tools,b.chat_id)
     @app.get('/api/tasks/{tid}')
     def get_task(tid:str):
         return store.task(tid)
@@ -146,7 +167,7 @@ def create_app(settings=None):
         old=store.task(tid)
         if old['status'] in {'queued','running'}:
             raise ValueError('Stop active task before retry')
-        return service.create(old['project_id'],old['question'],old['provider'],old['mode'],old.get('allow_tools',False))
+        return service.create(old['project_id'],old['question'],old['provider'],old['mode'],old.get('allow_tools',False),old.get('chat_id'))
     @app.post('/api/tasks/{tid}/telegram')
     async def telegram(tid:str):
         return await service.report(tid)

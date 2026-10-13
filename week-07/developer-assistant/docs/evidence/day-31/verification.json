@@ -3,8 +3,9 @@
   "status": "INDEPENDENT_ACCEPTANCE_PASS",
   "offline": {
     "entrypoint": "test.bat",
-    "tests": 31,
-    "status": "PASS"
+    "tests": 45,
+    "status": "PASS",
+    "independent_execution": true
   },
   "live": {
     "local": "Supported structure/RAG/MCP/SQLite answer",
@@ -37,15 +38,15 @@
   "artifacts": {
     "word": {
       "filename": "D31_Учебная_документация.docx",
-      "pages": 14,
-      "sha256": "bdb1eba36d4b3f0e2469bc2fd3171939a4c822c9a58c90b35b985bf01fe28f25"
+      "pages": 15,
+      "sha256": "68007fddadb062b234bba6cafe0e98693c1c51e2eb579c9f98083615fadaaf4b"
     },
     "video": {
       "filename": "D31_Демонстрация.mp4",
       "format": "MP4 H264 1920x1080 30 fps",
-      "source": "Real application screen capture; long waits explicitly shortened",
-      "sha256": "049a85cd1305aaccadb64fa5c8c6252d313378fb5693e43f17c0e81c428e3e5d",
-      "duration_s": 180.73
+      "source": "Real 1920x1080 application screenshots at original intra-segment timing; inter-action pauses omitted",
+      "sha256": "d20dd0761630993de1cfa4bcce2ea79acab16ab3a9c839a1d126f079c641cbeb",
+      "duration_s": 155.5119999999995
     }
   },
   "review_roles": [
@@ -53,7 +54,7 @@
     "Independent post implementation Architect",
     "Independent product Tester"
   ],
-  "publication": "Reviewed implementation commit is published and matches remote main; this final record adds documentation only.",
+  "publication": "Chat interface and replaced artifact record are ready for the user-authorized commit/push; final remote verification is recorded separately after publication.",
   "criteria": {
     "D01": "PASS",
     "D02": "PASS",
@@ -74,5 +75,38 @@
     "scheduled_tasks": "PASS"
   },
   "reviewed_code_commit": "ad1f85ddc0a2618ffb0adb449de490af9543b167",
-  "reviewed_remote_main_matches": true
+  "reviewed_remote_main_matches": true,
+  "chat_interface": {
+    "status": "INDEPENDENT_PRODUCT_CHECKED_PUBLICATION_PENDING",
+    "criteria": [
+      "C01",
+      "C02",
+      "C03",
+      "C04"
+    ],
+    "offline_tests": 45,
+    "live": [
+      "Local structure answer with exact returned source support",
+      "DeepSeek API/schema answer with exact returned source support",
+      "Actual MCP main vs Git",
+      "Tavily three attributed sources",
+      "Owner Telegram delivery and repeat prevented",
+      "One-shot schedule same original chat completed and delivered",
+      "Enter, Shift+Enter, draft preserved on chat switch",
+      "CRUD and recoverable restore",
+      "Refresh retained chat names and original task IDs",
+      "430px responsive layout and Escape focus restoration",
+      "Stop/retry retained cancelled and distinct ID",
+      "Active chat archive explicitly denied"
+    ],
+    "private_configuration_read": false,
+    "model_settings_changed": false,
+    "conversation_semantics": "Independent per-question evidence retained; no implicit full-history model memory",
+    "post_architect_status": "PASS_STATIC_ARCHITECTURE",
+    "product_review_status": "PARTIAL_PENDING_BROWSER_ARTIFACT_AND_PUBLICATION_PROOF",
+    "limitations": [
+      "Reviewed scenarios are bounded, not a guarantee of all future model answers",
+      "Schedules require a running application"
+    ]
+  }
 }

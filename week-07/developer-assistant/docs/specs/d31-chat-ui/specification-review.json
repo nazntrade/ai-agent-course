@@ -1,0 +1,12 @@
+{
+  "status": "PASS_STATIC_SPECIFICATION",
+  "scope": "Independent static amendment review only",
+  "criteria": [
+    "C01",
+    "C02",
+    "C03",
+    "C04"
+  ],
+  "original_criteria": "D01-D06 U01-U10 preserved",
+  "schedule_boundary": "Same transaction active chat validation, paused archived schedule cannot re-enable"
+}

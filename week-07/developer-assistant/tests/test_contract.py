@@ -128,6 +128,28 @@ class GitStates(unittest.TestCase):
             subprocess.run(['git','-C',d,'checkout','--detach'],check=True,capture_output=True)
             self.assertEqual(git_context(root)['state'],'detached')
 
+class TrustedTestExecution(unittest.IsolatedAsyncioTestCase):
+    async def test_real_failing_suite_exit_and_output_are_retained(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/'trusted-fixture';root.mkdir()
+            (root/'README.md').write_text('Owned isolated test fixture')
+            (root/'tests').mkdir();(root/'tests/__init__.py').write_text('')
+            (root/'tests/test_smoke.py').write_text(
+                'import unittest\nclass Fixture(unittest.TestCase):\n'
+                '    def test_failure(self):\n'
+                '        self.fail("intentional isolated failure")\n')
+            store=Store(Path(d)/'data/state.sqlite3');pid=store.project(root)['id']
+            events=[]
+            executor=Executor(root,store,pid,Settings(data=Path(d)/'data'),event=events.append)
+            # Only this owned fixture replaces the trusted module in this test.
+            # The fixed subprocess command and actual exit/output are not mocked.
+            with patch('assistant.tools.MODULE',root):
+                result=await executor.execute('run_project_tests',{'suite':'smoke'})
+            self.assertNotEqual(result['exit_code'],0)
+            self.assertIn('intentional isolated failure',result['stderr'])
+            self.assertIn('FAILED',result['stderr'])
+            self.assertEqual(events[-1]['result']['exit_code'],result['exit_code'])
+
 class WorkflowAsync(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)/'project';self.root.mkdir()

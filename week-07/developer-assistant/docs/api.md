@@ -46,3 +46,9 @@ Runtime budgets and context budget are validated by application configuration.
 
 GET /api/projects/{project_id}/schedules lists persisted schedules.
 POST /api/schedules accepts project_id, question, provider, mode, due (timezone required), interval_minutes (0 means once), telegram. Scheduled jobs use the default bounded workflow, without optional model System Tools. POST /api/schedules/{id} with enabled pauses or enables a schedule. Telegram always targets the configured owner; arbitrary recipients and message text are not accepted.
+
+## Saved conversations
+
+GET /api/projects/{project_id}/chats lists active chats; include_archived=true includes recoverable deleted chats. POST to the same path creates a chat with title (1 to 80 trimmed characters). GET /api/chats/{chat_id} reads metadata. POST /api/chats/{chat_id}/rename accepts title; /archive hides an inactive conversation; /restore makes it active again. Active or scheduled chats cannot be archived silently.
+
+GET /api/chats/{chat_id}/tasks returns chronological latest tasks, next_before cursor, and run_order; optional before and limit (1 to 200) retrieve earlier pages. Existing project-wide history remains available, including archived run evidence. Task and schedule creation optionally accept chat_id; unknown, archived and other-project chat targets are rejected before execution. Legacy callers without chat_id resolve an active default conversation. Retry and scheduled results remain linked to the original chat. No chat operation invokes a model or sends a report.

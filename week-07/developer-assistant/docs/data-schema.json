@@ -61,9 +61,29 @@
       "last_task_id",
       "last_status",
       "delivery",
-      "error"
+      "error",
+      "chat_id"
     ],
     "next_run": "After previous completion; no overlapping or catch-up burst",
     "restart": "Interrupted trigger is paused for owner review"
+  },
+  "chats": {
+    "fields": [
+      "id",
+      "project_id",
+      "title",
+      "created",
+      "updated",
+      "archived"
+    ],
+    "archive": "Recoverable hide; immutable runs and reports retained"
+  },
+  "task_chats": {
+    "fields": [
+      "task_id",
+      "chat_id"
+    ],
+    "task_id": "Unique immutable run reference",
+    "migration": "Original payloads and report IDs unchanged"
   }
 }

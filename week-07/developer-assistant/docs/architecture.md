@@ -72,3 +72,11 @@ Both providers stream final-answer content; private reasoning does not appear in
 ## Scheduled work
 
 Scheduler persists one-time and recurring questions in SQLite. Due work waits for the single worker to be idle. A recurring schedule calculates its next due time after completion, so there are no catch-up bursts or overlapping runs. The app must stay open. An interrupted trigger is paused after restart for owner inspection rather than blindly replayed. Pausing prevents future launches; Stop cancels the already launched task separately. Completed scheduled results can be sent through the restricted Telegram MCP to the configured owner. Failed or cancelled tasks are not sent as completed reports. Uncertain delivery is never automatically retried.
+
+## Chat interface and retained runs
+
+The sidebar selects project-scoped saved chats. The main thread presents each run as a user message and assistant reply, with a bottom composer. Sources, plan and full execution evidence expand per reply. Workspace tabs retain documents, live branch, System Tools, schedules and all project run history. The interface uses safe text nodes for Markdown and search excerpts; model or document HTML is never executed.
+
+Chats and task_chats are additive SQLite metadata. Legacy runs are linked idempotently without rewriting their original payloads or delivery IDs. Delete archives an inactive chat; restore is available in History. Atomic BEGIN IMMEDIATE validation prevents a chat archive racing a task start or enabled schedule save. Active/queued work and enabled/inflight schedules must be explicitly stopped or paused first. Retry stays in its original chat. A paused schedule cannot re-enable while that chat is archived. Each model call still uses its current question and bounded project evidence, not an implicit full-history context.
+
+Polling ignores stale project/chat requests and older snapshots cannot revive a terminal run. Expanded sources and reading position remain intact. Loaded active runs outside the latest page are refreshed in bounded rotating batches. The mobile sidebar traps focus and restores it on close; Workspace uses a native modal dialog with tabbed sections.

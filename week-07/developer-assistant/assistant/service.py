@@ -18,14 +18,15 @@ class Service:
     def busy(self):
         return any(not j.done() for j in self.jobs.values())
 
-    def create(self,pid,question,provider,mode='help',allow_tools=False):
+    def create(self,pid,question,provider,mode='help',allow_tools=False,chat_id=None):
         self.store.get_project(pid)
+        chat_id=self.store.resolve_chat(pid,chat_id)
         q=self.settings.scrub(question.strip())
         if not q or len(q)>4000:
             raise ValueError('Question must contain 1 to 4000 characters')
         if q.startswith('/help'):
             q=q[5:].strip() or 'Explain the project structure and main components.'
-        t={'id':ident(),'project_id':pid,'question':q,'provider':provider,'mode':mode,'status':'queued','created':now(),
+        t={'id':ident(),'project_id':pid,'question':q,'provider':provider,'mode':mode,'chat_id':chat_id,'status':'queued','created':now(),
            'plan':[dict(p,status='pending') for p in PLAN],'events':[],'sources':[],'answer':'','partial':'',
            'quality':'NOT_ASSESSED','grounding':'NOT_ASSESSED','error':None,'elapsed_s':0,'allow_tools':bool(allow_tools)}
         if mode=='web':

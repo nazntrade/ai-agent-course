@@ -12,8 +12,8 @@ class Schedules(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory();root=Path(self.tmp.name);(root/'README.md').write_text('public docs')
         self.store=Store(root/'state/db');self.pid=self.store.project(root)['id'];self.calls=[];self.sent=[];self.busy=False
-        def create(pid,q,provider,mode):
-            t=dict(id=ident(),project_id=pid,question=q,provider=provider,mode=mode,status='completed',created=now())
+        def create(pid,q,provider,mode,chat_id=None):
+            t=dict(id=ident(),project_id=pid,question=q,provider=provider,mode=mode,status='completed',created=now(),chat_id=chat_id)
             self.calls.append(t);self.store.save_task(t);return t
         async def report(tid): self.sent.append(tid);return {'status':'sent'}
         self.service=SimpleNamespace(settings=Settings(root,telegram_token='fake',telegram_chat='fake'),busy=lambda:self.busy,create=create,report=report)
