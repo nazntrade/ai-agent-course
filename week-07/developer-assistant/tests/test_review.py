@@ -205,6 +205,7 @@ class ExecutionBoundaries(unittest.IsolatedAsyncioTestCase):
             with patch('assistant.review_cli.Settings.load',return_value=settings),patch('assistant.review_cli.LocalRuntime',return_value=runtime),patch('assistant.review_cli.GitHub',return_value=github),patch('assistant.review_cli.run_review',new=AsyncMock(return_value=report_fixture())),patch('assistant.review_cli.notify_owner',new=AsyncMock()) as notify,patch.dict('os.environ',{'GITHUB_STEP_SUMMARY':str(summary),'D32_DEEPSEEK_MODEL':''}):
                 self.assertEqual(await execute(args),0);notify.assert_not_awaited()
             saved=json.loads((root/'out/review.json').read_text());self.assertTrue(saved['stale']);self.assertIn('STALE HISTORY',summary.read_text());runtime.close.assert_awaited_once()
+            self.assertEqual((root/'out/job-summary.md').read_bytes(),summary.read_bytes());self.assertEqual(saved['summary_receipt']['sha256'],hashlib.sha256(summary.read_bytes()).hexdigest());self.assertEqual(saved['summary_receipt']['bytes'],summary.stat().st_size)
     async def test_cli_failure_writes_job_summary_and_failed_artifact(self):
         from assistant.review_cli import execute
         from types import SimpleNamespace
@@ -215,6 +216,16 @@ class ExecutionBoundaries(unittest.IsolatedAsyncioTestCase):
             with patch('assistant.review_cli.Settings.load',return_value=settings),patch('assistant.review_cli.LocalRuntime',return_value=runtime),patch('assistant.review_cli.GitHub',return_value=github),patch.dict('os.environ',{'GITHUB_STEP_SUMMARY':str(summary),'D32_DEEPSEEK_MODEL':''}):
                 self.assertEqual(await execute(args),1)
             self.assertEqual(json.loads((root/'out/review.json').read_text())['status'],'failed');self.assertIn('AI review failed',summary.read_text());self.assertIn('Synthetic collector unavailable',summary.read_text());runtime.close.assert_awaited_once()
+            self.assertEqual((root/'out/job-summary.md').read_bytes(),summary.read_bytes());receipt=json.loads((root/'out/summary-receipt.json').read_text());self.assertEqual(receipt['sha256'],hashlib.sha256(summary.read_bytes()).hexdigest());self.assertEqual(receipt['file'],'job-summary.md')
+    async def test_summary_receipt_is_exact_sanitized_file_and_absent_without_step_environment(self):
+        from assistant.review_cli import append_summary
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);output=root/'out';output.mkdir();summary=root/'summary.md';settings=Settings(root,remote_key='synthetic-secret')
+            with patch.dict('os.environ',{'GITHUB_STEP_SUMMARY':str(summary)}):receipt=append_summary(settings,'Example synthetic-secret review',output)
+            self.assertEqual(summary.read_bytes(),(output/'job-summary.md').read_bytes());self.assertNotIn(b'synthetic-secret',summary.read_bytes());self.assertEqual(receipt['sha256'],hashlib.sha256(summary.read_bytes()).hexdigest());self.assertEqual(receipt['bytes'],len(summary.read_bytes()))
+            no_summary=root/'none';no_summary.mkdir()
+            with patch.dict('os.environ',{'GITHUB_STEP_SUMMARY':''}):self.assertIsNone(append_summary(settings,'No summary environment',no_summary))
+            self.assertFalse((no_summary/'job-summary.md').exists());self.assertFalse((no_summary/'summary-receipt.json').exists())
     async def test_active_model_cancel_and_ignored_cancellation_cannot_save_late_result(self):
         started=asyncio.Event();release=asyncio.Event()
         class SlowProvider:
