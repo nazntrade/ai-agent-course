@@ -1,0 +1,201 @@
+{
+  "schema": 1,
+  "repo": "nazntrade/ai-agent-course",
+  "number": 1,
+  "url": "https://github.com/nazntrade/ai-agent-course/pull/1",
+  "scope": "week-07/developer-assistant",
+  "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+  "head_sha": "3c67ffe16bd23caf9df5a21700ee4ad1b37ae615",
+  "files": [
+    {
+      "path": "week-07/developer-assistant/examples/review_demo/pricing.py",
+      "status": "modified",
+      "previous_path": null,
+      "additions": 3,
+      "deletions": 1,
+      "patch": "@@ -2,4 +2,6 @@\n def quote(amount: float, discount_percent: float) -> dict:\n     if amount < 0 or not 0 <= discount_percent <= 100:\n         raise ValueError('Amount/discount outside contract')\n-    return {'total': round(amount * (1 - discount_percent / 100), 2)}\n+    discount_ratio = discount_percent / 100\n+    total = round(amount * (1 - discount_ratio), 2)\n+    return {'total': total}",
+      "changed_lines": [
+        5,
+        6,
+        7
+      ],
+      "limitations": []
+    }
+  ],
+  "all_file_count": 1,
+  "selected_file_count": 1,
+  "outside_scope": [],
+  "limitations": [
+    "No tests or code were executed; verification is limited to static comparison of the supplied snapshots S1-S8.",
+    "Only the supplied files and excerpts were reviewed; any other callers or tests not included in the snapshots were not inspected.",
+    "Floating-point equivalence is inferred from identical operation order and values, not measured at runtime.",
+    "The changed file is described by the supplied documentation as an isolated teaching fixture not imported by the running assistant, so runtime impact beyond the supplied caller was not independently verified."
+  ],
+  "context_limits": [
+    "Context discovery bounded to 12 documents and 20 related code files, not the whole repository"
+  ],
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "quality": "NOT_ASSESSED",
+  "origin": "manual",
+  "units": [
+    {
+      "path": "week-07/developer-assistant/examples/review_demo/pricing.py",
+      "status": "completed",
+      "previous_path": null,
+      "additions": 3,
+      "deletions": 1,
+      "patch": "@@ -2,4 +2,6 @@\n def quote(amount: float, discount_percent: float) -> dict:\n     if amount < 0 or not 0 <= discount_percent <= 100:\n         raise ValueError('Amount/discount outside contract')\n-    return {'total': round(amount * (1 - discount_percent / 100), 2)}\n+    discount_ratio = discount_percent / 100\n+    total = round(amount * (1 - discount_ratio), 2)\n+    return {'total': total}",
+      "changed_lines": [
+        5,
+        6,
+        7
+      ],
+      "limitations": [],
+      "sources": [
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "3c67ffe16bd23caf9df5a21700ee4ad1b37ae615",
+          "revision": "head",
+          "path": "week-07/developer-assistant/examples/review_demo/pricing.py",
+          "hash": "7fe4057797674c8e280bf78f0b5a765b88303f805e700d52377484ec7cce680e",
+          "kind": "code",
+          "id": "e75b42185a912e52a7db",
+          "start": 1,
+          "end": 7,
+          "text": "\"\"\"Benign quotation fixture, separate from the application's runtime.\"\"\"\ndef quote(amount: float, discount_percent: float) -> dict:\n    if amount < 0 or not 0 <= discount_percent <= 100:\n        raise ValueError('Amount/discount outside contract')\n    discount_ratio = discount_percent / 100\n    total = round(amount * (1 - discount_ratio), 2)\n    return {'total': total}",
+          "label": "S1"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/docs/review-demo.md",
+          "hash": "102badd0486ac40dea2926b95257d376e8c410a7088fef9cf0a69e2cfeb461df",
+          "kind": "documentation",
+          "id": "e53e90014cca8aaf6d82",
+          "start": 1,
+          "end": 16,
+          "text": "# Quotation example contract\n\nThe isolated `examples/review_demo` package is a teaching fixture for code review.\nIt is not imported by the assistant runtime. A demonstration PR can change it\nwithout breaking the working application; erroneous demo changes must not merge.\n\n`pricing.quote(amount, discount_percent)` returns a Python dictionary with the\nrequired field `total`. Discounts are percentages between 0 and 100.\nTotal is `amount * (1 - discount_percent / 100)`, rounded to two decimals.\nFor amount 200 and discount 10 the total is 180; amount 100 and discount 0 gives 100.\nNegative amounts or discounts outside 0–100 raise `ValueError`.\n`checkout.checkout_total` consumes the `total` field. Renaming that field requires\nchanging the caller and documenting the API change; otherwise checkout fails.\n\nReview should compare the changed function to this documentation and related\ncaller. A valid code refactor preserving these outcomes should not be called a bug.",
+          "label": "S2"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/examples/review_demo/pricing.py",
+          "hash": "e0529506ff5022e53881376e54dd8f88b3c206884341e308c1c8903f6676572e",
+          "kind": "code",
+          "id": "0986c6e52174d6625c88",
+          "start": 1,
+          "end": 5,
+          "text": "\"\"\"Benign quotation fixture, separate from the application's runtime.\"\"\"\ndef quote(amount: float, discount_percent: float) -> dict:\n    if amount < 0 or not 0 <= discount_percent <= 100:\n        raise ValueError('Amount/discount outside contract')\n    return {'total': round(amount * (1 - discount_percent / 100), 2)}",
+          "label": "S3"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/examples/review_demo/checkout.py",
+          "hash": "6dfcfd550fbfa518420908d331af5c84794143a074eb41a1bdd58465aef3e323",
+          "kind": "code",
+          "id": "eb423b74d3731eaede7a",
+          "start": 1,
+          "end": 5,
+          "text": "\"\"\"The caller demonstrates a cross-file API contract for review.\"\"\"\nfrom .pricing import quote\n\ndef checkout_total(amount: float, discount_percent: float) -> float:\n    return quote(amount, discount_percent)['total']",
+          "label": "S4"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/README.md",
+          "hash": "ffce73c05b59433874112d953b20597d34ee0c3aff1837d75da75490c36845fe",
+          "kind": "documentation",
+          "id": "4482d7f963c582568a86",
+          "start": 191,
+          "end": 209,
+          "text": "recommendation and supplied evidence IDs. Malformed JSON, fake source IDs and invalid\nline coordinates fail validation. A completed execution is **not** a semantic PASS:\nquality stays `NOT_ASSESSED` until independent assessment. Empty categories mean no\nsubstantiated finding, not guaranteed bug-free code. Reviewer tools cannot execute PR\nscripts or obey instructions embedded inside code comments/documents.\nThe report separates execution_status, coverage_status, collection_limitations and\nmodel_limitations. For example, all files can be technically processed while the model\nstates that tests were not run: coverage can be complete, the semantic limitation stays\nvisible, and quality does not become PASS. Overall review status remains partial when\nlimitations are present; that label does not silently erase completed file processing.\n\n`examples/review_demo` is an isolated benign quotation fixture with its contract in\n`docs/review-demo.md`. A demonstration PR may introduce a wrong discount formula or\nrename `total` while its caller still expects it. The working app does not import this\nfixture, and faulty demo code must not merge. Correct changes provide false-positive\ncontrols. `tests/test_review.py` verifies scope, snapshots, pagination, retrieval, output\nvalidation, Stop/restart, shared-worker serialization and notification/import dedup.\nOffline fixtures do not prove LIVE model accuracy or an actual Actions run; those require\nseparate evidence. D31 historical evidence remains in `docs/evidence/day-31`.",
+          "label": "S5"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/examples/review_demo/__init__.py",
+          "hash": "bdfad13a2b90b3c9effadb2b1dd87d68ba13da4821947a83a6acf372c36f9b56",
+          "kind": "code",
+          "id": "2222e9e0af1f0cafaea0",
+          "start": 1,
+          "end": 1,
+          "text": "\"\"\"Isolated teaching fixtures, never imported by the running assistant.\"\"\"",
+          "label": "S6"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/assistant/review.py",
+          "hash": "fd03d487933bf5057dacd77981f41074dda4ec041df69baf98c55ced29a85532",
+          "kind": "code",
+          "id": "a4b5b6e741032e5f27de",
+          "start": 102,
+          "end": 119,
+          "text": "    if r['provider'] not in {'local','deepseek'} or r['origin'] not in {'manual','cli','ci'} or not isinstance(r['model'],str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{1,200}',r['model']):raise ValueError('Invalid saved model route')\n    if type(r['elapsed_s']) not in {int,float} or not 0<=r['elapsed_s']<=86400:raise ValueError('Invalid saved elapsed time')\n    if not isinstance(r['usage'],list) or len(r['usage'])>12 or any(not isinstance(x,dict) for x in r['usage']):raise ValueError('Invalid usage metadata')\n    for k in ('all_file_count','selected_file_count'):\n        if type(r[k])!=int or not 0<=r[k]<=3000:raise ValueError('Invalid saved coverage count')\n    if r['selected_file_count']>r['all_file_count']:raise ValueError('Selected coverage exceeds PR count')\n    for key in ('limitations','context_limits','collection_limitations','model_limitations'):\n        if not isinstance(r[key],list) or len(r[key])>6100 or any(not isinstance(x,str) or len(x)>1100 for x in r[key]):raise ValueError('Invalid saved limitations')\n    if not isinstance(r['outside_scope'],list) or len(r['outside_scope'])>3000 or any(not manifest_path(x) or in_scope(x,r['scope']) for x in r['outside_scope']):raise ValueError('Invalid excluded scope manifest')\n    if not isinstance(r.get('units'),list) or len(r['units'])>12:raise ValueError('Invalid saved review units')\n    if len(r['units'])>r['selected_file_count'] or not isinstance(r['files'],list) or len(r['files'])!=len(r['units']):raise ValueError('Invalid unit/manifest counts')\n    paths=set()\n    for unit in r['units']:\n        if not isinstance(unit,dict) or not manifest_path(unit.get('path','')) or not in_scope(unit['path'],r['scope']):raise ValueError('Saved review manifest path denied')\n        if not {'path','status','patch','changed_lines','additions','deletions','sources','limitations'}<=set(unit):raise ValueError('Saved review unit is incomplete')\n        if unit['path'] in paths:raise ValueError('Duplicate saved review file');\n        paths.add(unit['path'])\n        if unit.get('status') not in {'completed','partial'}:raise ValueError('Invalid review unit terminal state')",
+          "label": "S7"
+        },
+        {
+          "repo": "nazntrade/ai-agent-course",
+          "sha": "54542324b0e3dddb87789fc60347709302b635cd",
+          "revision": "base",
+          "path": "week-07/developer-assistant/tests/test_contract.py",
+          "hash": "668bb92019a9cc267853b9cf062e57bba5d463f5ed20650a47daccc9a3d2159a",
+          "kind": "code",
+          "id": "28ee53851b21c8b203fc",
+          "start": 38,
+          "end": 71,
+          "text": "        self.assertEqual(self.store.retrieve(self.pid,'/api/tasks'),[])\n    def test_secret_paths_and_runtime_are_excluded(self):\n        (self.root/'.env').write_text('KEY=fake-credential-do-not-index',encoding='utf-8')\n        (self.root/'local-data').mkdir();(self.root/'local-data/private.md').write_text('fake-private',encoding='utf-8')\n        scope=ProjectScope(self.root)\n        for p in ['.env','../outside.txt',str(Path(self.tmp.name)/'outside.txt'),'local-data/private.md']:\n            with self.assertRaises((ScopeError,FileNotFoundError)):\n                scope.read(p)\n        self.store.index(self.pid)\n        self.assertEqual(self.store.retrieve(self.pid,'fake credential private'),[])\n    def test_long_line_is_bounded_and_chunk_ids_unique(self):\n        (self.root/'docs/long.txt').write_text('longline '*1500,encoding='utf-8')\n        m=self.store.index(self.pid);self.assertGreater(m['chunk_count'],10)\n        with self.store.connect() as c:\n            rows=c.execute('SELECT text FROM chunks').fetchall()\n        self.assertLessEqual(max(len(x[0]) for x in rows),1100)\n    def test_escaping_link_is_rejected(self):\n        outside=Path(self.tmp.name)/'outside.md';outside.write_text('do not read',encoding='utf-8')\n        link=self.root/'docs/link.md'\n        try:\n            link.symlink_to(outside)\n        except OSError:\n            folder=Path(self.tmp.name)/'outside-dir';folder.mkdir();(folder/'outside.md').write_text('do not read')\n            junction=self.root/'docs/junction'\n            r=subprocess.run(['cmd','/c','mklink','/J',str(junction),str(folder)],capture_output=True)\n            if r.returncode:\n                self.skipTest('OS does not permit a linked fixture')\n            with self.assertRaises(ScopeError):\n                ProjectScope(self.root).read('docs/junction/outside.md')\n            return\n        with self.assertRaises(ScopeError):\n            ProjectScope(self.root).read('docs/link.md')\n    def test_recovery_never_turns_unfinished_into_completed(self):\n        task={'id':ident(),'project_id':self.pid,'status':'running','created':now(),'answer':'','partial':'unfinished','plan':[{'status':'running'}]}",
+          "label": "S8"
+        }
+      ],
+      "result": {
+        "summary": "The patch factors `discount_percent / 100` into `discount_ratio` and the rounded total into a local variable before returning the same `{'total': total}` dictionary. The formula and returned contract are identical to the base version, remain consistent with `docs/review-demo.md` (`amount * (1 - discount_percent / 100)`, rounded to two decimals), and still satisfy the caller `checkout.checkout_total`, which reads `['total']`. No concrete introduced bug or architecture/contract violation was substantiated from the supplied snapshots.",
+        "findings": [],
+        "limitations": [
+          "No tests or code were executed; verification is limited to static comparison of the supplied snapshots S1-S8.",
+          "Only the supplied files and excerpts were reviewed; any other callers or tests not included in the snapshots were not inspected.",
+          "Floating-point equivalence is inferred from identical operation order and values, not measured at runtime.",
+          "The changed file is described by the supplied documentation as an isolated teaching fixture not imported by the running assistant, so runtime impact beyond the supplied caller was not independently verified."
+        ]
+      },
+      "attempts": 1
+    }
+  ],
+  "usage": [
+    {
+      "prompt_tokens": 3923,
+      "completion_tokens": 1167,
+      "total_tokens": 5090,
+      "prompt_tokens_details": {
+        "cached_tokens": 3712
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 919
+      },
+      "prompt_cache_hit_tokens": 3712,
+      "prompt_cache_miss_tokens": 211
+    }
+  ],
+  "status": "partial",
+  "execution_status": "completed",
+  "coverage_status": "complete",
+  "collection_limitations": [],
+  "model_limitations": [
+    "No tests or code were executed; verification is limited to static comparison of the supplied snapshots S1-S8.",
+    "Only the supplied files and excerpts were reviewed; any other callers or tests not included in the snapshots were not inspected.",
+    "Floating-point equivalence is inferred from identical operation order and values, not measured at runtime.",
+    "The changed file is described by the supplied documentation as an isolated teaching fixture not imported by the running assistant, so runtime impact beyond the supplied caller was not independently verified."
+  ],
+  "stale": false,
+  "elapsed_s": 9.72
+}

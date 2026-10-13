@@ -207,3 +207,24 @@ controls. `tests/test_review.py` verifies scope, snapshots, pagination, retrieva
 validation, Stop/restart, shared-worker serialization and notification/import dedup.
 Offline fixtures do not prove LIVE model accuracy or an actual Actions run; those require
 separate evidence. D31 historical evidence remains in `docs/evidence/day-31`.
+
+### D32 measured verification (2026-10-13)
+
+The [verification record](docs/evidence/day-32/verification.json) links measured
+Actions run IDs, exact summary receipt and full public-snapshot model reports.
+The independent affected suite passes **84 tests (39 D32 + 45 D31), zero skips**.
+A real draft [PR #1](https://github.com/nazntrade/ai-agent-course/pull/1)
+exercised opened, synchronize, bad/safe changes and in-progress obsolete-run
+cancellation. The final fixture is safe; wrong demonstration revisions never merged.
+Local, manual DeepSeek and Actions DeepSeek found both documented defects and
+returned zero findings for the same benign refactor. The reports preserve measured
+wording limitations: a successful execution and valid citations do not establish
+perfect semantic quality. No PR code/tests were executed by the review engine.
+
+The submitted Russian DOCX explains this implementation in 16 pages with actual
+screenshots. The edited **1920x1080/30fps H264 MP4** contains 19 chapters, Russian
+synthetic narration and baked-in subtitles; media hashes and decode checks are
+recorded above. Desktop media, credentials and private setup helpers are not in Git.
+The actual own-step summary artifact is verified by bytes/hash; an authenticated
+GitHub Summary viewer was not observed. GitHub currently warns of a public
+`pull_request_target` default-policy change on 2026-11-02; check the policy then.

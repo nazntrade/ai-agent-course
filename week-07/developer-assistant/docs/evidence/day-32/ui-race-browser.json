@@ -1,0 +1,23 @@
+{
+  "options": [
+    {
+      "text": "Select an open PR",
+      "value": ""
+    },
+    {
+      "text": "#1 · D32: demonstrate automatic review of an isolated quotation change",
+      "value": "1"
+    }
+  ],
+  "selected": "1",
+  "projectSwitch": {
+    "repository": "",
+    "options": [
+      {
+        "text": "Select an open PR",
+        "value": ""
+      }
+    ],
+    "status": "Connect your repository first."
+  }
+}

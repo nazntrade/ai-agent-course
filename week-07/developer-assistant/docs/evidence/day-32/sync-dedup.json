@@ -1,0 +1,37 @@
+{
+  "repository": "nazntrade/ai-agent-course",
+  "current_head": "7b77d8c95b509f8d558d5c71c84e890ab3107cc2",
+  "requests": [
+    {
+      "imported": [
+        {
+          "task_id": "60dc191db6aa4d49a9a334e79500cb5d",
+          "stale": false,
+          "duplicate_prevented": true
+        }
+      ],
+      "head_sha": "7b77d8c95b509f8d558d5c71c84e890ab3107cc2",
+      "message": "Validated CI report imported"
+    },
+    {
+      "imported": [
+        {
+          "task_id": "60dc191db6aa4d49a9a334e79500cb5d",
+          "stale": false,
+          "duplicate_prevented": true
+        }
+      ],
+      "head_sha": "7b77d8c95b509f8d558d5c71c84e890ab3107cc2",
+      "message": "Validated CI report imported"
+    }
+  ],
+  "tasks_before": 12,
+  "tasks_after": 12,
+  "current_ci_tasks": 1,
+  "duplicate_prevented": true,
+  "manual_model_tasks_created": 0,
+  "current_task_ids": [
+    "60dc191db6aa4d49a9a334e79500cb5d"
+  ],
+  "notification_resend_requested": false
+}

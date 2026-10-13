@@ -1,0 +1,208 @@
+{
+  "schema": "d32-measured-verification-v1",
+  "date": "2026-10-13",
+  "scope": "D32 automatic AI PR review, preserving D31 lightweight assistant",
+  "tested_code_commit": "e45aea8bd5af65789251f3e17be66b4b0559b66d",
+  "repo": "nazntrade/ai-agent-course",
+  "pr_url": "https://github.com/nazntrade/ai-agent-course/pull/1",
+  "demo_branch": "codex/d32-review-demo",
+  "demo_state": "draft; final safe pricing refactor; intentionally wrong revisions never merged",
+  "offline": {
+    "reviewer": "independent-tester",
+    "tests": 84,
+    "d32": 39,
+    "d31": 45,
+    "skipped": 0,
+    "exit_code": 0,
+    "elapsed_s": 4.954,
+    "command": "test.bat",
+    "negative_controls": [
+      "pagination and changing head",
+      "secret/binary/symlink/out-of-scope files",
+      "missing or truncated patches and explicit partial manifests",
+      "malformed JSON, missing/fabricated evidence and wrong changed-line coordinates",
+      "non-cooperative provider late result after Stop",
+      "restart and stale result publication",
+      "fixed owner and notification/import dedup",
+      "actual shipped JS loader deferred/out-of-order response and project/chat context races"
+    ]
+  },
+  "live_reports": [
+    {
+      "file": "manual-local-bad.json",
+      "sha256": "25bdb090c0a6a94725cc74db24a850387e1794c61831e22cffda5847ffc1922e",
+      "provider": "local",
+      "origin": "manual",
+      "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+      "head_sha": "19e7d856ca72c6080886b0fdb4e149ed8596282f",
+      "elapsed_s": 45.0,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 1
+    },
+    {
+      "file": "manual-deepseek-bad.json",
+      "sha256": "fb83560081d1fdab0230b4689edd6b3ae359317f5deb44072b32e83860e94f74",
+      "provider": "deepseek",
+      "origin": "manual",
+      "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+      "head_sha": "19e7d856ca72c6080886b0fdb4e149ed8596282f",
+      "elapsed_s": 21.5,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 2
+    },
+    {
+      "file": "manual-local-safe.json",
+      "sha256": "57733d8fab2392742635085726073de95fc3dd0916c57efa8a887448babb904b",
+      "provider": "local",
+      "origin": "manual",
+      "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+      "head_sha": "3c67ffe16bd23caf9df5a21700ee4ad1b37ae615",
+      "elapsed_s": 56.09,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 0
+    },
+    {
+      "file": "manual-deepseek-safe.json",
+      "sha256": "fac3a0ea43f0f5b8dbf7b6ba76ca5b684b34fb425e4a6c0d06b0ae57f4010e4b",
+      "provider": "deepseek",
+      "origin": "manual",
+      "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+      "head_sha": "3c67ffe16bd23caf9df5a21700ee4ad1b37ae615",
+      "elapsed_s": 9.72,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 0
+    },
+    {
+      "file": "ci-bad.json",
+      "sha256": "e4fb7814c1b04dded8c3330e0707575486950bf0df82149eb4a6f1211c5d2a46",
+      "provider": "deepseek",
+      "origin": "ci",
+      "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+      "head_sha": "19e7d856ca72c6080886b0fdb4e149ed8596282f",
+      "elapsed_s": 7.76,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 2
+    },
+    {
+      "file": "ci-safe.json",
+      "sha256": "6740896ad63f500a4dbbb955412f438e92fa39d533ce07cb14f831f5ce61088b",
+      "provider": "deepseek",
+      "origin": "ci",
+      "base_sha": "54542324b0e3dddb87789fc60347709302b635cd",
+      "head_sha": "3c67ffe16bd23caf9df5a21700ee4ad1b37ae615",
+      "elapsed_s": 4.73,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 0
+    },
+    {
+      "file": "ci-current-safe.json",
+      "sha256": "71d1832f1ede7b3954c5074abe738de2dc67c890d42eefc9afce1d05c0a31095",
+      "provider": "deepseek",
+      "origin": "ci",
+      "base_sha": "bd32b8d93af9a6c843cfb14c9a8b1dc3552c0cc3",
+      "head_sha": "7b77d8c95b509f8d558d5c71c84e890ab3107cc2",
+      "elapsed_s": 5.7,
+      "execution_status": "completed",
+      "coverage_status": "complete",
+      "semantic_quality": "NOT_ASSESSED",
+      "findings": 0
+    }
+  ],
+  "report_hash_policy": "SHA256 of exact published UTF-8/LF bytes; manual reports extract the unchanged review object from saved task JSON. CI reports preserve their full review object. Sources/findings/units unchanged.",
+  "independent_semantic_assessment": {
+    "known_bug": "Both missing total key/caller KeyError and wrong discount formula found by Local, manual DeepSeek and Actions DeepSeek on same final bad snapshots. Correct worked examples 200/10 =>180 (bad2000),100/0 =>100 (bad0).",
+    "benign_control": "All three routes return zero findings for equivalent-variable safe refactor; all eight sources and patch equal across routes.",
+    "limits": [
+      "Model JSON/citation validation is structural; quality stays NOT_ASSESSED.",
+      "Initial CI made incorrect numeric boundary claim and weak docstring architecture finding. These raw observations were not accepted as flawless review.",
+      "Final manual DeepSeek still overgeneralizes all arithmetic cases; final bad CI overgeneralizes all quote consumers. Core documented defects remain independently substantiated.",
+      "Prompt refinement comparison also changed base/docstring context; not a controlled single-factor A/B and not a guarantee on arbitrary PRs.",
+      "No PR code/tests executed by review engine."
+    ],
+    "parameter_changes": "None for D32; manual existing temperature0.6,max_tokens8192,thinkingtrue,context_chars18000 (RAG character limit, not model context window). Local model name is endpoint alias local-model, not verified GGUF identity; network model deepseek-flash."
+  },
+  "actions": {
+    "event": "pull_request_target",
+    "actual_opened": 38408889898,
+    "actual_synchronize_bad": 38410843626,
+    "actual_synchronize_safe": 38411578310,
+    "actual_final_summary": 38415392166,
+    "actual_obsolete_in_progress_cancelled": 38413129325,
+    "cancel_reason": "Canceling since a higher priority waiting request for d32-review-1 exists",
+    "trusted_base_final": "bd32b8d93af9a6c843cfb14c9a8b1dc3552c0cc3",
+    "head_final": "7b77d8c95b509f8d558d5c71c84e890ab3107cc2",
+    "artifact_final": 11824925606,
+    "marked_comment_id": 6147189079,
+    "marked_comment_count": 1,
+    "summary_file": {
+      "file": "job-summary.md",
+      "bytes": 1709,
+      "sha256": "05c3bb4f8e23d5c6b1451a6e19d19f37cbee6950c4448ea33dff637b91d25b7d"
+    },
+    "summary_method": "Actual GitHub-provided own step summary file read after append; artifact downloaded and exact bytes/hash checked. Authenticated Summary viewer was NOT_OBSERVED.",
+    "log_audit": "Inspected two actual runs, including final38415392166; zero configured DeepSeek/Telegram/Git credential values found. Raw logs not written. No global privacy guarantee from step names.",
+    "trust": "Pinned Actions; same-repository guard, fork skipped; base engine/dependencies only; head collected as text via REST, never checked out/executed; contents read/PR write only.",
+    "future_notice": "Actual GitHub warning: public pull_request_target default policy changes on 2026-11-02. Owner should check then; no security policy weakened."
+  },
+  "browser_and_runtime": {
+    "repo_list": "Owner connected selected project repository; actual current PR list loaded. Rapid Refresh retained exactly one PR option and selected number1; neutral project has blank repo/list.",
+    "manual_models": "Actual Local and DeepSeek runs and their sources/patch opened in UI.",
+    "sources": "Actual quotation documentation and checkout caller expanded with source IDs/version hashes/line ranges; fixed SHA in report.",
+    "sync": "Two same-head sync calls retain same existing CI task, unchanged task count, zero new manual model tasks and no resend requested.",
+    "watcher": "Opt-in60s,up to5open PRs; demonstrated pause after chat/project context change. Disabled at completion.",
+    "stop": "Actual task9c6fb6dab34848c1a2d9bda20d2ee027 was cancelled after GitHubdiff/RAG8events and before model answer; no completed/late result shown.",
+    "d31": "Actual DeepSeek /help5.7s with8docs sources and genuine stdio MCP git_branch(main); indexed7docs48chunks. Create/rename/archive/restore preserved same task04d5571f16ea45acb3b10483bc106f79. Existing Tools/projecttree and schedules controls inspected; no new live Tavily or scheduled-send claim.45regressiontests pass."
+  },
+  "telegram": {
+    "owner_only": true,
+    "actual_ci_messages": [
+      11,
+      14,
+      15,
+      19
+    ],
+    "actual_manual_message": 12,
+    "actual_manual_mechanism": "stdio MCP send_self_report; application fixed saved owner",
+    "actual_ci_mechanism": "CI fixed-owner Telegram HTTPS call",
+    "dedup": "One owned updated PR comment; persisted send intent; stale imports cannot resend; uncertain delivery not blindly retried.",
+    "completion": "Separate authorized owner completion notification after final artifact/publication checks; receipt retained privately, credentials/recipient not published."
+  },
+  "artifacts": {
+    "tutorial": {
+      "file": "D32_Учебная_документация.docx",
+      "pages": 16,
+      "sha256": "59ff16bfa15d688fbfcc51fbecc3e823d92a7a7926111322267450f485cf74a8",
+      "independent_visual_qa": "All16finalrendered pages inspected; black headings, complete actual screenshots and last page."
+    },
+    "video": {
+      "format": "mp4",
+      "video": "H264 Constrained Baseline, yuvj420p progressive 1920x1080 16:9 30fps",
+      "audio": "AAC LC stereo 48000Hz; target128k, measured average117kb/s",
+      "chapters": 19,
+      "duration_s": 1235.7,
+      "bytes": 80726367,
+      "sha256": "d3ea4949633629ff418362ed4446de0e57679bac66f95aae4ff52348cf2f3a5a",
+      "full_decode_exit_code": 0,
+      "full_decode_errors": "",
+      "audio_levels_db": {
+        "mean_volume": -22.3,
+        "max_volume": -1.6
+      },
+      "source": "Edited genuine CUA screenshots/recordings; fixed pauses/zoom of same captured pixels; offline synthesized Russian narration; baked-in Russian captions",
+      "audio_qa_limit": "Technical decode, stream metadata and audible-signal measurements; human listening was not available in the current tools."
+    }
+  },
+  "publication_boundary": "Only D32 product/spec/tests and sanitized evidence; no credentials, private machine paths/infrastructure, local settings, database, raw credential export helper or desktop media committed."
+}
