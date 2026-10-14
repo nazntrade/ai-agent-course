@@ -1,0 +1,1631 @@
+{
+  "schema_version": "d33-public-live-comparison-v1",
+  "method": "Root performed actual UI Local/DeepSeek requests with equivalent synthetic cases. Independent Tester read full saved answers, facts, sources and prior attempts; no model self-assessment used.",
+  "timing_scope": "Whole support run: queue + MCP + RAG + model request. Not isolated inference throughput; one observation per current case/provider.",
+  "sampling_scope": "Existing temperature0.6/max8192/context_chars18000/thinkingtrue retained. DeepSeek thinking uses reasoning_effort high and does not apply temperature. context_chars is application text budget, not model token window.",
+  "limitations": [
+    {
+      "id": "AUTH401-RETEST-LIMIT-01",
+      "severity": "NONBLOCKING_QUALIFICATION",
+      "provider": "local",
+      "quote": "Старая или пустая переменная осталась в процессной среде",
+      "judgment": "Empty environment precedence is true, but a truly empty DEEPSEEK_API_KEY causes current SupportService.create/Provider.completion to reject configuration before HTTP; it does not alone explain a provider HTTP401 from these current code paths. The answer marks possibilities unproved, asks which request process/source was involved, and gives supported useful checks, so no proven wrong concrete action or recurrence of original defects is assigned. Do not present this speculation as a demonstrated cause in final teaching artifacts.",
+      "references": [
+        "assistant/support_service.py current create remote_key guard",
+        "assistant/provider.py:16-17 missing remote_key guard"
+      ]
+    },
+    {
+      "id": "AUTH401-RETEST-LIMIT-02",
+      "severity": "SCOPE",
+      "judgment": "This review closes specific original failures on two fresh401 fixtures. Other diagnostic/missing-fact/injection/follow-up cases, actual UI/Telegram/artifacts/publication and all16criteria acceptance remain pending. It does not prove every future model answer."
+    },
+    {
+      "id": "AUTH401-RETEST-LIMIT-03",
+      "severity": "MEASUREMENT",
+      "judgment": "Local raw usage{} preserved; no speed/token estimate invented. Source references remain runtime UNVERIFIED, semantic PASS is this independent limited review."
+    },
+    "RAG ranked6snippets per case; unrelated/general background and APIheading can also appear. Core decisions use relevant direct FAQ/T, not source count.",
+    "Source labels syntax alone never accepted. Tangential provider credential passages in some GitHub answers and redundant provider confirmation in Localrefused are recorded per case.",
+    "Synthetic diagnostics are user-provided current facts; no claim these prove a real account/server state. Model hypotheses not independent external verification.",
+    "RateDeepSeek distinguishes reportedexhaustion versus absentremainingheader. The primary limit-oriented actions remain correct, but artifacts must show this qualification and avoid claiming measured quota/reset.",
+    "Possible credential issue in Localrefused answer is not a demonstrated cause of connectionrefused. Actualsafe steps prioritized server/route/startup; artifacts must not reverse this distinction."
+  ],
+  "initial_negative_test": {
+    "status": "FAIL_PRESERVED_NOT_RECOMMENDED",
+    "finding": "Initial DeepSeek401 answer incorrectly suggested settings.json for API key and unsupported cause frequency. Narrow factual FAQ/process-grounding repair followed by fresh equivalent retests; historical failure was not erased.",
+    "report_sha256": "f43b6cd6a0ddd32b18b9c65cd6e3ed2bc3779ea8c175c6710c0732054a39acb3",
+    "whole_historical_answer": "## Коротко\n\nПо данным тикета [T] запрос к DeepSeek отклоняется на уровне провайдера: HTTP 401 и безопасный код `invalid_key`. Это означает, что переданный в запросе ключ не принят провайдером [F1]. Ключ уже заменён в конфигурации, и повторный запрос всё равно вернул ту же ошибку [T] — поэтому повторять ту же замену ключа как единственное «лечение» смысла нет [F1].\n\n## Наиболее вероятные причины\n\n1. **Запущенный процесс не подхватил новую конфигурацию.** После изменения окружения/конфигурации приложение нужно перезапустить, иначе оно продолжает использовать старую загрузку [F1]. Это самая частая причина, когда «ключ уже заменён, но ошибка та же».\n2. **Провайдер выбран/используется не тот, что вы настроили.** Провайдеры Local и DeepSeek выбираются явно, автоматического отката между ними нет [F2]; авторизация у каждого своя [F2]. Если фактический запрос ушёл с ключом не от того провайдера, ошибка `invalid_key` ожидаема.\n3. **Новое значение ключа само по себе не принято** (опечатка/лишние символы/отозванный или не тот ключ) — это версия, которую нельзя подтвердить без приватной проверки.\n\n## Что безопасно проверить (по порядку)\n\n- Приватно, **в самой конфигурации приложения** (`local-data/settings.json` [F4]), убедиться, что там действительно новое значение — и **не присылать его** в чат или тикет [F1][F2].\n- **Полностью перезапустить приложение** после замены ключа и только затем делать следующий запрос [F1].\n- Подтвердить, что выбран именно DeepSeek (без «молчаливого» переключения) [F2].\n- Зафиксировать **безопасные факты** о следующем ответе: провайдер, код ошибки, время наблюдения [F1]. В тикете `observed_at` и `connection_state` пустые [T] — это как раз недостающие данные.\n\n## Чего не хватает\n\nВ тикете нет времени наблюдения и состояния соединения [T], а также нет подтверждения, что приложение перезапускалось после замены ключа. Пока это неизвестно, нельзя отличить «старая конфигурация в памяти» от «новый ключ не принят».\n\n## Когда эскалировать\n\nЕсли после **полного перезапуска** с подтверждённым провайдером DeepSeek и приватно проверенным ключом тот же `invalid_key` повторяется — эскалируйте в поддержку, приложив только: компонент (`deepseek`), безопасный код ошибки (`invalid_key`), время наблюдения и список шагов [F1]. Ключ, токен или пароль в обращение не включайте [F1][F2].\n\n## Важная оговорка\n\nСценарий помечен как синтетический/учебный [T], и ни один ассистент не может проверить ваш аккаунт или гарантировать диагноз по демо-данным [F1]. Я также не могу выполнить перезапуск, посмотреть вашу конфигурацию или отправить уведомление — перечисленное выше нужно сделать на вашей стороне."
+  },
+  "current_cases": [
+    {
+      "case": "auth401",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? В учебном сценарии после изменения API-ключа в конфигурации повторный запрос DeepSeek всё ещё возвращает HTTP 401 invalid_key. Ключ уже заменён; его значение не приводится.",
+      "diagnostics": {
+        "component": "deepseek",
+        "status_code": 401,
+        "error_code": "invalid_key",
+        "connection_state": "",
+        "observed_at": "",
+        "attempted_steps": [
+          "Ключ уже заменён в конфигурации.",
+          "Повторный запрос после замены вернул 401 invalid_key."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "local",
+      "model_alias": "local-model",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 81.45,
+      "usage": {},
+      "answer": "Ошибка `HTTP 401 invalid_key` от DeepSeek означает, что провайдер не принял переданный ему ключ [T][F2]. Само по себе это не доказывает, из какого источника был взят ключ и почему именно он отклонён [F2]. Замена ключа в конфигурации и повторный запрос — это уже предпринятые шаги, но они сами по себе не доказывают, что нужный ключ был загружен и принят [T][F3][F4].\n\nВозможные причины, не доказанные текущими данными:\n\n1. **Старая или пустая переменная осталась в процессной среде.**  \n   DeepSeek использует переменную `DEEPSEEK_API_KEY` [F3][F4]. Если в среде запуска процесса уже определена эта переменная, она имеет приоритет над `.env`, даже если значение пустое [F3]. Поэтому правка `.env` может не сработать, если процесс получил другую переменную при запуске [F3][F4].\n\n2. **Ключ добавлен не в тот источник.**  \n   Файл `local-data/settings.json` содержит несекретные URL/model/runtime и параметры генерации, но **не API-ключи**; добавление ключа туда не настраивает учётные данные [F3][F4].\n\n3. **Перезапущен не тот процесс.**  \n   Main и Support — независимые процессы. Каждый загружает настройки один раз при старте [F3][F4]. Перезапуск Main может переиспользовать уже запущенный Support и **не обновить** окружение Support-процесса [F3][F4]. Поэтому важно определить, где именно был неудачный запрос: в основном чате/ревью или в Support Desk [F3].\n\n4. **Ключ не принят самим DeepSeek.**  \n   `invalid_key` указывает, что переданное учётное данные не принято провайдером [F2], но из доступных данных нельзя точно сказать, почему: ключ мог быть неверным, изменённым, отозванным или переданным из не того источника. Это возможно, но не доказано [F2].\n\nБезопасные следующие проверки:\n\n1. Определите процесс, который выполнял запрос: Main chat/review или Support Desk [F3][F4].\n2. Подтвердите, что выбранный провайдер — именно DeepSeek; провайдер не переключается молча [F1][F2].\n3. Приватно проверьте фактический источник загрузки: переменную `DEEPSEEK_API_KEY` в процессной среде именно этого процесса и соответствующий `.env` [F3]. Не публикуйте значение ключа, скриншоты с ним или полную конфигурацию [F1][F3].\n4. Проверьте приоритет запуска: не задана ли `DEEPSEEK_API_KEY` уже в окружении запуска, включая пустое значение [F3][F4].\n5. Если нужен перезапуск, перезапустите только тот процесс, который выполнял неудачный запрос, через штатный способ запуска; не останавливайте неизвестные сервисы [F3][F4].\n6. После этого сделайте новый запрос и зафиксируйте безопасный результат: код ошибки или успех, выбранный провайдер и время наблюдения [F2][F3].\n\nЕсли после этих проверок снова вернётся `401 invalid_key`, стоит эскалировать с безопасными метаданными: выбранный провайдер, код ошибки, время наблюдения, какие шаги уже предпринимались, какой процесс был запущен/перезапущен. Ключ, токен или пароль передавать нельзя [F2].\n\nЧтобы сузить причину, уточните, пожалуйста:\n\n- из какого раздела/процесса шёл запрос: Main chat/review или Support Desk;\n- какие именно файлы/переменные вы меняли: `.env`, `DEEPSEEK_API_KEY` в окружении запуска, `local-data/settings.json`;\n- какой процесс вы перезапускали после замены ключа.",
+      "sources": [
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -17.057420704670985,
+          "label": "F1"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -15.97644228099687,
+          "label": "F2"
+        },
+        {
+          "id": "8e82b2091a140c536f7f32c5",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 8,
+          "end": 31,
+          "title": "Credential loading and independent processes",
+          "text": "## Credential loading and independent processes\n\nDeepSeek credentials are read from the DEEPSEEK_API_KEY process environment;\nLocal credentials are read from LOCAL_LLM_API_KEY. assistant/config.py first\nloads the module .env with load_dotenv(override=False), unless environment-file\nloading is explicitly disabled. An already defined process environment variable\ntakes precedence over .env, including an already defined empty value.\nlocal-data/settings.json contains nonsecret URL/model/runtime and generation\nparameters, not API keys. Adding a key there does not configure a credential.\nInspect credentials privately in the actual .env/process environment source;\nnever share their values, screenshots or full configuration in support.\n\nMain and Support are independent processes. Each loads Settings once when its\napplication starts. First identify where the failing request was made: the main\nchat/review or Support Desk. Restarting Main can reuse an existing Support\nprocess and does not refresh that Support process's loaded environment.\nIf reload is needed, restart only the affected identified process, using its\nnormal launch procedure; do not stop an unknown listener or other services.\nAlso check the launch environment precedence: editing .env cannot override an\nalready defined variable inherited by the new process. A replacement or restart\nalone is not evidence that the intended credential was loaded or accepted.\nConfirm the selected provider and the next safe error/success response. Do not\ninfer relative frequency or a proven configuration cause from an error alone.\n",
+          "score": -7.567461882832545,
+          "label": "F3"
+        },
+        {
+          "id": "022da4895722e1270cdd5f89",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 63,
+          "end": 82,
+          "title": "Provider parameters",
+          "text": "## Provider parameters\n\nNonsecret URL/model/runtime and generation parameters are read from private\nlocal-data/settings.json; API keys are not read from that JSON. Credentials are\nloaded by assistant/config.py from the process environment, after optional module\n.env loading with load_dotenv(override=False). Existing process variables take\nprecedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.\nSettings are loaded once at the start of each independent Main or Support process.\nRestarting Main reuses an already healthy Support and does not reload Support's\nenvironment. Identify the process that issued the failing request before a reload;\nrestart only that affected process. A restart or key replacement is not proof that\nthe intended credential was loaded or accepted; check the next safe response.\n\nApp defaults: temperature 0.6,\nmax output 8192 tokens, evidence context budget 18000 characters. Model server context\nwindow is separate from the per-question RAG evidence budget. Local working settings can\nprovide a larger actual context window without inserting every document into every request.\nDeepSeek uses explicit thinking mode; its temperature does not control the thinking path.\nBoth providers stream final-answer content; private reasoning does not appear in the UI.\n",
+          "score": -5.0152153965336375,
+          "label": "F4"
+        },
+        {
+          "id": "336b414b60b1cbcb37e91c49",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 46,
+          "end": 56,
+          "title": "Local availability and connection",
+          "text": "## Local availability and connection\n\nLocal uses a loopback OpenAI-compatible endpoint and a configured model alias.\nConnection refused means no connection was accepted at that endpoint. Check\nwhether the configured server is running, whether its port and model alias\nmatch the application configuration, and whether startup has completed.\nChanging a DeepSeek credential does not start a Local server. The application\ncan start only its explicitly configured local runtime, and does not kill an\nunknown service occupying its port. A borrowed local server is not owned or\nstopped by Support. Long model loading is not by itself a failure.\nAsk for the selected provider and a safe error code if those facts are missing.",
+          "score": -4.888092951053952,
+          "label": "F5"
+        },
+        {
+          "id": "f2abbe98620f5601f135d230",
+          "path": "docs/api.md",
+          "hash": "9e0ed4d5a19eeefcd5b20540f05f100e353de5c2430819e663da10eaba39d507",
+          "start": 38,
+          "end": 44,
+          "title": "Limits",
+          "text": "## Limits\nQuestion maximum 4000 characters. Imported document maximum 300000 characters.\nFile reader maximum 512000 bytes, 160 returned lines by default, 12000 output characters.\nProject tree at most 500 permitted text files. Search at most 30 matches.\nScope rejects traversal, linked paths, secrets and excluded folders.\nRuntime budgets and context budget are validated by application configuration.\n",
+          "score": -2.452317373848979,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? deepseek deepseek 401 invalid_key   ['Ключ уже заменён в конфигурации.', 'Повторный запрос после замены вернул 401 invalid_key.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "provider": "local",
+        "status": "PASS",
+        "scope": "Material correctness for this current explicit401 synthetic case and original defect repair",
+        "claims": [
+          {
+            "claim": "401 invalid_key means credential actually supplied to DeepSeek was rejected, not which source or why.",
+            "citations": [
+              "T",
+              "F2"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Previous replacement/repeated request not proof intended value loaded or accepted.",
+            "citations": [
+              "T",
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "DEEPSEEK_API_KEY environment, dotenv overrideFalse and existing variable precedence, including empty value.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED_GENERAL_LOADER_FACT",
+            "qualification": "True loader fact; see nonblocking limitation below for empty credential as an HTTP401 explanation."
+          },
+          {
+            "claim": "JSON settings hold nonsecret model/runtime/generation fields and adding key there does not configure credentials.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED_AND_ORIGINAL_WRONG_FILE_REPAIRED"
+          },
+          {
+            "claim": "Main/Support independent, Main restart can reuse Support without updating its environment, identify failing process.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Possible explanations explicitly not proven; no most frequent/most likely ranking asserted.",
+            "citations": [
+              "F2",
+              "F3",
+              "T"
+            ],
+            "judgment": "SUPPORTED_UNCERTAINTY"
+          },
+          {
+            "claim": "Private effective-source verification, affected identified process reload, no unknown service shutdown, safe next error/success metadata.",
+            "citations": [
+              "F1",
+              "F2",
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED_CONCRETE_NEXT_ACTIONS"
+          },
+          {
+            "claim": "Unresolved401 merits escalation with safe metadata, no secret; asks source/process/restart missing facts.",
+            "citations": [
+              "F2",
+              "F3",
+              "T"
+            ],
+            "judgment": "SUPPORTED"
+          }
+        ]
+      },
+      "immutable_private_input_sha256": "1ba7eed0b93e6c475595af9424d7c9bd2a006c864a2546c547a59612b193371d"
+    },
+    {
+      "case": "auth401",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? В учебном сценарии после изменения API-ключа в конфигурации повторный запрос DeepSeek всё ещё возвращает HTTP 401 invalid_key. Ключ уже заменён; его значение не приводится.",
+      "diagnostics": {
+        "component": "deepseek",
+        "status_code": 401,
+        "error_code": "invalid_key",
+        "connection_state": "",
+        "observed_at": "",
+        "attempted_steps": [
+          "Ключ уже заменён в конфигурации.",
+          "Повторный запрос после замены вернул 401 invalid_key."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "deepseek",
+      "model_alias": "deepseek-flash",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 74.84,
+      "usage": {
+        "prompt_tokens": 2402,
+        "completion_tokens": 1734,
+        "total_tokens": 4136,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 922
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 2402
+      },
+      "answer": "## Коротко\n\nПо данным тикета повторный запрос к DeepSeek вернул **HTTP 401 / `invalid_key`** [T]. Согласно [F2], такая ошибка означает, что **переданный провайдеру credential не был им принят**, но она **не показывает, из какого источника этот credential пришёл и почему был отклонён**. Поэтому из одного лишь 401 нельзя заключить, что проблема именно в замене ключа или что замена «не применилась» — это лишь возможные объяснения, а не установленная причина.\n\nВажно: замена ключа и повторный запрос уже были выполнены [T]. Повторять замену как единственное действие не следует — [F2] прямо рекомендует вместо этого проверить затронутый процесс и реальный источник/приоритет загрузки.\n\n## Что можно проверить безопасно\n\n1. **Определить, какой процесс вернул ошибку** — основной чат/ревью или Support Desk. Main и Support — независимые процессы, и каждый загружает Settings один раз при старте; перезапуск Main может переиспользовать уже работающий Support и не обновляет его окружение [F3][F4].\n2. **Подтвердить выбранного провайдера.** Провайдеры Local и DeepSeek выбираются явно и не переключаются молча [F1].\n3. **Приватно проверить фактический источник credential** — `.env` и/или переменные окружения процесса (`DEEPSEEK_API_KEY`) [F3][F4]. В `local-data/settings.json` ключей нет: добавление ключа туда не настраивает credential [F3][F4].\n4. **Проверить приоритет загрузки.** `assistant/config.py` загружает модульный `.env` через `load_dotenv(override=False)`, а уже определённая переменная окружения процесса имеет приоритет над `.env`, **включая уже определённое пустое значение** [F3][F4]. То есть правка `.env` может не переопределить переменную, унаследованную новым процессом.\n5. **При необходимости перезагрузки — перезапустить только тот процесс, который реально обрабатывал запрос**, его обычным способом запуска; не останавливать неизвестный listener или другие сервисы [F3].\n6. **Проверить следующий безопасный ответ** — успех или код ошибки. Ни замена ключа, ни перезапуск сами по себе не доказывают, что нужный credential был загружен и принят [F3][F4].\n\n## Чего не хватает\n\nВ диагностике [T] пусты `observed_at` и `connection_state`, и не указано, **что именно менялось** (файл `.env` или переменная окружения процесса) и **какой процесс перезапускался**. Уточните, пожалуйста, эти два факта — это позволит сузить проверку.\n\n## Когда эскалировать\n\nЕсли после перечисленных проверок 401 сохраняется — эскалируйте с безопасными метаданными (код ошибки, выбранный провайдер, время наблюдения) и списком попыток, **никогда не прикладывая сам credential** [F2].\n\nИ отдельно: ключ, токен или пароль не следует вставлять в чат или тикет [F1]. Я не имею доступа к вашему аккаунту или компьютеру и не могу гарантировать диагноз — это учебный сценарий на демо-данных.",
+      "sources": [
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -17.057420704670985,
+          "label": "F1"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -15.97644228099687,
+          "label": "F2"
+        },
+        {
+          "id": "8e82b2091a140c536f7f32c5",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 8,
+          "end": 31,
+          "title": "Credential loading and independent processes",
+          "text": "## Credential loading and independent processes\n\nDeepSeek credentials are read from the DEEPSEEK_API_KEY process environment;\nLocal credentials are read from LOCAL_LLM_API_KEY. assistant/config.py first\nloads the module .env with load_dotenv(override=False), unless environment-file\nloading is explicitly disabled. An already defined process environment variable\ntakes precedence over .env, including an already defined empty value.\nlocal-data/settings.json contains nonsecret URL/model/runtime and generation\nparameters, not API keys. Adding a key there does not configure a credential.\nInspect credentials privately in the actual .env/process environment source;\nnever share their values, screenshots or full configuration in support.\n\nMain and Support are independent processes. Each loads Settings once when its\napplication starts. First identify where the failing request was made: the main\nchat/review or Support Desk. Restarting Main can reuse an existing Support\nprocess and does not refresh that Support process's loaded environment.\nIf reload is needed, restart only the affected identified process, using its\nnormal launch procedure; do not stop an unknown listener or other services.\nAlso check the launch environment precedence: editing .env cannot override an\nalready defined variable inherited by the new process. A replacement or restart\nalone is not evidence that the intended credential was loaded or accepted.\nConfirm the selected provider and the next safe error/success response. Do not\ninfer relative frequency or a proven configuration cause from an error alone.\n",
+          "score": -7.567461882832545,
+          "label": "F3"
+        },
+        {
+          "id": "022da4895722e1270cdd5f89",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 63,
+          "end": 82,
+          "title": "Provider parameters",
+          "text": "## Provider parameters\n\nNonsecret URL/model/runtime and generation parameters are read from private\nlocal-data/settings.json; API keys are not read from that JSON. Credentials are\nloaded by assistant/config.py from the process environment, after optional module\n.env loading with load_dotenv(override=False). Existing process variables take\nprecedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.\nSettings are loaded once at the start of each independent Main or Support process.\nRestarting Main reuses an already healthy Support and does not reload Support's\nenvironment. Identify the process that issued the failing request before a reload;\nrestart only that affected process. A restart or key replacement is not proof that\nthe intended credential was loaded or accepted; check the next safe response.\n\nApp defaults: temperature 0.6,\nmax output 8192 tokens, evidence context budget 18000 characters. Model server context\nwindow is separate from the per-question RAG evidence budget. Local working settings can\nprovide a larger actual context window without inserting every document into every request.\nDeepSeek uses explicit thinking mode; its temperature does not control the thinking path.\nBoth providers stream final-answer content; private reasoning does not appear in the UI.\n",
+          "score": -5.0152153965336375,
+          "label": "F4"
+        },
+        {
+          "id": "336b414b60b1cbcb37e91c49",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 46,
+          "end": 56,
+          "title": "Local availability and connection",
+          "text": "## Local availability and connection\n\nLocal uses a loopback OpenAI-compatible endpoint and a configured model alias.\nConnection refused means no connection was accepted at that endpoint. Check\nwhether the configured server is running, whether its port and model alias\nmatch the application configuration, and whether startup has completed.\nChanging a DeepSeek credential does not start a Local server. The application\ncan start only its explicitly configured local runtime, and does not kill an\nunknown service occupying its port. A borrowed local server is not owned or\nstopped by Support. Long model loading is not by itself a failure.\nAsk for the selected provider and a safe error code if those facts are missing.",
+          "score": -4.888092951053952,
+          "label": "F5"
+        },
+        {
+          "id": "f2abbe98620f5601f135d230",
+          "path": "docs/api.md",
+          "hash": "9e0ed4d5a19eeefcd5b20540f05f100e353de5c2430819e663da10eaba39d507",
+          "start": 38,
+          "end": 44,
+          "title": "Limits",
+          "text": "## Limits\nQuestion maximum 4000 characters. Imported document maximum 300000 characters.\nFile reader maximum 512000 bytes, 160 returned lines by default, 12000 output characters.\nProject tree at most 500 permitted text files. Search at most 30 matches.\nScope rejects traversal, linked paths, secrets and excluded folders.\nRuntime budgets and context budget are validated by application configuration.\n",
+          "score": -2.452317373848979,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? deepseek deepseek 401 invalid_key   ['Ключ уже заменён в конфигурации.', 'Повторный запрос после замены вернул 401 invalid_key.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "provider": "deepseek",
+        "status": "PASS",
+        "scope": "Material correctness for this current explicit401 synthetic case and original defect repair",
+        "claims": [
+          {
+            "claim": "Explicit invalid_key means supplied credential not accepted but does not prove origin, why or change not applied.",
+            "citations": [
+              "T",
+              "F2"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Already changed key/repeated request is not reason to simply repeat replacement as sole action.",
+            "citations": [
+              "T",
+              "F2"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Identify Main chat/review versus Support request process; each loads once and Main reuse doesn't reload Support.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Confirm explicit selected provider and no silent fallback.",
+            "citations": [
+              "F1"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Actual credential source env/.env DEEPSEEK_API_KEY; JSON is not key loader.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED_AND_ORIGINAL_WRONG_FILE_REPAIRED"
+          },
+          {
+            "claim": "overrideFalse existing and empty variable precedence; .env edit may not override inherited variable.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED_GENERAL_LOADER_FACT"
+          },
+          {
+            "claim": "Reload only identified affected process and confirm safe next response; restart/replacement not proof of acceptance.",
+            "citations": [
+              "F3",
+              "F4"
+            ],
+            "judgment": "SUPPORTED_CONCRETE_NEXT_ACTIONS"
+          },
+          {
+            "claim": "Missing source and which process restart not fabricated; asks two relevant facts.",
+            "citations": [
+              "T",
+              "F2",
+              "F3"
+            ],
+            "judgment": "SUPPORTED_CLARIFICATION"
+          },
+          {
+            "claim": "Escalate safe metadata/attempts and never disclose credential; no account/computer/guaranteed diagnosis claim.",
+            "citations": [
+              "F1",
+              "F2"
+            ],
+            "judgment": "SUPPORTED"
+          }
+        ]
+      },
+      "immutable_private_input_sha256": "fa11750bcbde78d51602f629d7feba6945147e879b0a527bed29767edd370252"
+    },
+    {
+      "case": "rate403",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? В учебном сценарии GitHub вернул HTTP 403 с явным error_code rate_limit. Раньше то же подключение работало. Текущее сообщение сообщает, что лимит API исчерпан. Время сброса в тикете не указано.",
+      "diagnostics": {
+        "component": "github",
+        "status_code": 403,
+        "error_code": "rate_limit",
+        "connection_state": "",
+        "observed_at": "",
+        "attempted_steps": [
+          "Раньше то же подключение к GitHub работало.",
+          "Повторный запрос сообщил превышение лимита."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "local",
+      "model_alias": "local-model",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 81.06,
+      "usage": {},
+      "answer": "По данным тикета, известная причина сейчас — не подтверждённая проблема авторизации, а ответ GitHub **HTTP 403 с явным `error_code: rate_limit`** [T]. По FAQ, сам по себе 403 **не доказывает** плохой токен или отсутствие прав на репозиторий; явный `rate_limit` указывает на исчерпанный лимит API [F1].\n\nТо, что раньше то же подключение работало, — это наблюдение из тикета [T], но оно не доказывает, что текущий токен сейчас принят; текущий безопасный факт — превышение лимита [T][F1].\n\n### Что делать дальше\n\n1. **Не повторяйте запросы подряд** и не делайте частый polling [F1].  \n2. **Дождитесь времени сброса лимита** из безопасного ответа GitHub. В тикете время сброса не указано [T], поэтому точное время сейчас неизвестно.  \n3. После сброса сделайте **один безопасный повторный запрос** и сохраните/укажите только безопасные данные: статус, `error_code`, remaining/reset, если они доступны [F1].  \n4. **Не вставляйте в тикет** токен, ключ или пароль [F1][F3].  \n5. **Не меняйте credentials как единственное исправление**, если уже есть подтверждённый `rate_limit` [F1].  \n6. Если после сброса лимита снова приходит 403, уточните **безопасный код ошибки** и информацию о доступе к репозиторию. Для приватных репозиториев может потребоваться настроенный авторизованный доступ [F1].\n\nЕсли под «авторизацией» вы имели в виду не GitHub, а авторизацию провайдера Developer Assistant — Local или DeepSeek — то это отдельная настройка: провайдер выбирается явно и не переключается автоматически [F3]. Но по текущему тикету компонент — `github`, а ошибка — `rate_limit` [T].",
+      "sources": [
+        {
+          "id": "2a1b701ec255d1a32a885fcd",
+          "path": "docs/support/reviews.md",
+          "hash": "39e42647b7c360757b40fb562374036cc779b778419abc23def2e0acaee956b3",
+          "start": 7,
+          "end": 17,
+          "title": "GitHub API errors",
+          "text": "## GitHub API errors\n\nAn HTTP 403 alone does not prove a bad token or missing repository permission.\nAn explicit rate_limit response with remaining zero indicates an exhausted API\nlimit. Wait until the response's reset time, reduce repeated polling or requests,\nand check the next safe response. Do not rotate credentials as the sole fix for\na proven rate limit. Without that evidence, obtain the safe error code and\nrepository access information rather than inventing an account problem.\nPrivate repositories may require configured authorized access; credentials\nmust be entered privately, never pasted into the ticket.\n",
+          "score": -18.48591224595015,
+          "label": "F1"
+        },
+        {
+          "id": "336b414b60b1cbcb37e91c49",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 46,
+          "end": 56,
+          "title": "Local availability and connection",
+          "text": "## Local availability and connection\n\nLocal uses a loopback OpenAI-compatible endpoint and a configured model alias.\nConnection refused means no connection was accepted at that endpoint. Check\nwhether the configured server is running, whether its port and model alias\nmatch the application configuration, and whether startup has completed.\nChanging a DeepSeek credential does not start a Local server. The application\ncan start only its explicitly configured local runtime, and does not kill an\nunknown service occupying its port. A borrowed local server is not owned or\nstopped by Support. Long model loading is not by itself a failure.\nAsk for the selected provider and a safe error code if those facts are missing.",
+          "score": -14.253909977219434,
+          "label": "F2"
+        },
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -11.860785438669046,
+          "label": "F3"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -11.76291560397956,
+          "label": "F4"
+        },
+        {
+          "id": "8e82b2091a140c536f7f32c5",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 8,
+          "end": 31,
+          "title": "Credential loading and independent processes",
+          "text": "## Credential loading and independent processes\n\nDeepSeek credentials are read from the DEEPSEEK_API_KEY process environment;\nLocal credentials are read from LOCAL_LLM_API_KEY. assistant/config.py first\nloads the module .env with load_dotenv(override=False), unless environment-file\nloading is explicitly disabled. An already defined process environment variable\ntakes precedence over .env, including an already defined empty value.\nlocal-data/settings.json contains nonsecret URL/model/runtime and generation\nparameters, not API keys. Adding a key there does not configure a credential.\nInspect credentials privately in the actual .env/process environment source;\nnever share their values, screenshots or full configuration in support.\n\nMain and Support are independent processes. Each loads Settings once when its\napplication starts. First identify where the failing request was made: the main\nchat/review or Support Desk. Restarting Main can reuse an existing Support\nprocess and does not refresh that Support process's loaded environment.\nIf reload is needed, restart only the affected identified process, using its\nnormal launch procedure; do not stop an unknown listener or other services.\nAlso check the launch environment precedence: editing .env cannot override an\nalready defined variable inherited by the new process. A replacement or restart\nalone is not evidence that the intended credential was loaded or accepted.\nConfirm the selected provider and the next safe error/success response. Do not\ninfer relative frequency or a proven configuration cause from an error alone.\n",
+          "score": -6.628622641635653,
+          "label": "F5"
+        },
+        {
+          "id": "022da4895722e1270cdd5f89",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 63,
+          "end": 82,
+          "title": "Provider parameters",
+          "text": "## Provider parameters\n\nNonsecret URL/model/runtime and generation parameters are read from private\nlocal-data/settings.json; API keys are not read from that JSON. Credentials are\nloaded by assistant/config.py from the process environment, after optional module\n.env loading with load_dotenv(override=False). Existing process variables take\nprecedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.\nSettings are loaded once at the start of each independent Main or Support process.\nRestarting Main reuses an already healthy Support and does not reload Support's\nenvironment. Identify the process that issued the failing request before a reload;\nrestart only that affected process. A restart or key replacement is not proof that\nthe intended credential was loaded or accepted; check the next safe response.\n\nApp defaults: temperature 0.6,\nmax output 8192 tokens, evidence context budget 18000 characters. Model server context\nwindow is separate from the per-question RAG evidence budget. Local working settings can\nprovide a larger actual context window without inserting every document into every request.\nDeepSeek uses explicit thinking mode; its temperature does not control the thinking path.\nBoth providers stream final-answer content; private reasoning does not appear in the UI.\n",
+          "score": -4.925705587680191,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? github github 403 rate_limit   ['Раньше то же подключение к GitHub работало.', 'Повторный запрос сообщил превышение лимита.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "status": "PASS",
+        "diagnosis": "Explicit reported GitHub rate_limit and exhausted API limit, without bad-token diagnosis.",
+        "claims": [
+          {
+            "claim": "403 alone not proof invalid token or repository rights; explicit rate_limit reflects reported exhaustion.",
+            "support": [
+              "T explicitrate_limit/exhaustion",
+              "F1 GitHub API errors"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Prior successful connection does not prove today's credential acceptance; recorded failure is limit.",
+            "support": [
+              "T attempted_steps",
+              "F1"
+            ],
+            "judgment": "SUPPORTED_UNCERTAINTY"
+          },
+          {
+            "claim": "Reduce repeated requests/polling and wait for safe reset information; exact reset unknown.",
+            "support": [
+              "F1",
+              "T no reset supplied"
+            ],
+            "judgment": "SUPPORTED_NO_INVENTED_TIME"
+          },
+          {
+            "claim": "Bounded next retry then safe status/error/remaining/reset; do not rotate token as sole fix.",
+            "support": [
+              "F1"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "If a later403 is different, get safe error and repository access information; private repo may need auth.",
+            "support": [
+              "F1"
+            ],
+            "judgment": "SUPPORTED_CONDITIONAL"
+          },
+          {
+            "claim": "Local/DeepSeek provider configuration separate from GitHub; do not paste secrets.",
+            "support": [
+              "F3"
+            ],
+            "judgment": "SUPPORTED"
+          }
+        ],
+        "limitations": []
+      },
+      "immutable_private_input_sha256": "e5efd3b069239a9cdad8dfcf0219b0df2ff86d25459f4d0f446ed9c4a6a13005"
+    },
+    {
+      "case": "rate403",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? В учебном сценарии GitHub вернул HTTP 403 с явным error_code rate_limit. Раньше то же подключение работало. Текущее сообщение сообщает, что лимит API исчерпан. Время сброса в тикете не указано.",
+      "diagnostics": {
+        "component": "github",
+        "status_code": 403,
+        "error_code": "rate_limit",
+        "connection_state": "",
+        "observed_at": "",
+        "attempted_steps": [
+          "Раньше то же подключение к GitHub работало.",
+          "Повторный запрос сообщил превышение лимита."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "deepseek",
+      "model_alias": "deepseek-flash",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 91.2,
+      "usage": {
+        "prompt_tokens": 2458,
+        "completion_tokens": 1815,
+        "total_tokens": 4273,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 912
+        },
+        "prompt_cache_hit_tokens": 256,
+        "prompt_cache_miss_tokens": 2202
+      },
+      "answer": "## Короткий ответ\n\nПо данным тикета **не доказано, что «не работает авторизация»**. В сценарии GitHub вернул HTTP 403 с явным `error_code: rate_limit`, и текущее сообщение говорит об исчерпании лимита API [T]. Согласно справке, один только HTTP 403 не доказывает ни плохой токен, ни отсутствие прав на репозиторий, а явный ответ `rate_limit` (при `remaining = 0`) указывает именно на исчерпанный лимит API [F1]. То есть наблюдаемая картина ближе к ограничению запросов, чем к отказу авторизации/прав.\n\n## Оговорка (важно для точности)\n\nВ тикете сказано, что сообщение сообщает об исчерпании лимита, но **значения `remaining` и время сброса не указаны** [T]. Справка связывает вывод об исчерпании с `remaining = 0`, а «ждать до времени сброса» — с наличием этого времени в ответе [F1]. Пока этих полей нет, вывод «лимит исчерпан» опирается на текст сообщения, а не на подтверждённые данные ответа, и остаётся наиболее вероятным объяснением, а не доказанным фактом.\n\n## Безопасные следующие шаги\n\n1. Посмотреть в самом ответе GitHub заголовки/поля безопасного характера: `remaining` и время сброса (reset). Это то, чего не хватает в тикете [T].\n2. Снизить повторные запросы и опрос (поллинг) и дождаться времени сброса, затем проверить следующий спокойный ответ [F1].\n3. **Не менять/не ротировать учётные данные как единственное «лечение»** подтверждённого rate limit — это прямо не рекомендуется [F1].\n4. Повторный запрос уже был сделан [T]; просто повторять его снова — не самостоятельное решение, и частые повторы могут поддерживать лимит.\n\n## Если окажется, что это не rate limit\n\nЕсли в следующем безопасном ответе явного `rate_limit` нет, нужно получить безопасный код ошибки и информацию о доступе к репозиторию, а не предполагать проблему с аккаунтом [F1]. Для приватных репозиториев может требоваться настроенный авторизованный доступ; учётные данные вводятся приватно и **никогда не вставляются в тикет** [F1].\n\nОтдельно: авторизация/ключи у Developer Assistant привязаны к выбранному провайдеру (Local или DeepSeek), и эти сущности не следует смешивать с доступом к GitHub [F3][F5]. Явная ошибка вида `invalid_key` относится к отклонению переданного ключа у соответствующего провайдера и не объясняет, какой источник его подставил [F4] — но в этом тикете такой код не фигурирует, фигурирует `rate_limit` [T].\n\n## Что уточнить (небольшой конкретный вопрос)\n\n- Какие значения `remaining` и времени сброса вернул последний ответ GitHub?\n- Это тот же самый ответ 403, что и раньше, или новый ответ с тем же кодом?\n\n## Когда эскалировать\n\nЕсли после этих проверок проблема сохраняется — эскалировать с безопасными метаданными (код ошибки, выбранный провайдер/компонент, время наблюдения) и перечнем предпринятых шагов, **без учётных данных** [F4]. Замечу: это учебный (синтетический) тикет, и ни я, ни какой-либо ассистент не может проверить ваш аккаунт или гарантировать диагноз по такому контексту; я также не могу открывать/закрывать тикеты или отправлять уведомления.",
+      "sources": [
+        {
+          "id": "2a1b701ec255d1a32a885fcd",
+          "path": "docs/support/reviews.md",
+          "hash": "39e42647b7c360757b40fb562374036cc779b778419abc23def2e0acaee956b3",
+          "start": 7,
+          "end": 17,
+          "title": "GitHub API errors",
+          "text": "## GitHub API errors\n\nAn HTTP 403 alone does not prove a bad token or missing repository permission.\nAn explicit rate_limit response with remaining zero indicates an exhausted API\nlimit. Wait until the response's reset time, reduce repeated polling or requests,\nand check the next safe response. Do not rotate credentials as the sole fix for\na proven rate limit. Without that evidence, obtain the safe error code and\nrepository access information rather than inventing an account problem.\nPrivate repositories may require configured authorized access; credentials\nmust be entered privately, never pasted into the ticket.\n",
+          "score": -18.48591224595015,
+          "label": "F1"
+        },
+        {
+          "id": "336b414b60b1cbcb37e91c49",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 46,
+          "end": 56,
+          "title": "Local availability and connection",
+          "text": "## Local availability and connection\n\nLocal uses a loopback OpenAI-compatible endpoint and a configured model alias.\nConnection refused means no connection was accepted at that endpoint. Check\nwhether the configured server is running, whether its port and model alias\nmatch the application configuration, and whether startup has completed.\nChanging a DeepSeek credential does not start a Local server. The application\ncan start only its explicitly configured local runtime, and does not kill an\nunknown service occupying its port. A borrowed local server is not owned or\nstopped by Support. Long model loading is not by itself a failure.\nAsk for the selected provider and a safe error code if those facts are missing.",
+          "score": -14.253909977219434,
+          "label": "F2"
+        },
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -11.860785438669046,
+          "label": "F3"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -11.76291560397956,
+          "label": "F4"
+        },
+        {
+          "id": "8e82b2091a140c536f7f32c5",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 8,
+          "end": 31,
+          "title": "Credential loading and independent processes",
+          "text": "## Credential loading and independent processes\n\nDeepSeek credentials are read from the DEEPSEEK_API_KEY process environment;\nLocal credentials are read from LOCAL_LLM_API_KEY. assistant/config.py first\nloads the module .env with load_dotenv(override=False), unless environment-file\nloading is explicitly disabled. An already defined process environment variable\ntakes precedence over .env, including an already defined empty value.\nlocal-data/settings.json contains nonsecret URL/model/runtime and generation\nparameters, not API keys. Adding a key there does not configure a credential.\nInspect credentials privately in the actual .env/process environment source;\nnever share their values, screenshots or full configuration in support.\n\nMain and Support are independent processes. Each loads Settings once when its\napplication starts. First identify where the failing request was made: the main\nchat/review or Support Desk. Restarting Main can reuse an existing Support\nprocess and does not refresh that Support process's loaded environment.\nIf reload is needed, restart only the affected identified process, using its\nnormal launch procedure; do not stop an unknown listener or other services.\nAlso check the launch environment precedence: editing .env cannot override an\nalready defined variable inherited by the new process. A replacement or restart\nalone is not evidence that the intended credential was loaded or accepted.\nConfirm the selected provider and the next safe error/success response. Do not\ninfer relative frequency or a proven configuration cause from an error alone.\n",
+          "score": -6.628622641635653,
+          "label": "F5"
+        },
+        {
+          "id": "022da4895722e1270cdd5f89",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 63,
+          "end": 82,
+          "title": "Provider parameters",
+          "text": "## Provider parameters\n\nNonsecret URL/model/runtime and generation parameters are read from private\nlocal-data/settings.json; API keys are not read from that JSON. Credentials are\nloaded by assistant/config.py from the process environment, after optional module\n.env loading with load_dotenv(override=False). Existing process variables take\nprecedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.\nSettings are loaded once at the start of each independent Main or Support process.\nRestarting Main reuses an already healthy Support and does not reload Support's\nenvironment. Identify the process that issued the failing request before a reload;\nrestart only that affected process. A restart or key replacement is not proof that\nthe intended credential was loaded or accepted; check the next safe response.\n\nApp defaults: temperature 0.6,\nmax output 8192 tokens, evidence context budget 18000 characters. Model server context\nwindow is separate from the per-question RAG evidence budget. Local working settings can\nprovide a larger actual context window without inserting every document into every request.\nDeepSeek uses explicit thinking mode; its temperature does not control the thinking path.\nBoth providers stream final-answer content; private reasoning does not appear in the UI.\n",
+          "score": -4.925705587680191,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? github github 403 rate_limit   ['Раньше то же подключение к GitHub работало.', 'Повторный запрос сообщил превышение лимита.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "status": "PASS",
+        "diagnosis": "Correctly associates observed GitHub rate_limit with limiting requests, not invalid token.",
+        "claims": [
+          {
+            "claim": "Ticket records403/rate_limit/exhausted message; bare403 not badtoken/rights proof.",
+            "support": [
+              "T",
+              "F1"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "remaining/reset missing; header confirmation unavailable. Underlying exhaustion is user-reported.",
+            "support": [
+              "T absentfields",
+              "F1 requires remainingzero"
+            ],
+            "judgment": "SUPPORTED_QUALIFICATION"
+          },
+          {
+            "claim": "Get remaining/reset, reduce requests and wait, no invented reset time or credential rotation.",
+            "support": [
+              "F1"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Repeated same request already tried; repetition alone not solution.",
+            "support": [
+              "T attempted_steps",
+              "F1 repeated polling guidance"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "If subsequent response lacksrate_limit, clarify safe code/access instead of account assumption.",
+            "support": [
+              "F1"
+            ],
+            "judgment": "SUPPORTED_CONDITIONAL"
+          },
+          {
+            "claim": "Provider credentials are separate; this ticket hasrate_limit not invalid_key.",
+            "support": [
+              "T",
+              "F3",
+              "F4",
+              "F5"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Escalate safe metadata without credential; no account/host/notification capability claimed.",
+            "support": [
+              "F4 general safe escalation and demo limits"
+            ],
+            "judgment": "SUPPORTED_GENERAL_GUIDANCE"
+          }
+        ],
+        "limitations": [
+          "Overcautious distinction between explicit reported exhausted-limit message and missing remaining header: expected ground truth remains rate_limit. It does not invent a different cause or advise a wrong fix.",
+          "'Наиболее вероятным объяснением' here is an inference from explicit diagnostic rate_limit/exhaustion, unlike prior unsupported empirical 'самая частая причина' for credential-source failure. No population frequency asserted; keep reported versus independently confirmed facts distinct."
+        ]
+      },
+      "immutable_private_input_sha256": "701d420f733d39c8f12fa2a16e4c5286446ccde8d57f86b7ea3b63ae4720ed33"
+    },
+    {
+      "case": "refused",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? Учебный тикет: Local сообщает connection_refused. Веб-страница приложения открывается, но успешного соединения с локальной моделью в диагностике не зафиксировано.",
+      "diagnostics": {
+        "component": "local",
+        "status_code": null,
+        "error_code": "",
+        "connection_state": "connection_refused",
+        "observed_at": "",
+        "attempted_steps": [
+          "Веб-страница приложения открывается.",
+          "Успешного соединения с Local в диагностике нет."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "local",
+      "model_alias": "local-model",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 151.09,
+      "usage": {},
+      "answer": "Судя по тикету, сейчас это **не подтверждённая ошибка авторизации**, а скорее **неустановленное соединение с Local**: в диагностике указано `connection_state = connection_refused`, при этом веб-страница открывается, но успешного соединения с локальной моделью нет [T].\n\n`connection_refused` означает, что соединение не было принято на нужном endpoint [F3]. Поэтому сначала стоит проверять доступность локального сервера, а не менять ключи.\n\nЧто проверить безопасно:\n\n1. **Выбранный provider**\n   - Local и DeepSeek — разные провайдеры, и выбранный провайдер не переключается молча на другой [F1].\n   - Нужно понять, какой именно provider был выбран в момент ошибки [F3].\n\n2. **Какой процесс выполнял запрос**\n   - Main и Support — независимые процессы; каждый загружает настройки при своём старте [F5].\n   - Если запрос был в основном чате/review и в Support Desk, это разные процессы. Перезапускать нужно только тот процесс, который выполнял неудачный запрос [F5].\n   - Перезапуск Main может переиспользовать уже запущенный Support и не обновить его окружение [F5].\n\n3. **Состояние Local-сервера**\n   - Проверить, запущен ли сконфигурированный локальный сервер [F3].\n   - Проверить, совпадают ли порт и model alias с конфигурацией приложения [F3].\n   - Проверить, завершена ли запуск/инициализация сервера; долгая загрузка модели сама по себе не является ошибкой [F3].\n   - URL/model/runtime параметры берутся из приватного `local-data/settings.json` [F4].\n\n4. **Ключ только если это действительно проблема авторизации**\n   - Для Local используется `LOCAL_LLM_API_KEY` из окружения процесса / `.env`, а не из `local-data/settings.json` [F5].\n   - Существующая переменная окружения имеет приоритет над `.env`, включая уже установленное пустое значение [F5].\n   - Не нужно вставлять ключ, токен или пароль в чат или тикет [F1].\n\nОстается неясность: в тикете нет `error_code`, `status_code` и времени наблюдения [T]. Поэтому нельзя утверждать, что причина именно в ключе, порту, model alias или процессе.\n\nЧтобы сузить причину, уточните:\n\n- какой provider выбран в момент ошибки: Local или DeepSeek;\n- какой процесс выполнял запрос: Main chat/review или Support Desk;\n- запущен ли Local-сервер и совпадают ли его порт и model alias с настройками приложения;\n- есть ли безопасный error code после попытки, без самого ключа.\n\nЕсли после этих проверок соединение по-прежнему не устанавливается, можно эскалировать; эскалация сохраняет состояние тикета, но не решает его, а отправка сводки в Telegram — отдельное явное действие [F6].",
+      "sources": [
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -12.565104626028651,
+          "label": "F1"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -6.4239345063824675,
+          "label": "F2"
+        },
+        {
+          "id": "336b414b60b1cbcb37e91c49",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 46,
+          "end": 56,
+          "title": "Local availability and connection",
+          "text": "## Local availability and connection\n\nLocal uses a loopback OpenAI-compatible endpoint and a configured model alias.\nConnection refused means no connection was accepted at that endpoint. Check\nwhether the configured server is running, whether its port and model alias\nmatch the application configuration, and whether startup has completed.\nChanging a DeepSeek credential does not start a Local server. The application\ncan start only its explicitly configured local runtime, and does not kill an\nunknown service occupying its port. A borrowed local server is not owned or\nstopped by Support. Long model loading is not by itself a failure.\nAsk for the selected provider and a safe error code if those facts are missing.",
+          "score": -4.465892405155301,
+          "label": "F3"
+        },
+        {
+          "id": "022da4895722e1270cdd5f89",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 63,
+          "end": 82,
+          "title": "Provider parameters",
+          "text": "## Provider parameters\n\nNonsecret URL/model/runtime and generation parameters are read from private\nlocal-data/settings.json; API keys are not read from that JSON. Credentials are\nloaded by assistant/config.py from the process environment, after optional module\n.env loading with load_dotenv(override=False). Existing process variables take\nprecedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.\nSettings are loaded once at the start of each independent Main or Support process.\nRestarting Main reuses an already healthy Support and does not reload Support's\nenvironment. Identify the process that issued the failing request before a reload;\nrestart only that affected process. A restart or key replacement is not proof that\nthe intended credential was loaded or accepted; check the next safe response.\n\nApp defaults: temperature 0.6,\nmax output 8192 tokens, evidence context budget 18000 characters. Model server context\nwindow is separate from the per-question RAG evidence budget. Local working settings can\nprovide a larger actual context window without inserting every document into every request.\nDeepSeek uses explicit thinking mode; its temperature does not control the thinking path.\nBoth providers stream final-answer content; private reasoning does not appear in the UI.\n",
+          "score": -3.3310594054323794,
+          "label": "F4"
+        },
+        {
+          "id": "8e82b2091a140c536f7f32c5",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 8,
+          "end": 31,
+          "title": "Credential loading and independent processes",
+          "text": "## Credential loading and independent processes\n\nDeepSeek credentials are read from the DEEPSEEK_API_KEY process environment;\nLocal credentials are read from LOCAL_LLM_API_KEY. assistant/config.py first\nloads the module .env with load_dotenv(override=False), unless environment-file\nloading is explicitly disabled. An already defined process environment variable\ntakes precedence over .env, including an already defined empty value.\nlocal-data/settings.json contains nonsecret URL/model/runtime and generation\nparameters, not API keys. Adding a key there does not configure a credential.\nInspect credentials privately in the actual .env/process environment source;\nnever share their values, screenshots or full configuration in support.\n\nMain and Support are independent processes. Each loads Settings once when its\napplication starts. First identify where the failing request was made: the main\nchat/review or Support Desk. Restarting Main can reuse an existing Support\nprocess and does not refresh that Support process's loaded environment.\nIf reload is needed, restart only the affected identified process, using its\nnormal launch procedure; do not stop an unknown listener or other services.\nAlso check the launch environment precedence: editing .env cannot override an\nalready defined variable inherited by the new process. A replacement or restart\nalone is not evidence that the intended credential was loaded or accepted.\nConfirm the selected provider and the next safe error/success response. Do not\ninfer relative frequency or a proven configuration cause from an error alone.\n",
+          "score": -2.885917548994164,
+          "label": "F5"
+        },
+        {
+          "id": "eabf8e4e3e454d7686265b35",
+          "path": "docs/support/tickets.md",
+          "hash": "14d548f8316ab3f1370121cb7ea7bdb6ce0ae5b0cea2da6ccf951490ca280495",
+          "start": 26,
+          "end": 34,
+          "title": "Telegram and escalation",
+          "text": "## Telegram and escalation\n\nEscalate saves the ticket state without resolving it. Sending a summary to the\nconfigured owner in Telegram is a separate explicit action. Only the saved\nowner can receive it; neither the model nor a ticket chooses a recipient.\nA current completed answer may be sent explicitly. Delivery is sent only after\nTelegram acknowledges a message ID. Failed or uncertain delivery is displayed\nhonestly; an uncertain action is not automatically resent, avoiding duplicates.\nNo key, contact information or full log should be included in a summary.",
+          "score": -1.6431566331399212,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? local local None  connection_refused  ['Веб-страница приложения открывается.', 'Успешного соединения с Local в диагностике нет.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "status": "PASS",
+        "diagnosis": "Connection/availability failure before evidence of authentication rejection.",
+        "claims": [
+          {
+            "claim": "connection_refused means endpoint accepted no connection; UI opening does not establish model connection.",
+            "support": [
+              "T connection_state/priorsteps",
+              "F3 Local availability"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "First check configured server started/port/modelalias/startup, not rotate keys.",
+            "support": [
+              "F3"
+            ],
+            "judgment": "SUPPORTED_RELEVANT_ACTIONS"
+          },
+          {
+            "claim": "Selected Local/DeepSeek does not silently fallback.",
+            "support": [
+              "F1"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Main/Support independent, identify request process; Main restart won't reload healthySupport.",
+            "support": [
+              "F5"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "URL/model/runtime settingsJSON versus Local credential env/.env/LOCAL_LLM_API_KEY; env precedence.",
+            "support": [
+              "F4",
+              "F5"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "No recorded status/error/time; exact server/config cause unknown, ask safe details.",
+            "support": [
+              "T",
+              "F3"
+            ],
+            "judgment": "SUPPORTED_UNCERTAINTY"
+          },
+          {
+            "claim": "Escalation state remains unresolved and Telegram separate explicit operation.",
+            "support": [
+              "F6"
+            ],
+            "judgment": "SUPPORTED"
+          }
+        ],
+        "limitations": [
+          "It repeats provider confirmation although componentlocal is already recorded. This is a redundant consistency check, not contradictory diagnosis.",
+          "Conditional credential guidance is tangential while current failure is connectionrefused; it does not claim credential error caused refused or ask replacement as remedy."
+        ]
+      },
+      "immutable_private_input_sha256": "1945f5635daf5cac2c2641c9e2eb5c3ed3aae0b1e287cdd47a69b6bc1ffb52f1"
+    },
+    {
+      "case": "refused",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? Учебный тикет: Local сообщает connection_refused. Веб-страница приложения открывается, но успешного соединения с локальной моделью в диагностике не зафиксировано.",
+      "diagnostics": {
+        "component": "local",
+        "status_code": null,
+        "error_code": "",
+        "connection_state": "connection_refused",
+        "observed_at": "",
+        "attempted_steps": [
+          "Веб-страница приложения открывается.",
+          "Успешного соединения с Local в диагностике нет."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "deepseek",
+      "model_alias": "deepseek-flash",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 160.77,
+      "usage": {
+        "prompt_tokens": 2412,
+        "completion_tokens": 1607,
+        "total_tokens": 4019,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 454
+        },
+        "prompt_cache_hit_tokens": 256,
+        "prompt_cache_miss_tokens": 2156
+      },
+      "answer": "## Коротко\n\nВ тикете нет признаков того, что проблема именно в авторизации. Диагностика показывает `connection_refused` для компонента `local`: это означает, что на указанной конечной точке соединение не было принято [T], [F3]. Это проверка доступности/подключения, а не отказ в приёме учётных данных. В записи тикета код ошибки пустой (`error_code: \"\"`), `status_code` не заполнен, время наблюдения не указано [T] — то есть зафиксированного кода аутентификации (например, `invalid_key`) у нас нет.\n\nВажно и то, что «веб-страница приложения открывается» не говорит о работе локальной модели: в диагностике успешного соединения с Local нет [T] — это уже отмечено как выполненная проверка, повторять её как единственное действие смысла не имеет.\n\n## Что за этим может стоять\n\n- **Возможность:** настроенный локальный сервер не запущен, либо его порт / алиас модели не совпадают с конфигурацией приложения, либо запуск ещё не завершился. Это прямо перечислено как то, что нужно проверять при `connection_refused` [F3]. Долгая загрузка модели сама по себе не считается сбоем [F3].\n- **Возможность, но не доказано:** проблема с учётными данными. Аутентификация привязана к выбранному провайдеру, и Local использует свой ключ (`LOCAL_LLM_API_KEY`), а DeepSeek — свой (`DEEPSEEK_API_KEY`) [F1], [F4], [F5]. Провайдер не переключается на другого «молча» [F1], а смена ключа DeepSeek не запускает локальный сервер [F3]. Поэтому говорить «не работает авторизация» до подтверждения выбранного провайдера и наличия безопасного кода ошибки — преждевременно.\n\nПриложение запускает только явно настроенный локальный рантайм и не останавливает неизвестный процесс, занявший порт; заимствованный локальный сервер Support не принадлежит и не останавливается [F3].\n\n## Безопасные следующие проверки\n\n1. Подтвердить, какой провайдер выбран — Local или DeepSeek (в диагностике он не указан) [F1], [F5].\n2. Если и по выбранному провайдеру появляется безопасный код ошибки — зафиксировать его и время наблюдения; значения ключей, токенов и паролей в чат или тикет не вставлять [F1], [F2].\n3. Для Local: проверить, запущен ли настроенный сервер, совпадают ли его порт и алиас модели с конфигурацией приложения, завершился ли запуск [F3].\n4. Если вы уже меняли ключ или перезапускали процесс: не повторять замену как единственное действие. Сначала определить, какой процесс обработал неудачный запрос (Main или Support) и какой источник загрузки реально сработал — `.env` или уже определённая переменная окружения процесса (она имеет приоритет, включая пустое значение). Проверять это нужно приватно [F2], [F4], [F5]. Перезапуск или замена ключа сами по себе не доказывают, что нужное значение загружено и принято [F4], [F5].\n\nNon-secret параметры (URL/модель/рантайм) читаются из `local-data/settings.json`; ключи там не хранятся, и добавление ключа в этот файл учётные данные не настраивает [F4], [F5].\n\n## Чего я сделать не могу\n\nЯ не имею доступа к вашей учётной записи или компьютеру, не выполняю команды, не проверяю реальные процессы и не могу гарантировать диагноз по синтетическому демо-контексту [F2]. Пожалуйста, не присылайте ключи, токены или пароли [F1]; при эскалации — только безопасные метаданные и перечень выполненных шагов, без учётных данных [F2]. Обратите внимание: эскалация сохраняет состояние тикета, но не закрывает его, а отправка сводки в Telegram — отдельное действие [F6].\n\n## Когда эскалировать\n\nЕсли после проверки выбранного провайдера, безопасного кода ошибки и параметров локального сервера/эффективного процесса проблема сохраняется — эскалируйте с безопасными метаданными и описанием попыток, без учётных данных [F2].\n\nЧтобы дать более точный ответ, уточните, пожалуйста: **(1)** какой провайдер выбран, **(2)** в каком месте сделан неудачный запрос — основной чат/ревью или Support Desk, и **(3)** есть ли безопасный код ошибки.",
+      "sources": [
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -12.565104626028651,
+          "label": "F1"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -6.4239345063824675,
+          "label": "F2"
+        },
+        {
+          "id": "336b414b60b1cbcb37e91c49",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 46,
+          "end": 56,
+          "title": "Local availability and connection",
+          "text": "## Local availability and connection\n\nLocal uses a loopback OpenAI-compatible endpoint and a configured model alias.\nConnection refused means no connection was accepted at that endpoint. Check\nwhether the configured server is running, whether its port and model alias\nmatch the application configuration, and whether startup has completed.\nChanging a DeepSeek credential does not start a Local server. The application\ncan start only its explicitly configured local runtime, and does not kill an\nunknown service occupying its port. A borrowed local server is not owned or\nstopped by Support. Long model loading is not by itself a failure.\nAsk for the selected provider and a safe error code if those facts are missing.",
+          "score": -4.465892405155301,
+          "label": "F3"
+        },
+        {
+          "id": "022da4895722e1270cdd5f89",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 63,
+          "end": 82,
+          "title": "Provider parameters",
+          "text": "## Provider parameters\n\nNonsecret URL/model/runtime and generation parameters are read from private\nlocal-data/settings.json; API keys are not read from that JSON. Credentials are\nloaded by assistant/config.py from the process environment, after optional module\n.env loading with load_dotenv(override=False). Existing process variables take\nprecedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.\nSettings are loaded once at the start of each independent Main or Support process.\nRestarting Main reuses an already healthy Support and does not reload Support's\nenvironment. Identify the process that issued the failing request before a reload;\nrestart only that affected process. A restart or key replacement is not proof that\nthe intended credential was loaded or accepted; check the next safe response.\n\nApp defaults: temperature 0.6,\nmax output 8192 tokens, evidence context budget 18000 characters. Model server context\nwindow is separate from the per-question RAG evidence budget. Local working settings can\nprovide a larger actual context window without inserting every document into every request.\nDeepSeek uses explicit thinking mode; its temperature does not control the thinking path.\nBoth providers stream final-answer content; private reasoning does not appear in the UI.\n",
+          "score": -3.3310594054323794,
+          "label": "F4"
+        },
+        {
+          "id": "8e82b2091a140c536f7f32c5",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 8,
+          "end": 31,
+          "title": "Credential loading and independent processes",
+          "text": "## Credential loading and independent processes\n\nDeepSeek credentials are read from the DEEPSEEK_API_KEY process environment;\nLocal credentials are read from LOCAL_LLM_API_KEY. assistant/config.py first\nloads the module .env with load_dotenv(override=False), unless environment-file\nloading is explicitly disabled. An already defined process environment variable\ntakes precedence over .env, including an already defined empty value.\nlocal-data/settings.json contains nonsecret URL/model/runtime and generation\nparameters, not API keys. Adding a key there does not configure a credential.\nInspect credentials privately in the actual .env/process environment source;\nnever share their values, screenshots or full configuration in support.\n\nMain and Support are independent processes. Each loads Settings once when its\napplication starts. First identify where the failing request was made: the main\nchat/review or Support Desk. Restarting Main can reuse an existing Support\nprocess and does not refresh that Support process's loaded environment.\nIf reload is needed, restart only the affected identified process, using its\nnormal launch procedure; do not stop an unknown listener or other services.\nAlso check the launch environment precedence: editing .env cannot override an\nalready defined variable inherited by the new process. A replacement or restart\nalone is not evidence that the intended credential was loaded or accepted.\nConfirm the selected provider and the next safe error/success response. Do not\ninfer relative frequency or a proven configuration cause from an error alone.\n",
+          "score": -2.885917548994164,
+          "label": "F5"
+        },
+        {
+          "id": "eabf8e4e3e454d7686265b35",
+          "path": "docs/support/tickets.md",
+          "hash": "14d548f8316ab3f1370121cb7ea7bdb6ce0ae5b0cea2da6ccf951490ca280495",
+          "start": 26,
+          "end": 34,
+          "title": "Telegram and escalation",
+          "text": "## Telegram and escalation\n\nEscalate saves the ticket state without resolving it. Sending a summary to the\nconfigured owner in Telegram is a separate explicit action. Only the saved\nowner can receive it; neither the model nor a ticket chooses a recipient.\nA current completed answer may be sent explicitly. Delivery is sent only after\nTelegram acknowledges a message ID. Failed or uncertain delivery is displayed\nhonestly; an uncertain action is not automatically resent, avoiding duplicates.\nNo key, contact information or full log should be included in a summary.",
+          "score": -1.6431566331399212,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? local local None  connection_refused  ['Веб-страница приложения открывается.', 'Успешного соединения с Local в диагностике нет.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "status": "PASS",
+        "diagnosis": "Primary conclusion correctly treats Local connectionrefused as endpoint availability rather than credential rejection.",
+        "claims": [
+          {
+            "claim": "Local endpoint refused connection; no explicit authcode; UI success not model availability and already tried.",
+            "support": [
+              "T",
+              "F3"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Server not running/port/config/startup hypotheses, no exact root cause asserted.",
+            "support": [
+              "F3"
+            ],
+            "judgment": "SUPPORTED_AS_CHECKS"
+          },
+          {
+            "claim": "Runtime starts only configured service and preserves unknown/borrowed server.",
+            "support": [
+              "F3"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Local and DeepSeek have separate env credentials, no fallback and changingDeepSeekkey won'tstartLocal.",
+            "support": [
+              "F1",
+              "F3",
+              "F4",
+              "F5"
+            ],
+            "judgment": "SUPPORTED_GENERAL_FACTS"
+          },
+          {
+            "claim": "Only if configuration already changed, identify affected process/source/precedence privately; no reloadproof.",
+            "support": [
+              "F2",
+              "F4",
+              "F5"
+            ],
+            "judgment": "SUPPORTED_CONDITIONAL"
+          },
+          {
+            "claim": "Nonsecret settingsJSON not API keys.",
+            "support": [
+              "F4",
+              "F5"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Safe code/time/endpoint/startup clarifications, no secret/account/command claims.",
+            "support": [
+              "T",
+              "F1",
+              "F2",
+              "F3"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Escalation unresolved and Telegram separate explicit action.",
+            "support": [
+              "F6"
+            ],
+            "judgment": "SUPPORTED"
+          }
+        ],
+        "limitations": [
+          "Says selected provider is not indicated in diagnostics while diagnostics explicitly identify componentlocal. There is no separate selected-provider field for the failing request; checking it is redundant. Do not teach this as missing component.",
+          "Credentials appear as an unproven secondary possibility. A credential error alone cannot cause connectionrefused; primary diagnosis and actual next checks still correctly prioritize endpoint availability. Artifact explanation should not present authentication as demonstrated cause."
+        ]
+      },
+      "immutable_private_input_sha256": "ec9960777dae8320a5c599f879c630563e7bde75c8af38d9b5f5882929681d68"
+    },
+    {
+      "case": "unknown403",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? Учебный тикет: GitHub возвращает HTTP 403. Подробный текст ошибки и error_code не сохранены. После повтора виден тот же статус.",
+      "diagnostics": {
+        "component": "github",
+        "status_code": 403,
+        "error_code": "",
+        "connection_state": "",
+        "observed_at": "",
+        "attempted_steps": [
+          "Повторный запрос показал только HTTP 403."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "local",
+      "model_alias": "local-model",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 244.08,
+      "usage": {},
+      "answer": "Из сохранённых данных точную причину назвать нельзя: известно только, что GitHub возвращает HTTP 403, а подробный текст ошибки и `error_code` не сохранены; повторный запрос дал тот же статус [T].\n\nHTTP 403 сам по себе не доказывает плохой токен или отсутствие прав на репозиторий [F2]. Возможные, но пока не подтверждённые варианты:\n\n- исчерпан лимит API GitHub, если в ответе явно есть `rate_limit` с `remaining=0` [F2];\n- для приватного репозитория не настроен нужный авторизованный доступ [F2];\n- учётные данные не приняты GitHub, но это тоже требует явной ошибки/кода, а не только статуса 403 [F2].\n\nБезопасные следующие шаги:\n\n1. Получите безопасные детали ошибки GitHub: `error_code`/сообщение, а также поля `rate_limit.remaining` и `rate_limit.reset`, если они есть. Не присылайте API key, token или пароль [F1][F2].\n2. Если есть явный `rate_limit` с `remaining=0`, дождитесь времени `reset`, уменьшите повторные запросы и проверьте следующий безопасный ответ. Не меняйте учётные данные как единственный шаг для подтверждённого rate limit [F2].\n3. Если используется приватный репозиторий, проверьте настроенный авторизованный доступ. Учётные данные вводите приватно, не вставляйте их в чат или тикет [F1][F2].\n4. Если после получения безопасного кода ошибки и данных о доступе к репозиторию причина так и не станет ясна, передайте в поддержку эти безопасные метаданные и уже сделанные шаги, но без секретов [F2][F3].\n\nСейчас неизвестно, является ли 403 следствием лимита, прав доступа или проблемы с учётными данными. Для продолжения нужен только безопасный `error_code`/текст ошибки GitHub и, при наличии, `rate_limit.remaining`/`reset`.",
+      "sources": [
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -11.860785438669046,
+          "label": "F1"
+        },
+        {
+          "id": "2a1b701ec255d1a32a885fcd",
+          "path": "docs/support/reviews.md",
+          "hash": "39e42647b7c360757b40fb562374036cc779b778419abc23def2e0acaee956b3",
+          "start": 7,
+          "end": 17,
+          "title": "GitHub API errors",
+          "text": "## GitHub API errors\n\nAn HTTP 403 alone does not prove a bad token or missing repository permission.\nAn explicit rate_limit response with remaining zero indicates an exhausted API\nlimit. Wait until the response's reset time, reduce repeated polling or requests,\nand check the next safe response. Do not rotate credentials as the sole fix for\na proven rate limit. Without that evidence, obtain the safe error code and\nrepository access information rather than inventing an account problem.\nPrivate repositories may require configured authorized access; credentials\nmust be entered privately, never pasted into the ticket.\n",
+          "score": -7.749424227148595,
+          "label": "F2"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -6.4239345063824675,
+          "label": "F3"
+        },
+        {
+          "id": "b38b5d85087f70d03386ef93",
+          "path": "docs/api.md",
+          "hash": "9e0ed4d5a19eeefcd5b20540f05f100e353de5c2430819e663da10eaba39d507",
+          "start": 1,
+          "end": 2,
+          "title": "HTTP API and data contract",
+          "text": "# HTTP API and data contract\n",
+          "score": -4.167853081144906,
+          "label": "F4"
+        },
+        {
+          "id": "997045925b32c4b54ff66166",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 95,
+          "end": 125,
+          "title": "PR review architecture (D32)",
+          "text": "## PR review architecture (D32)\n\n`github_review.GitHub` is a fixed HTTPS GitHub REST adapter. It reads PR metadata,\npaginates files and fetches exact base/head source content. Regular blob modes are\nchecked in both snapshot trees before content access; symlinks, submodules, secret\npaths, binary and unsupported files do not become context. Hunk addition/deletion\ncounts must match PR file metadata. Repository/scope/SHA form an immutable cache key;\nmetadata is fetched afresh to detect a new head. The cache keeps at most eight entries.\n\n`ReviewCorpus` builds an independent in-memory SQLite FTS5 index from documentation\nand related source code snapshots. It never changes the persisted D31 docs index.\nChunks carry SHA, source kind, decoded-content hash and line coordinates. Each unit\nretrieves up to eight bounded snippets. The engine sends only its fixed diff and these\nsnippets to the explicitly selected Provider. No full chat history or golden expected\nanswers enter that prompt. Syntax-valid output still needs independent semantic review.\n\n`Reviews` creates ordinary project/chat-linked task records with mode=review. It uses\nService.jobs and Service.lock, so /help, scheduled jobs and model reviews serialize.\nCancellation cancels the active coroutine and checks persisted terminal state before\nsaving a late answer. Restart leaves interrupted runs failed. Notification delivery is\na separate outcome; analysis survives notification errors. Review imports use a stable\nrepository/PR/head/origin key, retain old heads and refresh stale status without duplicate\nchat turns or model calls. Telegram imports do not resend CI's own delivery.\n\n`review_cli` runs the same engine from the trusted base workflow. PR title/path/event\ndata never supplies executable code, dependencies or shell arguments. Same-repository\nPRs can publish one bot-owned head-labelled comment, Markdown job summary and JSON/MD\nartifact. Forks are skipped. Concurrency cancels the previous run, and a current-head\ncheck additionally prevents stale publication. CI notification intent/result persists\nin the marked comment; reruns preserve sent/failed/uncertain delivery state.\n",
+          "score": -3.252142223859874,
+          "label": "F5"
+        },
+        {
+          "id": "69071d5474afad72c0660fc8",
+          "path": "docs/support/reviews.md",
+          "hash": "39e42647b7c360757b40fb562374036cc779b778419abc23def2e0acaee956b3",
+          "start": 1,
+          "end": 6,
+          "title": "GitHub review and limits",
+          "text": "# GitHub review and limits\n\nPR review uses a connected repository, a specific PR head and an explicitly\nselected AI provider. Sync imports existing CI evidence; it does not necessarily\nmake a new model request. Execution completed is different from quality accepted.\n",
+          "score": -3.112570975293801,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? github github 403    ['Повторный запрос показал только HTTP 403.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "status": "PASS",
+        "diagnosis": "No categorical cause; asks safe code/message/limit/access details.",
+        "claims": [
+          {
+            "claim": "Only repeated403 known, detailedcode/text absent, cannotidentifycause.",
+            "support": [
+              "T"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Bare403 doesn'tprove invalidtoken or missingrepositorypermission.",
+            "support": [
+              "F2"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Limit, privateaccess and credentials remain conditional alternatives, no madeup errorcode.",
+            "support": [
+              "F2"
+            ],
+            "judgment": "SUPPORTED_UNCERTAINTY"
+          },
+          {
+            "claim": "Request safe code/message and remaining/reset if present, no key/token/password.",
+            "support": [
+              "F1",
+              "F2"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "If explicitrate_limit/remainingzero, wait/reduce requests and no rotationassolefix.",
+            "support": [
+              "F2"
+            ],
+            "judgment": "SUPPORTED_CONDITIONAL"
+          },
+          {
+            "claim": "Private repo mayrequire authorized access, keepcredentialsprivate.",
+            "support": [
+              "F2"
+            ],
+            "judgment": "SUPPORTED_CONDITIONAL"
+          },
+          {
+            "claim": "Escalate safe metadata/steps if stillunknown.",
+            "support": [
+              "F2",
+              "F3 general safe escalation"
+            ],
+            "judgment": "SUPPORTED"
+          }
+        ],
+        "limitations": [
+          "No actual remaining/reset values invented. rate_limit.remaining/reset names are illustrative safe diagnostic fields, not claimed supported endpoint schema.",
+          "Retrieved F4 is an API heading and F5/F6 background review docs; answer correctly does not use them as proof of a specific403 cause."
+        ]
+      },
+      "immutable_private_input_sha256": "a46dd3cc37c585e05b11bacd400facf7778d6bb603bbed64ac541042b39efce3"
+    },
+    {
+      "case": "unknown403",
+      "synthetic": true,
+      "description": "Почему не работает авторизация? Учебный тикет: GitHub возвращает HTTP 403. Подробный текст ошибки и error_code не сохранены. После повтора виден тот же статус.",
+      "diagnostics": {
+        "component": "github",
+        "status_code": 403,
+        "error_code": "",
+        "connection_state": "",
+        "observed_at": "",
+        "attempted_steps": [
+          "Повторный запрос показал только HTTP 403."
+        ]
+      },
+      "question": "Почему не работает авторизация?",
+      "provider": "deepseek",
+      "model_alias": "deepseek-flash",
+      "execution": "completed",
+      "runtime_quality": "NOT_ASSESSED",
+      "context_version": 2,
+      "parameters": {
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "context_chars": 18000,
+        "thinking": true
+      },
+      "elapsed_s": 154.89,
+      "usage": {
+        "prompt_tokens": 2178,
+        "completion_tokens": 1695,
+        "total_tokens": 3873,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 724
+        },
+        "prompt_cache_hit_tokens": 256,
+        "prompt_cache_miss_tokens": 1922
+      },
+      "answer": "## Коротко\n\nПо имеющимся данным **назвать причину нельзя**. В тикете [T] зафиксирован только HTTP 403, а подробный текст ошибки, `error_code`, `connection_state` и время наблюдения пусты. Повтор запроса дал тот же статус — это уже выполненный шаг, сам по себе он ничего не уточняет.\n\nКлючевое ограничение: **HTTP 403 сам по себе не доказывает ни неверный токен, ни отсутствие прав на репозиторий** [F2]. Поэтому «не работает авторизация» — пока не подтверждённый вывод, а лишь одна из возможных трактовок.\n\n## Что можно и чего нельзя предполагать\n\nВозможные (недоказанные) объяснения, которые различаются разными проверками:\n\n- **Исчерпанный лимит запросов** — но только если в ответе есть явный `rate_limit` с `remaining = 0` [F2]. В этом тикете такого признака нет.\n- **Недостаточный доступ к репозиторию / приватный репозиторий без настроенного авторизованного доступа** — доступность проверяется отдельно от кода ошибки [F2].\n- **Проблема с учётными данными** — не доказана; при этом авторизация привязана к конкретному провайдеру, провайдеры Local и DeepSeek выбираются явно и не подменяют друг друга молча [F1].\n\nНельзя утверждать «чаще всего это токен» или «точно проблема в правах»: таких данных здесь нет.\n\n## Безопасные следующие шаги\n\n1. Получить **безопасный код и краткий текст ответа** (без секретов) и зафиксировать время наблюдения [F2], [F3].\n2. Проверить, есть ли в ответе явное указание на `rate_limit` и `remaining`/время сброса. Если да — дождаться reset, снизить частоту повторных запросов, посмотреть следующий безопасный ответ; **ротация учётных данных как единственное решение при доказанном лимите не нужна** [F2].\n3. Отдельно уточнить **информацию о доступе к нужному репозиторию** (какой репозиторий, требуется ли авторизованный доступ — приватные репозитории могут его требовать) [F2].\n4. Убедиться, какой провайдер/источник учётных данных реально задействован [F1]; если ключ уже менялся или процесс перезапускался, проверить именно **затронутый процесс и фактический источник/порядок загрузки** приватно, а не повторять замену как единственное действие [F3].\n\n**Чего делать не следует:** вставлять API-ключ, токен или пароль в чат или тикет [F1]; менять/ротировать учётные данные «на всякий случай» без подтверждённой причины [F2].\n\n## Что нужно уточнить (небольшой запрос)\n\n- Полный безопасный текст/код ответа от GitHub и были ли в нём заголовки об ограничении запросов.\n- Какой учётный источник используется для этого обращения к GitHub (без самого значения) и менялось ли что-то недавно, какой процесс перезапускался [F3].\n- Время наблюдения и конкретный репозиторий/операция, на которой возникает 403.\n\n## Неопределённость и эскалация\n\nОстаётся неизвестным, был ли это лимит, доступ к репозиторию или проблема с учётными данными — до получения кода ошибки и информации о доступе различить это невозможно [F2]. Если после этих проверок проблема сохраняется, эскалируйте, приложив только безопасные метаданные и выполненные шаги, **без учётных данных** [F3].\n\nОтмечу также, что это синтетический демонстрационный тикет: у меня нет доступа к вашей учётной записи, репозиторию или процессам, и диагностику по такой контексту гарантировать нельзя [F3].",
+      "sources": [
+        {
+          "id": "f04948a1b9ae7afe4b0eb289",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 1,
+          "end": 7,
+          "title": "Providers and authentication",
+          "text": "# Providers and authentication\n\nDeveloper Assistant has two explicitly selected providers: Local and DeepSeek.\nThe selected provider never silently falls back to the other one.\nAuthentication, авторизация, ключ, key and credentials are provider-specific.\nDo not paste any API key, token or password into a chat or support ticket.\n",
+          "score": -11.860785438669046,
+          "label": "F1"
+        },
+        {
+          "id": "2a1b701ec255d1a32a885fcd",
+          "path": "docs/support/reviews.md",
+          "hash": "39e42647b7c360757b40fb562374036cc779b778419abc23def2e0acaee956b3",
+          "start": 7,
+          "end": 17,
+          "title": "GitHub API errors",
+          "text": "## GitHub API errors\n\nAn HTTP 403 alone does not prove a bad token or missing repository permission.\nAn explicit rate_limit response with remaining zero indicates an exhausted API\nlimit. Wait until the response's reset time, reduce repeated polling or requests,\nand check the next safe response. Do not rotate credentials as the sole fix for\na proven rate limit. Without that evidence, obtain the safe error code and\nrepository access information rather than inventing an account problem.\nPrivate repositories may require configured authorized access; credentials\nmust be entered privately, never pasted into the ticket.\n",
+          "score": -7.749424227148595,
+          "label": "F2"
+        },
+        {
+          "id": "1fddab2e8ce03b1b2cd0717e",
+          "path": "docs/support/providers.md",
+          "hash": "bb71e8e5ff869ce382aabfa1115fcb830689623a5a625dc23d0481a42541113f",
+          "start": 32,
+          "end": 45,
+          "title": "DeepSeek configuration and authentication",
+          "text": "## DeepSeek configuration and authentication\n\nDeepSeek uses its official HTTPS API. An explicit invalid_key authentication\nerror indicates that the supplied credential was not accepted by that provider.\nIt does not identify which credential source supplied it or prove why it was\nrejected. Refer to the documented credential loading and process lifetime above.\nIf a key was already replaced, check the affected process and its real loading\nsource/precedence privately before repeating replacement as the only action.\nAsk what was changed and which process was restarted when those facts are\nmissing. Retain the safe error code, selected provider and observation time.\nIf the issue remains unresolved after these checks, escalate with safe metadata\nand attempted steps, never the credential. No assistant can inspect your account\nor guarantee a diagnosis from synthetic demo context.\n",
+          "score": -6.4239345063824675,
+          "label": "F3"
+        },
+        {
+          "id": "b38b5d85087f70d03386ef93",
+          "path": "docs/api.md",
+          "hash": "9e0ed4d5a19eeefcd5b20540f05f100e353de5c2430819e663da10eaba39d507",
+          "start": 1,
+          "end": 2,
+          "title": "HTTP API and data contract",
+          "text": "# HTTP API and data contract\n",
+          "score": -4.167853081144906,
+          "label": "F4"
+        },
+        {
+          "id": "997045925b32c4b54ff66166",
+          "path": "docs/architecture.md",
+          "hash": "fa6e737fafa3c955aed876095cef02a6e5fe19a19b6a0e64688fa610f1a7667f",
+          "start": 95,
+          "end": 125,
+          "title": "PR review architecture (D32)",
+          "text": "## PR review architecture (D32)\n\n`github_review.GitHub` is a fixed HTTPS GitHub REST adapter. It reads PR metadata,\npaginates files and fetches exact base/head source content. Regular blob modes are\nchecked in both snapshot trees before content access; symlinks, submodules, secret\npaths, binary and unsupported files do not become context. Hunk addition/deletion\ncounts must match PR file metadata. Repository/scope/SHA form an immutable cache key;\nmetadata is fetched afresh to detect a new head. The cache keeps at most eight entries.\n\n`ReviewCorpus` builds an independent in-memory SQLite FTS5 index from documentation\nand related source code snapshots. It never changes the persisted D31 docs index.\nChunks carry SHA, source kind, decoded-content hash and line coordinates. Each unit\nretrieves up to eight bounded snippets. The engine sends only its fixed diff and these\nsnippets to the explicitly selected Provider. No full chat history or golden expected\nanswers enter that prompt. Syntax-valid output still needs independent semantic review.\n\n`Reviews` creates ordinary project/chat-linked task records with mode=review. It uses\nService.jobs and Service.lock, so /help, scheduled jobs and model reviews serialize.\nCancellation cancels the active coroutine and checks persisted terminal state before\nsaving a late answer. Restart leaves interrupted runs failed. Notification delivery is\na separate outcome; analysis survives notification errors. Review imports use a stable\nrepository/PR/head/origin key, retain old heads and refresh stale status without duplicate\nchat turns or model calls. Telegram imports do not resend CI's own delivery.\n\n`review_cli` runs the same engine from the trusted base workflow. PR title/path/event\ndata never supplies executable code, dependencies or shell arguments. Same-repository\nPRs can publish one bot-owned head-labelled comment, Markdown job summary and JSON/MD\nartifact. Forks are skipped. Concurrency cancels the previous run, and a current-head\ncheck additionally prevents stale publication. CI notification intent/result persists\nin the marked comment; reruns preserve sent/failed/uncertain delivery state.\n",
+          "score": -3.252142223859874,
+          "label": "F5"
+        },
+        {
+          "id": "69071d5474afad72c0660fc8",
+          "path": "docs/support/reviews.md",
+          "hash": "39e42647b7c360757b40fb562374036cc779b778419abc23def2e0acaee956b3",
+          "start": 1,
+          "end": 6,
+          "title": "GitHub review and limits",
+          "text": "# GitHub review and limits\n\nPR review uses a connected repository, a specific PR head and an explicitly\nselected AI provider. Sync imports existing CI evidence; it does not necessarily\nmake a new model request. Execution completed is different from quality accepted.\n",
+          "score": -3.112570975293801,
+          "label": "F6"
+        }
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "protocol": "MCP SDK",
+        "discovered_tools": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "calls": [
+          "get_user_context",
+          "get_ticket_context"
+        ],
+        "context_version": 2,
+        "synthetic": true,
+        "history_truncated": false,
+        "omitted_messages": 0
+      },
+      "rag": {
+        "query": "Почему не работает авторизация? github github 403    ['Повторный запрос показал только HTTP 403.']",
+        "manifest": {
+          "id": 1,
+          "version": "0cf7263ba2d1eb51649a576d2b80f97123c8ec10c4c154c9d83f101d17fd4577",
+          "documents": 6,
+          "chunks": 36,
+          "indexed": "2026-10-14T15:18:00.230607+00:00"
+        },
+        "source_count": 6
+      },
+      "independent_assessment": {
+        "status": "PASS",
+        "diagnosis": "Explicitly refuses badtoken/rights/rate diagnosis without safe detailedcode.",
+        "claims": [
+          {
+            "claim": "Only403/repeatedsame status known; code/text/connection/time absent.",
+            "support": [
+              "T"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Bare403 no invalidtoken/rightsproof, nor empirical tokenfrequency.",
+            "support": [
+              "F2",
+              "T"
+            ],
+            "judgment": "SUPPORTED"
+          },
+          {
+            "claim": "Rate onlyconditional on explicitrate_limit/remainingzero; repositoryprivateaccess separate.",
+            "support": [
+              "F2"
+            ],
+            "judgment": "SUPPORTED_UNCERTAINTY"
+          },
+          {
+            "claim": "Get safe error/time/header/access/operation details, don'tdisclosesecrets or rotateasguess.",
+            "support": [
+              "F1",
+              "F2",
+              "F3 safe metadata"
+            ],
+            "judgment": "SUPPORTED_RELEVANT_ACTIONS"
+          },
+          {
+            "claim": "If later confirmedrate then waitreset/reducepolling; no numericreset invented.",
+            "support": [
+              "F2"
+            ],
+            "judgment": "SUPPORTED_CONDITIONAL"
+          },
+          {
+            "claim": "Escalate safe evidence/attempts if unresolved, syntheticaccountlimits.",
+            "support": [
+              "F3"
+            ],
+            "judgment": "SUPPORTED_GENERAL_GUIDANCE"
+          }
+        ],
+        "limitations": [
+          "Some provider-auth/source-order guidance cites Local/DeepSeek FAQ while ticket componentGitHub. This is tangential and not authoritative documentation of GitHub's actual credential-loading path. No DEEPSEEKkey/GitHub source mapping or specific wrong path/action asserted.",
+          "Fresh fixture111651... has one currentrun and only two prioruser messages; no canceled or retried answer contaminated semantic twin comparison."
+        ]
+      },
+      "immutable_private_input_sha256": "3b71e43f4bccce70b457e06c764fbd4e79ee9ef99838dd7d5651e6c3a05232bc"
+    }
+  ]
+}

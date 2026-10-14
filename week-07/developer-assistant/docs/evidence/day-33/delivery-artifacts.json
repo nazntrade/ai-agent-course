@@ -1,0 +1,197 @@
+{
+  "schema_version": "d33-public-artifact-proof-v1",
+  "delivery_folder": "Current task (user Desktop); media are delivered separately, not committed as large binaries",
+  "word": {
+    "filename": "D33_Учебная_документация.docx",
+    "sha256": "e807ef4f26f63e2e4efb8c0f5daec4dc959be2b15cc4a7cfa886ea4000cf8c4c",
+    "pages": 22,
+    "illustrations": 11,
+    "tables": 4,
+    "visual_review": "All22rendered pages inspected; actual screenshots and explanation tied to week7.",
+    "render_method": "Built-in canonical renderer unavailable (LibreOffice absent); dedicated Word export then Poppler render; isolated owned Word instance only."
+  },
+  "video": {
+    "format": "mp4",
+    "video": "1920x1080 H264 30fps",
+    "audio": "AAC stereo 48000Hz; see actual metadata for bitrate",
+    "chapters": 27,
+    "duration_s": 1415.733,
+    "bytes": 90716354,
+    "sha256": "caff69e0a8759ffcb49c09017335b4de9c2c5c7d4efa85fd202f7688b8d76fbd",
+    "full_decode_exit_code": 0,
+    "full_decode_errors": "",
+    "audio_levels_db": {
+      "mean_volume": -24.2,
+      "max_volume": -4.3
+    },
+    "source": "Genuine CUA browser captures with actual elapsed capture timestamps. Edited pauses and zoom use captured pixels only; offline synthesized Russian narration and baked captions.",
+    "human_listening_performed": false,
+    "audio_qa_limit": "Complete technical decode, stream inspection and audio signal levels; human listening is not available in current tools.",
+    "visual_review": "PASS_ALL_27_CHAPTERS"
+  },
+  "coverage": [
+    {
+      "chapter": 1,
+      "title": "D33 · поддержка пользователей",
+      "start": 0,
+      "end": 62.0
+    },
+    {
+      "chapter": 2,
+      "title": "Два входа · одна история",
+      "start": 62.0,
+      "end": 112.067
+    },
+    {
+      "chapter": 3,
+      "title": "Основной процесс остановлен",
+      "start": 112.067,
+      "end": 160.433
+    },
+    {
+      "chapter": 4,
+      "title": "FAQ работает без Main",
+      "start": 160.433,
+      "end": 206.667
+    },
+    {
+      "chapter": 5,
+      "title": "Сохранение обращения · ещё не AI",
+      "start": 206.667,
+      "end": 259.967
+    },
+    {
+      "chapter": 6,
+      "title": "Контекст пользователя и тикета",
+      "start": 259.967,
+      "end": 316.867
+    },
+    {
+      "chapter": 7,
+      "title": "Настоящий MCP · два read-only инструмента",
+      "start": 316.867,
+      "end": 374.7
+    },
+    {
+      "chapter": 8,
+      "title": "RAG · инструкция с проверяемым источником",
+      "start": 374.7,
+      "end": 430.1
+    },
+    {
+      "chapter": 9,
+      "title": "Кто кому отправляет данные",
+      "start": 430.1,
+      "end": 496.367
+    },
+    {
+      "chapter": 10,
+      "title": "Выбор модели · очередь и ожидание",
+      "start": 496.367,
+      "end": 555.1
+    },
+    {
+      "chapter": 11,
+      "title": "Local · 401 после прежней замены ключа",
+      "start": 555.1,
+      "end": 616.7
+    },
+    {
+      "chapter": 12,
+      "title": "DeepSeek · те же факты, отдельный запрос",
+      "start": 616.7,
+      "end": 674.0
+    },
+    {
+      "chapter": 13,
+      "title": "GitHub rate_limit · ответ Local",
+      "start": 674.0,
+      "end": 721.9
+    },
+    {
+      "chapter": 14,
+      "title": "GitHub rate_limit · ответ DeepSeek",
+      "start": 721.9,
+      "end": 766.3
+    },
+    {
+      "chapter": 15,
+      "title": "Local connection_refused · ответ Local",
+      "start": 766.3,
+      "end": 818.567
+    },
+    {
+      "chapter": 16,
+      "title": "Local connection_refused · ответ DeepSeek",
+      "start": 818.567,
+      "end": 865.667
+    },
+    {
+      "chapter": 17,
+      "title": "403 без подробностей · Local",
+      "start": 865.667,
+      "end": 908.567
+    },
+    {
+      "chapter": 18,
+      "title": "403 без подробностей · DeepSeek",
+      "start": 908.567,
+      "end": 953.5
+    },
+    {
+      "chapter": 19,
+      "title": "Новые факты · старый ответ помечен",
+      "start": 953.5,
+      "end": 1000.667
+    },
+    {
+      "chapter": 20,
+      "title": "Уточнение · новый MCP-снимок",
+      "start": 1000.667,
+      "end": 1053.367
+    },
+    {
+      "chapter": 21,
+      "title": "Stop · отдельный явный повтор",
+      "start": 1053.367,
+      "end": 1100.667
+    },
+    {
+      "chapter": 22,
+      "title": "Учебные пользователи и границы доступа",
+      "start": 1100.667,
+      "end": 1152.533
+    },
+    {
+      "chapter": 23,
+      "title": "Некорректная AI-конфигурация · ручной режим",
+      "start": 1152.533,
+      "end": 1199.2
+    },
+    {
+      "chapter": 24,
+      "title": "Telegram · только явное действие владельца",
+      "start": 1199.2,
+      "end": 1255.2
+    },
+    {
+      "chapter": 25,
+      "title": "Эскалация и решение · разные события",
+      "start": 1255.2,
+      "end": 1304.6
+    },
+    {
+      "chapter": 26,
+      "title": "Код, GitHub и связь с неделей 7",
+      "start": 1304.6,
+      "end": 1366.6
+    },
+    {
+      "chapter": 27,
+      "title": "Что реализовано и что остаётся ограничением",
+      "start": 1366.6,
+      "end": 1415.733
+    }
+  ],
+  "copy_integrity": "Both Desktop output copies SHA256 matched source after copy."
+}

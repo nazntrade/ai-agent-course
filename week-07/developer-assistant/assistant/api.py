@@ -134,6 +134,10 @@ def create_app(settings=None):
     @app.get('/api/chats/{cid}/tasks')
     def chat_tasks(cid:str,before:int | None=Query(default=None,ge=1),limit:int=Query(default=50,ge=1,le=200)):
         return store.chat_tasks(cid,before,limit)
+    @app.get('/api/support')
+    async def support():
+        from .launch import support_status
+        return await asyncio.to_thread(support_status)
     @app.get('/api/health')
     def health():
         return {'application':'developer-assistant','version':'1.0.0','status':'ok'}

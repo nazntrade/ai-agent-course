@@ -62,7 +62,18 @@ RAG excludes internal specification/evidence folders from the answer corpus.
 
 ## Provider parameters
 
-Runtime configuration is private local-data/settings.json. App defaults: temperature 0.6,
+Nonsecret URL/model/runtime and generation parameters are read from private
+local-data/settings.json; API keys are not read from that JSON. Credentials are
+loaded by assistant/config.py from the process environment, after optional module
+.env loading with load_dotenv(override=False). Existing process variables take
+precedence over .env. DeepSeek uses DEEPSEEK_API_KEY; Local uses LOCAL_LLM_API_KEY.
+Settings are loaded once at the start of each independent Main or Support process.
+Restarting Main reuses an already healthy Support and does not reload Support's
+environment. Identify the process that issued the failing request before a reload;
+restart only that affected process. A restart or key replacement is not proof that
+the intended credential was loaded or accepted; check the next safe response.
+
+App defaults: temperature 0.6,
 max output 8192 tokens, evidence context budget 18000 characters. Model server context
 window is separate from the per-question RAG evidence budget. Local working settings can
 provide a larger actual context window without inserting every document into every request.

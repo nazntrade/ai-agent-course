@@ -1,0 +1,116 @@
+{
+  "users": [
+    {
+      "id": "demo-alex",
+      "name": "Alex · demo",
+      "plan": "Personal",
+      "product": "Developer Assistant"
+    },
+    {
+      "id": "demo-jamie",
+      "name": "Jamie · demo",
+      "plan": "Team",
+      "product": "Developer Assistant"
+    },
+    {
+      "id": "demo-sam",
+      "name": "Sam · demo",
+      "plan": "Personal",
+      "product": "Developer Assistant"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "demo-auth",
+      "owner": "demo-alex",
+      "title": "DeepSeek sign-in error",
+      "product": "Developer Assistant",
+      "component": "deepseek",
+      "description": "Почему не работает авторизация? Запрос DeepSeek вернул HTTP 401 и error_code invalid_key.",
+      "diagnostics": {
+        "component": "deepseek",
+        "status_code": 401,
+        "error_code": "invalid_key",
+        "attempted_steps": [
+          "Checked the selected provider"
+        ]
+      }
+    },
+    {
+      "id": "demo-rate",
+      "owner": "demo-alex",
+      "title": "GitHub review temporarily blocked",
+      "product": "Developer Assistant",
+      "component": "github",
+      "description": "Почему не работает авторизация? GitHub вернул HTTP 403, error_code rate_limit, remaining=0. Это демонстрационные данные.",
+      "diagnostics": {
+        "component": "github",
+        "status_code": 403,
+        "error_code": "rate_limit",
+        "attempted_steps": [
+          "Checked the rate-limit response; remaining is zero"
+        ]
+      }
+    },
+    {
+      "id": "demo-local",
+      "owner": "demo-alex",
+      "title": "Local server connection refused",
+      "product": "Developer Assistant",
+      "component": "local",
+      "description": "Почему не работает авторизация? Local endpoint сообщает connection_refused.",
+      "diagnostics": {
+        "component": "local",
+        "connection_state": "connection_refused",
+        "attempted_steps": [
+          "Selected Local in the application"
+        ]
+      }
+    },
+    {
+      "id": "demo-index",
+      "owner": "demo-jamie",
+      "title": "Documents were changed",
+      "product": "Developer Assistant",
+      "component": "rag",
+      "description": "Я изменил документацию, но ответ всё ещё опирается на старую версию. Что сделать?",
+      "diagnostics": {
+        "component": "rag",
+        "attempted_steps": [
+          "Saved the updated documentation"
+        ]
+      }
+    },
+    {
+      "id": "demo-stop",
+      "owner": "demo-jamie",
+      "title": "How to stop a request?",
+      "product": "Developer Assistant",
+      "component": "chat",
+      "description": "Как остановить ответ и сохранить историю?",
+      "diagnostics": {
+        "component": "chat"
+      }
+    },
+    {
+      "id": "demo-unknown",
+      "owner": "demo-sam",
+      "title": "An unexplained problem",
+      "product": "Developer Assistant",
+      "component": "unknown",
+      "description": "Приложение не работает. Что случилось?",
+      "diagnostics": {}
+    },
+    {
+      "id": "demo-notify",
+      "owner": "demo-sam",
+      "title": "Telegram summary missing",
+      "product": "Developer Assistant",
+      "component": "telegram",
+      "description": "Как отправить сводку обращения владельцу в Telegram?",
+      "diagnostics": {
+        "component": "telegram"
+      }
+    }
+  ]
+}

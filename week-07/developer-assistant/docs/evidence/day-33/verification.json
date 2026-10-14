@@ -1,0 +1,237 @@
+{
+  "schema_version": "d33-public-verification-v1",
+  "created_utc": "2026-10-14T16:37:45.154008+00:00",
+  "status": "BEHAVIOR_VERIFIED_ARTIFACTS_REVIEWED_PUBLICATION_PENDING_AT_FILE_CREATION",
+  "requirements": [
+    {
+      "id": "D33-01",
+      "requirement": "Separate support page and main-app Support button open the same support service/tickets; independent launch and non-AI operation survive main app shutdown."
+    },
+    {
+      "id": "D33-02",
+      "requirement": "Real persistent ticket creation, list, conversation/follow-up and state distinguish answered from solved; reload/restart preserves history."
+    },
+    {
+      "id": "D33-03",
+      "requirement": "RAG retrieves relevant product FAQ/documentation with paths/versions and citations; no hardcoded answer or whole-FAQ-only prompt."
+    },
+    {
+      "id": "D33-04",
+      "requirement": "Actual SDK MCP tools/list and tools/call retrieve bounded current user/ticket JSON context from separate server."
+    },
+    {
+      "id": "D33-05",
+      "requirement": "Full model answers depend on correct ticket facts and earlier attempts; same question differs for known diagnostic cases."
+    },
+    {
+      "id": "D33-06",
+      "requirement": "Demo users are clearly synthetic; server-owned scope checks every relevant API/tool and blocks foreign ticket access."
+    },
+    {
+      "id": "D33-07",
+      "requirement": "Unknown facts/context are not invented; bounded follow-up and escalation, stale ticket/version results not treated as current."
+    },
+    {
+      "id": "D33-08",
+      "requirement": "Selected Local and DeepSeek both work with preserved parameters and no hidden provider fallback; raw final answers and settings identity retained."
+    },
+    {
+      "id": "D33-09",
+      "requirement": "Visible wait/streaming, Stop, queue and restart/late-result guards; model code/content not executed in browser or host."
+    },
+    {
+      "id": "D33-10",
+      "requirement": "Telegram support/escalation/report goes only to saved owner with explicit action/opt-in and honest delivery state."
+    },
+    {
+      "id": "D33-11",
+      "requirement": "First run, separate support data and MCP lifecycles are reproducible using existing trusted entrypoint without dependencies/keys forcing non-AI features closed."
+    },
+    {
+      "id": "D33-12",
+      "requirement": "Existing D31/D32 UI, APIs, persisted user data, provider settings and review/help functionality preserved."
+    },
+    {
+      "id": "D33-13",
+      "requirement": "Complete SPEC/PLAN/ACCEPTANCE, readiness and architecture/spec independent reviews before implementation; incremental single writer."
+    },
+    {
+      "id": "D33-14",
+      "requirement": "Detailed Russian teaching DOCX in Current task explains theory and actual support implementation, data senders/receivers, JSON/MCP/RAG, models, Telegram/GitHub role and week7, with real screenshots."
+    },
+    {
+      "id": "D33-15",
+      "requirement": "Published reproducible code and detailed wide high-quality MP4 in Current task demonstrate every D33 requirement, both entries, RAG/MCP context and useful answers."
+    },
+    {
+      "id": "D33-16",
+      "requirement": "Full independent acceptance, sanitized commit/push+remote verification and clean task scope; one final truthful owner Telegram notification after completion."
+    }
+  ],
+  "tests": {
+    "developer_current_suite": {
+      "tests": 115,
+      "skips": 0,
+      "failures": 0,
+      "seconds": 16.99
+    },
+    "independent_tester": {
+      "full_suite_tests": 113,
+      "skips": 0,
+      "failures": 0,
+      "seconds": 16.403,
+      "additional_actual_sdk_negative_controls": 2,
+      "additional_negative_control_failures": 0,
+      "note": "Independent full113 was followed by independently executed2 actual SDK tests. Do not represent this as an independent full115 rerun."
+    }
+  },
+  "behavior_evidence": [
+    "Both entries open same support service and saved tickets",
+    "Main process stopped: Support FAQ and ticket creation remained operational; borrowed model process preserved",
+    "Real SDK stdio tools/list and get_user_context/get_ticket_context, fresh versioned immutable JSON, no direct JSON fallback",
+    "FTS5/BM25 retrieval over6documents36chunks; update/removal/no-relevant-source controls",
+    "Full live Local and DeepSeek answers compared across4diagnostic scenarios",
+    "Stop during actual provider request remains cancelled with no late answer; explicit Retry new run",
+    "Changed facts preserve historical answer warning and cause fresh MCP snapshot",
+    "Synthetic owner scope/stale-tab rejection, manual mode under invalid AI config",
+    "Explicit Telegram summary acknowledged once; repeated click deduplicated; escalation without extra notification",
+    "Main D31 real Local /help git branch and D32 PR context regression preserved"
+  ],
+  "source_inventory": [
+    {
+      "path": "README.md",
+      "sha256": "e18c09884af946438e7767dde636e7e54ea12ab4fb26fe34cc171cce01916f9a"
+    },
+    {
+      "path": "assistant/api.py",
+      "sha256": "4d8749b6857c42be3544e15a2818a1919650bb0653f802fbe872de8d26a40d6b"
+    },
+    {
+      "path": "assistant/launch.py",
+      "sha256": "a45678de473e8f70d54c03a98323a1b2811b90450e90f470ee663465c509fe5a"
+    },
+    {
+      "path": "static/index.html",
+      "sha256": "9fbd811391bee8134190ba25c4bc59f1f15abdff8b9da728dd6917e538ac4809"
+    },
+    {
+      "path": "static/support_link.js",
+      "sha256": "88ba8f2da241f43c0c742a16e1f279803b31690dc2c1dc291eccf52bc1f7abf8"
+    },
+    {
+      "path": "assistant/support_api.py",
+      "sha256": "a8c7eb96618ad21889a8198771558b1e9b580fc305b1223fbbea51f5feb2fee3"
+    },
+    {
+      "path": "assistant/support_store.py",
+      "sha256": "ad894011ee65f56f1b005d1409ab404e6bfa13bcfa399276d90cf92e9958e5e0"
+    },
+    {
+      "path": "assistant/support_mcp.py",
+      "sha256": "d45c1e5014dc320c57d58927c3205fdb681f1d643ca12fda095e9dc11ec0537d"
+    },
+    {
+      "path": "assistant/support_rag.py",
+      "sha256": "b632947d1372f4de5b7dd879fa36cd518289879948151a7b534489c65ca502eb"
+    },
+    {
+      "path": "assistant/support_service.py",
+      "sha256": "d8742f7200321b01aed9d1fc8e7e309a4628167d2ab70872ef17c4dff0589bec"
+    },
+    {
+      "path": "static/support/index.html",
+      "sha256": "e752cfcb8188e147cf65c22caaf19be437aca44b732b630cabac427a06b194a1"
+    },
+    {
+      "path": "static/support/app.js",
+      "sha256": "bce824834093e897520d3fa97411dcf342aa8091c2f988f2b173cd6c9998c82b"
+    },
+    {
+      "path": "static/support/style.css",
+      "sha256": "e721a06e8e332dae667b721f785384fae7e2f12a3762d7e3d1286fa6f62ec85f"
+    },
+    {
+      "path": "examples/support/users-tickets.json",
+      "sha256": "b75402315a861a841bab9ee33c65ce96d1113e5d751cadd77d19294ec2738459"
+    },
+    {
+      "path": "docs/support/providers.md",
+      "sha256": "694c6d4165d5f4e1bc91c7b7c0be98e33df5b475ce99304f6ae037b713b26e8a"
+    },
+    {
+      "path": "docs/support/reviews.md",
+      "sha256": "470184214da05b748163cc4982db7c0d873ae5788a57595e73517aba94f5ec0c"
+    },
+    {
+      "path": "docs/support/documents.md",
+      "sha256": "38f2de6ca20919cc8f7ecdf6e43842aaff4339ee8015286cb886a514a94da490"
+    },
+    {
+      "path": "docs/support/tickets.md",
+      "sha256": "715d67dfa36548187ea44f7409c53de2d8887765016387558277326b248eb4df"
+    },
+    {
+      "path": "tests/test_support.py",
+      "sha256": "9aa0c0a7b3e88301a02474f2c2ae2637531bebadf39dc7a5e748f7725640b942"
+    },
+    {
+      "path": "tests/test_support_boundary.py",
+      "sha256": "71abb63561d5fa390751a219aa9dfc0360acf5780a8632b1e2dcfd24510a71e3"
+    },
+    {
+      "path": "tests/scenarios/support-launch-preflight.json",
+      "sha256": "b2e76547d766c7d608c6209652a8e0cd15eac913ffc2be57365328929507764e"
+    },
+    {
+      "path": "tests/scenarios/support-launch-preflight.py",
+      "sha256": "a92d5fcd16b45b8c30c6926918f602256ae564810c35810c271ee9e5ab4886a8"
+    },
+    {
+      "path": "tests/test_support_review.py",
+      "sha256": "d6a51958d4d0fbdfa6893b9b40a069f695e09a3f6f2d0121d0703e683199b5ea"
+    },
+    {
+      "path": "tests/scenarios/support-post-review-controls.json",
+      "sha256": "b2e76547d766c7d608c6209652a8e0cd15eac913ffc2be57365328929507764e"
+    },
+    {
+      "path": "tests/scenarios/support-post-review-controls.py",
+      "sha256": "a2caeb3fd56040ce3f229e9d51c58b049681d5bad650e72691a127af0decf688"
+    },
+    {
+      "path": "docs/architecture.md",
+      "sha256": "195f2d9219dece2a87a7e4d993b01f15514ced3e155db34c0c2eef01a906eecc"
+    },
+    {
+      "path": "tests/test_support_grounding.py",
+      "sha256": "26f24597882220fd6e9e7a50b36cca578d1cc339a36b8636c10a6c005aee1859"
+    },
+    {
+      "path": "tests/scenarios/support-grounding-controls.json",
+      "sha256": "b2e76547d766c7d608c6209652a8e0cd15eac913ffc2be57365328929507764e"
+    },
+    {
+      "path": "tests/scenarios/support-grounding-controls.py",
+      "sha256": "2214e9a28accd721101d5622b4d5613b1b5afa4b65e6100166b08d30fc014dd7"
+    },
+    {
+      "path": "tests/test_support_mcp_negative.py",
+      "sha256": "c15084bfaf9bc4cbb5f61d9797487d3f53ae7d649b44f76d27345991e9a6ee1a"
+    },
+    {
+      "path": "tests/scenarios/support-mcp-negative-controls.json",
+      "sha256": "b2e76547d766c7d608c6209652a8e0cd15eac913ffc2be57365328929507764e"
+    },
+    {
+      "path": "tests/scenarios/support-mcp-negative-controls.py",
+      "sha256": "c1efe07b0df28471add151f463fe1299ca6ef1e01c4c22dc4c63e46f7f356205"
+    }
+  ],
+  "independent_integration_report_sha256": "ea2c48d24a696ed9a2103b5895ad4f523c78cd6b2a6f61b1e1d43752ce6b4527",
+  "limitations": [
+    "Synthetic local demo personas are not production authentication or a live external CRM.",
+    "Completed inference/citations never automatically mean verified quality or resolved ticket.",
+    "Current passing cases do not guarantee all future model answers. Qualifications and initial failure are in live-model-comparison.json.",
+    "Final publication/remote clean-worktree and completion notification are checked after commit; their private receipts are not fabricated in this pre-publication file."
+  ]
+}
