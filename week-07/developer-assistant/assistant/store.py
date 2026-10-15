@@ -48,6 +48,18 @@ class Store:
             rows=c.execute("SELECT id,payload FROM tasks WHERE status IN ('running','queued')").fetchall() if recover else []
             for r in rows:
                 payload=json.loads(r['payload']);payload.update(status='failed',partial='',answer='',error='Interrupted by application restart. Retry creates a new run.')
+                if payload.get('mode')=='files' and 'files_context_budget' in payload:
+                    from .maintenance import validate_files_budget
+                    validate_files_budget(payload['files_context_budget'])
+                if payload.get('mode')=='files' and re.fullmatch(r'[0-9a-f]{32}',r['id']):
+                    from .maintenance import Run
+                    folder=self.path.parent/'maintenance'/r['id']
+                    if (folder/'manifest.json').exists():
+                        run=Run(folder)
+                        if ('files_context_budget' in payload)!=('files_context_budget' in run.m) or payload.get('files_context_budget')!=run.m.get('files_context_budget'):raise ValueError('Project-files restart context budget mismatch')
+                        run.cancel();run.reload()
+                        if run.m['stage']!='recovery_required':run.m['stage']='interrupted';run.save()
+                        payload['maintenance']=run.public()
                 for step in payload.get('plan',[]):
                     if step.get('status') in {'running','pending'}:
                         step['status']='failed'
@@ -176,7 +188,13 @@ class Store:
     def save_task(self,t):
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            old=c.execute('SELECT 1 FROM tasks WHERE id=?',(t['id'],)).fetchone()
+            old=c.execute('SELECT payload FROM tasks WHERE id=?',(t['id'],)).fetchone()
+            if t.get('mode')=='files':
+                from .maintenance import validate_files_budget
+                if 'files_context_budget' in t:validate_files_budget(t['files_context_budget'])
+                if old:
+                    previous=json.loads(old['payload'])
+                    if ('files_context_budget' in previous)!=('files_context_budget' in t) or previous.get('files_context_budget')!=t.get('files_context_budget'):raise ValueError('Immutable task files context budget changed')
             cid=t.get('chat_id')
             if not old and cid:
                 self.check_chat(c,cid,t['project_id'])
@@ -190,6 +208,20 @@ class Store:
                 if chat['title']=='New chat':
                     c.execute('UPDATE chats SET title=? WHERE id=?',(t['question'][:64],cid))
 
+    def hydrate_files(self,data):
+        if data.get('mode')=='files' and 'files_context_budget' in data:
+            from .maintenance import validate_files_budget
+            validate_files_budget(data['files_context_budget'])
+        if data.get('mode')=='files' and re.fullmatch(r'[0-9a-f]{32}',data.get('id','')):
+            from .maintenance import Run
+            folder=self.path.parent/'maintenance'/data['id']
+            if (folder/'manifest.json').exists():
+                run=Run(folder)
+                if (run.m['id'],run.m['project_id'],run.m['chat_id'])!=(data['id'],data['project_id'],data.get('chat_id')):raise ValueError('Project-files history binding mismatch')
+                if ('files_context_budget' in data)!=('files_context_budget' in run.m) or data.get('files_context_budget')!=run.m.get('files_context_budget'):raise ValueError('Project-files history context budget mismatch')
+                data['maintenance']=run.public()
+        return data
+
     def task(self,tid):
         with self.connect() as c:
             r=c.execute('SELECT t.payload,tc.chat_id FROM tasks t LEFT JOIN task_chats tc ON tc.task_id=t.id WHERE t.id=?',(tid,)).fetchone()
@@ -197,7 +229,7 @@ class Store:
             raise ValueError('Unknown task')
         data=json.loads(r[0])
         if r['chat_id']: data['chat_id']=r['chat_id']
-        return data
+        return self.hydrate_files(data)
 
     def tasks(self,pid):
         with self.connect() as c:
@@ -206,7 +238,7 @@ class Store:
         for r in rows:
             data=json.loads(r['payload'])
             if r['chat_id']: data['chat_id']=r['chat_id']
-            result.append(data)
+            result.append(self.hydrate_files(data))
         return result
 
     def check_chat(self,c,cid,pid,active=True):
@@ -270,5 +302,8 @@ class Store:
             rows=c.execute('SELECT t.rowid AS position,t.payload FROM tasks t JOIN task_chats tc ON tc.task_id=t.id WHERE tc.chat_id=?'+(' AND t.rowid<?' if before else '')+' ORDER BY t.rowid DESC LIMIT ?',([cid,before,limit+1] if before else [cid,limit+1])).fetchall()
         more=len(rows)>limit;rows=rows[:limit];result=[]
         for r in reversed(rows):
-            t=json.loads(r['payload']);t['chat_id']=cid;t['run_order']=r['position'];result.append(t)
+            t=json.loads(r['payload']);t['chat_id']=cid;t['run_order']=r['position'];result.append(self.hydrate_files(t))
         return {'tasks':result,'next_before':rows[-1]['position'] if more else None}
+
+
+

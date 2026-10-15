@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 import asyncio
+import json
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict,model_validator
 from .config import Settings,MODULE
 from .store import Store
 from .runtime import LocalRuntime
@@ -26,9 +27,14 @@ class TaskBody(Body):
     project_id: str
     question: str = Field(min_length=1,max_length=4000)
     provider: Literal['local','deepseek']='local'
-    mode: Literal['help','web']='help'
+    mode: Literal['help','web','files']='help'
     allow_tools: bool=False
     chat_id: str | None = Field(default=None,max_length=64)
+    files_context_chars: int | None=Field(default=None,strict=True)
+    @model_validator(mode='after')
+    def files_budget(self):
+        if self.files_context_chars is not None and (self.mode!='files' or self.files_context_chars not in (40000,100000)):raise ValueError('Only Project files may explicitly select integer40000 or integer100000')
+        return self
 class ChatBody(Body):
     title: str = Field(default='New chat',min_length=1,max_length=80)
 class ToolBody(Body):
@@ -53,6 +59,16 @@ class ReviewBody(Body):
     chat_id: str | None=None
     telegram: bool=False
     repository: str | None=Field(default=None,max_length=200)
+
+class FilesBinding(Body):
+    chat_id: str = Field(min_length=1,max_length=64)
+class FilesReview(FilesBinding):
+    revision: int = Field(ge=0,strict=True)
+    digest: str = Field(min_length=64,max_length=64)
+class FilesEdit(FilesBinding):
+    path: str = Field(min_length=1,max_length=240)
+    content: str = Field(max_length=512000)
+    expected_hash: str = Field(min_length=1,max_length=64)
 
 def create_app(settings=None):
     s=settings or Settings.load()
@@ -81,6 +97,9 @@ def create_app(settings=None):
         if origin and (urlsplit(origin).hostname not in {'127.0.0.1','localhost','::1'} or urlsplit(origin).port!=request.url.port):
             return JSONResponse({'error':'Cross-origin request rejected'},status_code=403)
         return await call_next(request)
+    from .maintenance import Conflict,WorkspaceLease,run_guard,new_files_budget
+    @app.exception_handler(Conflict)
+    async def files_conflict(request,e):return JSONResponse({'error':str(e)},status_code=409)
     @app.exception_handler(ValueError)
     async def value_error(request,e):
         return JSONResponse({'error':s.scrub(str(e))},status_code=400)
@@ -111,7 +130,7 @@ def create_app(settings=None):
         store.get_project(pid);return {'schedules':scheduler.list(pid)}
     @app.post('/api/schedules')
     def schedule(b:ScheduleBody):
-        if b.allow_tools: raise ValueError('Scheduled runs use the bounded default workflow')
+        if b.allow_tools or b.mode=='files': raise ValueError('Scheduled runs use the bounded default workflow')
         return scheduler.create(b.project_id,b.question,b.provider,b.due,b.interval_minutes,b.telegram,b.mode,b.chat_id)
     @app.post('/api/schedules/{sid}')
     def toggle_schedule(sid:str,b:ScheduleToggle):
@@ -143,7 +162,10 @@ def create_app(settings=None):
         return {'application':'developer-assistant','version':'1.0.0','status':'ok'}
     @app.get('/api/config')
     def config():
-        return s.public()
+        value=s.public()
+        try:value['files_context_default_chars']=new_files_budget(s.context_chars)['profile_default_chars']
+        except ValueError:value['files_context_default_chars']=None
+        return value
     @app.get('/api/projects')
     def projects():
         return {'projects':store.projects(),'default_id':default['id']}
@@ -186,7 +208,7 @@ def create_app(settings=None):
         store.get_project(pid);return {'tasks':store.tasks(pid)}
     @app.post('/api/tasks')
     async def task(b:TaskBody):
-        return service.create(b.project_id,b.question,b.provider,b.mode,b.allow_tools,b.chat_id)
+        return service.create(b.project_id,b.question,b.provider,b.mode,b.allow_tools,b.chat_id,b.files_context_chars)
     @app.get('/api/tasks/{tid}')
     def get_task(tid:str):
         return store.task(tid)
@@ -194,10 +216,16 @@ def create_app(settings=None):
     async def stop(tid:str):
         return service.cancel(tid)
     @app.post('/api/tasks/{tid}/retry')
-    async def retry(tid:str):
+    async def retry(tid:str,request:Request):
+        raw=await request.body()
+        if raw:
+            try:body=json.loads(raw)
+            except ValueError:raise ValueError('Retry accepts no override body') from None
+            if body!={}:raise ValueError('Retry preserves its recorded budget; submit a new goal to change it')
         old=store.task(tid)
         if old['status'] in {'queued','running'}:
             raise ValueError('Stop active task before retry')
+        if old['mode']=='files':return service.maintenance.retry(old)
         if old['mode']=='review':
             req=old.get('review_request')
             if not req:raise ValueError('Imported CI report cannot be retried; select PR for a manual review')
@@ -210,8 +238,45 @@ def create_app(settings=None):
             if t.get('review',{}).get('origin')=='ci':return dict(t['review'].get('notification',{'status':'not_recorded'}),duplicate_prevented=True)
             return await reviews.notify(t)
         return await service.report(tid)
+    def file_run(pid,tid,cid):
+        t=store.task(tid)
+        if t['project_id']!=pid or t.get('chat_id')!=cid:raise Conflict('Stale project/chat/task binding')
+        return service.maintenance.run_for(t)
+    def refresh_files(tid,run):
+        t=store.task(tid);t['maintenance']=run.public();store.save_task(t);return t['maintenance']
+    @app.get('/api/projects/{pid}/files/{tid}')
+    def files_manifest(pid:str,tid:str,chat_id:str):return file_run(pid,tid,chat_id).public()
+    @app.get('/api/projects/{pid}/files/{tid}/read')
+    def files_read(pid:str,tid:str,chat_id:str,path:str,start_line:int=Query(1,ge=1),count:int=Query(160,ge=1,le=200),continuation:str|None=None):
+        return file_run(pid,tid,chat_id).call('read_file',dict(path=path,start_line=start_line,count=count,continuation=continuation))
+    @app.get('/api/projects/{pid}/files/{tid}/diff')
+    def files_diff(pid:str,tid:str,chat_id:str,cursor:str|None=None):return file_run(pid,tid,chat_id).call('get_diff',dict(cursor=cursor))
+    @app.post('/api/projects/{pid}/files/{tid}/edit')
+    def files_edit(pid:str,tid:str,b:FilesEdit):
+        idle();run=file_run(pid,tid,b.chat_id)
+        with WorkspaceLease(run.m['root']),run_guard(run.folder):run.write(b.path,b.content,b.expected_hash)
+        return refresh_files(tid,run)
+    @app.post('/api/projects/{pid}/files/{tid}/checks')
+    def files_checks(pid:str,tid:str,b:FilesBinding):
+        idle();run=file_run(pid,tid,b.chat_id)
+        run.call('run_fixed_checks',{'suite':'static'});return refresh_files(tid,run)
+    @app.post('/api/projects/{pid}/files/{tid}/review')
+    def files_review(pid:str,tid:str,b:FilesReview):
+        idle();run=file_run(pid,tid,b.chat_id)
+        with WorkspaceLease(run.m['root']),run_guard(run.folder):run.review(b.revision,b.digest)
+        return refresh_files(tid,run)
+    @app.post('/api/projects/{pid}/files/{tid}/apply')
+    def files_apply(pid:str,tid:str,b:FilesReview):
+        idle();run=file_run(pid,tid,b.chat_id);run.transact(b.revision,b.digest);return refresh_files(tid,run)
+    @app.post('/api/projects/{pid}/files/{tid}/undo')
+    def files_undo(pid:str,tid:str,b:FilesBinding):
+        idle();run=file_run(pid,tid,b.chat_id);run.undo();return refresh_files(tid,run)
+    @app.post('/api/projects/{pid}/files/{tid}/recover')
+    def files_recover(pid:str,tid:str,b:FilesBinding):
+        idle();run=file_run(pid,tid,b.chat_id);run.recover();return refresh_files(tid,run)
     @app.get('/')
     def home():
         return FileResponse(MODULE/'static/index.html')
     app.mount('/static',StaticFiles(directory=MODULE/'static'),name='static')
     return app
+

@@ -14,11 +14,15 @@ class Service:
     def __init__(self,store,settings,provider):
         self.store=store;self.settings=settings;self.provider=provider
         self.jobs={};self.lock=asyncio.Lock()
+        from .maintenance_service import Maintenance
+        self.maintenance=Maintenance(self)
 
     def busy(self):
         return any(not j.done() for j in self.jobs.values())
 
-    def create(self,pid,question,provider,mode='help',allow_tools=False,chat_id=None):
+    def create(self,pid,question,provider,mode='help',allow_tools=False,chat_id=None,files_context_chars=None):
+        if mode=='files':return self.maintenance.create(pid,question,provider,chat_id,files_context_chars)
+        if files_context_chars is not None:raise ValueError('Context override is only available for Project files')
         self.store.get_project(pid)
         chat_id=self.store.resolve_chat(pid,chat_id)
         q=self.settings.scrub(question.strip())
@@ -37,8 +41,13 @@ class Service:
 
     def cancel(self,tid):
         t=self.store.task(tid)
+        if t.get('mode')=='files' and t.get('maintenance',{}).get('journal',{}):
+            journal=t['maintenance']['journal']
+            if journal['status'] not in {'applied','undone','noop','rolled_back'}:
+                self.maintenance.cancel(t);self.store.save_task(t);return t
         if t['status'] not in {'queued','running'}:
             return t
+        if t.get('mode')=='files':self.maintenance.cancel(t)
         t['status']='cancelled';t['partial']='';t['error']='Stopped by owner'
         for p in t['plan']:
             if p['status']!='completed':
@@ -173,3 +182,6 @@ Keep the answer useful, usually under 250 words unless the user requests detail.
 
     async def report(self,tid):
         return await send_report(self.settings,self.store,tid)
+
+
+
