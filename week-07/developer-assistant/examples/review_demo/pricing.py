@@ -2,4 +2,6 @@
 def quote(amount: float, discount_percent: float) -> dict:
     if amount < 0 or not 0 <= discount_percent <= 100:
         raise ValueError('Amount/discount outside contract')
-    return {'total': round(amount * (1 - discount_percent / 100), 2)}
+    discount_ratio = discount_percent / 100
+    total = round(amount * (1 - discount_ratio), 2)
+    return {'total': total}
